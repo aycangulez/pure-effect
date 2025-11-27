@@ -26,13 +26,13 @@ const validateRegistration = (input) => {
 // These functions do NOT run the DB call. They return a Command object.
 // The 'next' function defines what happens with the result of the async call.
 const findUser = (email) => {
-    const cmd = () => db.findUser(email); // The work to do later
+    const cmdFindUser = () => db.findUser(email); // The work to do later
     const next = (user) => Success(user); // Wrap result in Success
     return Command(cmd, next);
 };
 
 const saveUser = (input) => {
-    const cmd = () => db.saveUser(input);
+    const cmdSaveUser = () => db.saveUser(input);
     const next = (saved) => Success(saved);
     return Command(cmd, next);
 };
@@ -51,7 +51,7 @@ const registerUserFlow = (input) =>
     )(input);
 
 // The Imperative Shell
-async function main() {
+async function registerUser() {
     const input = { email: 'new@test.com', password: 'password123' };
 
     // logic is just a data structure until we pass it to runEffect
@@ -66,8 +66,6 @@ async function main() {
         console.error('Error:', result.error);
     }
 }
-
-main();
 ```
 
 ## Testing Without Mocks
@@ -75,8 +73,6 @@ main();
 The biggest benefit of **Pure Effect** is testability. Because `registerUserFlow` returns a data structure (a tree of objects) instead of running a Promise, you can test your logic without mocking the database.
 
 ```js
-import assert from 'assert';
-
 // 1. Test Validation Failure
 const badInput = { email: 'bad-email', password: '123' };
 const result = registerUserFlow(badInput);
@@ -90,7 +86,12 @@ const step1 = registerUserFlow(goodInput);
 
 // Check if the first thing the code does is try to find a user
 assert.equal(step1.type, 'Command');
-assert.equal(step1.cmd.name, 'findUser');
+assert.equal(step1.cmd.name, 'cmdFindUser');
+
+// Check if the next thing the code will do is to save a user
+const step2 = step1.next(null);
+assert.equal(step2.type, 'Command');
+assert.equal(step2.cmd.name, 'cmdSaveUser');
 // ✅ We verified the *intent* of the code without touching a real DB.
 ```
 
