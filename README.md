@@ -52,8 +52,6 @@ const registerUserFlow = (input) =>
 
 // The Imperative Shell
 async function registerUser() {
-    const input = { email: 'new@test.com', password: 'password123' };
-
     // logic is just a data structure until we pass it to runEffect
     const logic = registerUserFlow(input);
 
