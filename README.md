@@ -28,13 +28,13 @@ const validateRegistration = (input) => {
 const findUser = (email) => {
     const cmdFindUser = () => db.findUser(email); // The work to do later
     const next = (user) => Success(user); // Wrap result in Success
-    return Command(cmd, next);
+    return Command(cmdFindUser, next);
 };
 
 const saveUser = (input) => {
     const cmdSaveUser = () => db.saveUser(input);
     const next = (saved) => Success(saved);
-    return Command(cmd, next);
+    return Command(cmdSaveUser, next);
 };
 
 const ensureEmailAvailable = (user) => {
