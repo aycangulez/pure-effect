@@ -4,6 +4,8 @@
 
 It implements the "Functional Core, Imperative Shell" pattern, allowing you to decouple your business logic from external side effects like database calls or API requests. Instead of executing side effects immediately, your functions return Commands which are executed later by an interpreter.
 
+**Pure Effect** comes with JSDoc type annotations, so it can be used with TypeScript as well.
+
 ## Installation
 
 ```bash

@@ -1,19 +1,23 @@
+// @ts-check
+
 import { strict as assert } from 'assert';
 import { Success, Failure, Command, effectPipe, runEffect } from '../index.js';
 
+/** @typedef {{id?: number, email: string, password: string}} User */
+
 const db = {
     users: new Map(),
-    async findUserByEmail(email) {
+    async findUserByEmail(/** @type string */ email) {
         return this.users.get(email) || null;
     },
-    async saveUser(user) {
-        const u = { id: Date.now(), ...user };
+    async saveUser(/** @type {User} */ user) {
+        const u = { ...user, id: Date.now() };
         this.users.set(user.email, u);
         return u;
     },
 };
 
-function validateRegistration(input) {
+function validateRegistration(/** @type {User} */ input) {
     const { email, password } = input;
     if (!email?.includes('@')) {
         return Failure('Invalid email format.');
@@ -24,26 +28,26 @@ function validateRegistration(input) {
     return Success(input);
 }
 
-function findUserByEmail(email) {
+function findUserByEmail(/** @type string */ email) {
     const cmdFindUser = () => db.findUserByEmail(email);
-    const next = (foundUser) => Success(foundUser);
+    const next = (/** @type {User} */ foundUser) => Success(foundUser);
     return Command(cmdFindUser, next);
 }
 
-function ensureEmailIsAvailable(foundUser) {
+function ensureEmailIsAvailable(/** @type {User} */ foundUser) {
     return foundUser ? Failure('Email already in use.') : Success(true);
 }
 
-function saveUser(input) {
+function saveUser(/** @type {User} */ input) {
     const { email, password } = input;
     const hashedPassword = `hashed_${password}`;
     const userToSave = { email, password: hashedPassword };
     const cmdSaveUser = () => db.saveUser(userToSave);
-    const next = (savedUser) => Success(savedUser);
+    const next = (/** @type {User} */ savedUser) => Success(savedUser);
     return Command(cmdSaveUser, next);
 }
 
-const registerUserFlow = (input) =>
+const registerUserFlow = (/** @type {User} */ input) =>
     effectPipe(
         validateRegistration,
         () => findUserByEmail(input.email),
@@ -51,7 +55,7 @@ const registerUserFlow = (input) =>
         () => saveUser(input)
     )(input);
 
-async function registerUser(input) {
+async function registerUser(/** @type {User} */ input) {
     return await runEffect(registerUserFlow(input));
 }
 

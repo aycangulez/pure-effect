@@ -1,6 +1,6 @@
 {
     "name": "pure-effect",
-    "version": "0.1.2",
+    "version": "0.2.0",
     "description": "A tiny, zero-dependency effect system for writing pure, testable JavaScript without mocks.",
     "type": "module",
     "exports": "./index.js",
@@ -11,6 +11,8 @@
     "homepage": "https://github.com/aycangulez/pure-effect",
     "license": "MIT",
     "devDependencies": {
+        "@types/mocha": "^10.0.10",
+        "@types/node": "^24.10.1",
         "mocha": "^11.7.5"
     }
 }
