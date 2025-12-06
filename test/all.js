@@ -62,8 +62,8 @@ async function registerUser(/** @type {User} */ input) {
 describe('Pure Effect', function () {
     it('should return Failure when e-mail is invalid', async function () {
         const input = { email: 'bad-email', password: '123' };
-        const effect = await registerUser(input);
-        assert.deepEqual(effect, Failure('Invalid email format.'));
+        const result = registerUserFlow(input);
+        assert.deepEqual(result, Failure('Invalid email format.'));
     });
 
     it('should walk through the call tree', async function () {
