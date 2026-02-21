@@ -58,7 +58,7 @@ async function registerUser() {
     const logic = registerUserFlow(input);
 
     // runEffect performs the actual async work
-    const result = await runEffect(logic);
+    const result = await runEffect(logic, 'registerUser');
 
     if (result.type === 'Success') {
         console.log('User created:', result.value);
@@ -77,7 +77,7 @@ The biggest benefit of **Pure Effect** is testability. Because `registerUserFlow
 const badInput = { email: 'bad-email', password: '123' };
 const result = registerUserFlow(badInput);
 
-assert.deepEqual(result, Failure('Invalid email.'));
+assert.deepEqual(result, Failure('Invalid email format.', badInput));
 // ✅ Logic tested instantly, no async needed.
 
 // 2. Test Flow Intent (Introspection)
@@ -103,7 +103,7 @@ Returns an object `{ type: 'Success', value }`. Represents a successful computat
 
 ### `Failure(error)`
 
-Returns an object `{ type: 'Failure', error }`. Represents a failed computation. Stops the pipeline immediately.
+Returns an object `{ type: 'Failure', error, initialInput }`. Represents a failed computation. Stops the pipeline immediately.
 
 ### `Command(cmdFn, nextFn)`
 
@@ -116,6 +116,27 @@ Returns an object `{ type: 'Command', cmd, next }`.
 
 A combinator that runs functions in sequence. It automatically handles unpacking `Success` values and passing them to the next function. If a `Failure` occurs, the pipe stops.
 
-### `runEffect(effect)`
+### `runEffect(effect, flowName = '')`
 
-The interpreter. It takes an `effect` object, executes any nested Commands recursively using `async/await`, and returns the final `Success` or `Failure`.
+The interpreter. It takes an `effect` object, executes any nested Commands recursively using `async/await`, and returns the final `Success` or `Failure`. It also accepts an optional `flowName` that comes in handy for telemetry.
+
+---
+
+### `configureTelemetry(options)`
+
+A configuration function that injects observability, tracing, or logging interceptors into the `runEffect` interpreter. By default, **Pure Effect** executes with zero overhead. By providing `onRun` and `onStep` callbacks, you can wrap pipeline executions and individual commands (e.g., inside OpenTelemetry spans).
+
+Please see **opentelemetry-example.js** to see a quick example.
+
+-   `onRun (effect, pipeline, flowName)`  
+    Fires once per `runEffect` call. It wraps the entire workflow execution.
+
+    -   `effect`: The initial state of the effect tree (useful for extracting `initialInput`).
+    -   `pipeline`: The actual interpreter. You must `await pipeline()` inside this callback to run the logic.
+    -   `flowName`: The optional name of the workflow passed to runEffect.
+
+-   `onStep (name, type, op)`  
+    Fires every time a `Command` is executed.
+    -   `name`: The name of the command function (e.g., `cmdFindUser`).
+    -   `type`: Effect type.
+    -   `op`: The actual side-effect function. You must `await op()` inside this callback and return its result.

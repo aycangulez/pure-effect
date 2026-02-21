@@ -2,6 +2,7 @@
 
 import { strict as assert } from 'assert';
 import { Success, Failure, Command, effectPipe, runEffect } from '../index.js';
+import { enableTelemetry } from '../opentelemetry-example.js';
 
 /** @typedef {{id?: number, email: string, password: string}} User */
 
@@ -56,14 +57,14 @@ const registerUserFlow = (/** @type {User} */ input) =>
     )(input);
 
 async function registerUser(/** @type {User} */ input) {
-    return await runEffect(registerUserFlow(input));
+    return await runEffect(registerUserFlow(input), 'registerUser');
 }
 
 describe('Pure Effect', function () {
     it('should return Failure when e-mail is invalid', async function () {
-        const input = { email: 'bad-email', password: '123' };
-        const result = registerUserFlow(input);
-        assert.deepEqual(result, Failure('Invalid email format.'));
+        const badInput = { email: 'bad-email', password: '123' };
+        const result = registerUserFlow(badInput);
+        assert.deepEqual(result, Failure('Invalid email format.', badInput));
     });
 
     it('should walk through the call tree', async function () {
@@ -75,5 +76,18 @@ describe('Pure Effect', function () {
         const step2 = step1.next(null);
         assert.equal(step2.type, 'Command');
         assert.equal(step2.cmd.name, 'cmdSaveUser');
+    });
+
+    it('should return Success after runEffect with telemetry disabled', async function () {
+        const input = { email: 'test-no-telemetry@test.com', password: 'password123' };
+        const result = await registerUser(input);
+        assert.equal(result.type, 'Success');
+    });
+
+    it('should return Success after runEffect with telemetry enabled', async function () {
+        enableTelemetry();
+        const input = { email: 'test-telemetry@test.com', password: 'password123' };
+        const result = await registerUser(input);
+        assert.equal(result.type, 'Success');
     });
 });
