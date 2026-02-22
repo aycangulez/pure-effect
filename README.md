@@ -126,7 +126,7 @@ The interpreter. It takes an `effect` object, executes any nested Commands recur
 
 A configuration function that injects observability, tracing, or logging interceptors into the `runEffect` interpreter. By default, **Pure Effect** executes with zero overhead. By providing `onRun` and `onStep` callbacks, you can wrap pipeline executions and individual commands (e.g., inside OpenTelemetry spans).
 
-Please see **opentelemetry-example.js** to see a quick example.
+Please see **opentelemetry-example.js** for a quick example.
 
 -   `onRun (effect, pipeline, flowName)`  
     Fires once per `runEffect` call. It wraps the entire workflow execution.
