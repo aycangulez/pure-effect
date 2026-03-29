@@ -105,26 +105,29 @@ Returns an object `{ type: 'Success', value }`. Represents a successful computat
 
 Returns an object `{ type: 'Failure', error, initialInput }`. Represents a failed computation. Stops the pipeline immediately.
 
-### `Command(cmdFn, nextFn)`
+### `Command(cmdFn, nextFn, meta)`
 
-Returns an object `{ type: 'Command', cmd, next }`.
+Returns an object `{ type: 'Command', cmd, next, meta }`.
 
 -   `cmdFn`: A function (sync or async) that performs the side effect.
 -   `nextFn`: A function that receives the result of `cmdFn` and returns the next Effect (Success, Failure, or another Command).
+-   `meta`: Optional metadata.
 
 ### `effectPipe(...functions)`
 
 A combinator that runs functions in sequence. It automatically handles unpacking `Success` values and passing them to the next function. If a `Failure` occurs, the pipe stops.
 
-### `runEffect(effect, flowName = '')`
+### `runEffect(effect, context = {})`
 
-The interpreter. It takes an `effect` object, executes any nested Commands recursively using `async/await`, and returns the final `Success` or `Failure`. It also accepts an optional `flowName` that comes in handy for telemetry.
+The interpreter. It takes an `effect` object, executes any nested Commands recursively using `async/await`, and returns the final `Success` or `Failure`. The optional `context` object is _only_ passed to the command interceptor configured via the `onBeforeCommand` option in `configureEffect` (see below). Additionally, `context.flowName` may be used for naming workflows in telemetry.
 
 ---
 
-### `configureTelemetry(options)`
+### `configureEffect(options)`
 
 A configuration function that injects observability, tracing, or logging interceptors into the `runEffect` interpreter. By default, **Pure Effect** executes with zero overhead. By providing `onRun` and `onStep` callbacks, you can wrap pipeline executions and individual commands (e.g., inside OpenTelemetry spans).
+
+`configureEffect` also accepts `onBeforeCommand`, which can be used to intercept each `Command` and the context passed to `runEffect` before execution.
 
 Please see **opentelemetry-example.js** for a quick example.
 
@@ -133,10 +136,16 @@ Please see **opentelemetry-example.js** for a quick example.
 
     -   `effect`: The initial state of the effect tree (useful for extracting `initialInput`).
     -   `pipeline`: The actual interpreter. You must `await pipeline()` inside this callback to run the logic.
-    -   `flowName`: The optional name of the workflow passed to runEffect.
+    -   `flowName`: The optional name of the workflow passed to `runEffect`.
 
 -   `onStep (name, type, op)`  
     Fires every time a `Command` is executed.
+
     -   `name`: The name of the command function (e.g., `cmdFindUser`).
     -   `type`: Effect type.
     -   `op`: The actual side-effect function. You must `await op()` inside this callback and return its result.
+
+-   `onBeforeCommand (effect, context)`
+    Fires before a `Command` is executed. Ideal for inspecting metadata and context. If you throw, the pipeline stops immediately.
+    -   `effect`: The `Command` object.
+    -   `context`: The context object passed to `runEffect`, if any.
