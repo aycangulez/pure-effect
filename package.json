@@ -1,6 +1,6 @@
 {
     "name": "pure-effect",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "A tiny, zero-dependency effect system for writing pure, testable JavaScript without mocks.",
     "type": "module",
     "exports": "./index.js",

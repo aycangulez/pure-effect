@@ -4,7 +4,9 @@ import { NodeSDK } from '@opentelemetry/sdk-node';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import { SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
-import { configureTelemetry } from './index.js';
+import { configureEffect } from './index.js';
+
+/** @import { RunWrapper, StepRunner } from "./index.js" */
 
 const traceExporter = new OTLPTraceExporter({
     url: 'http://localhost:4318/v1/traces',
@@ -28,12 +30,13 @@ process.on('SIGTERM', () => {
 
 export function enableTelemetry() {
     const tracer = trace.getTracer('pure-effect-test');
-    configureTelemetry({
-        onRun: (/** @type any */ effect, /** @type any */ pipeline, /** @type string */ flowName) => {
+    configureEffect({
+        /** @type RunWrapper */
+        onRun: (effect, pipeline, flowName) => {
             return tracer.startActiveSpan('Effect Pipeline', async (rootSpan) => {
                 try {
                     rootSpan.setAttribute('effect.initialInput', JSON.stringify(effect.initialInput));
-                    rootSpan.setAttribute('effect.flow', flowName);
+                    rootSpan.setAttribute('effect.flow', flowName || '');
 
                     const result = await pipeline();
 
@@ -56,8 +59,8 @@ export function enableTelemetry() {
                 }
             });
         },
-
-        onStep: (/** @type string */ name, /** @type string */ type, /** @type function */ op) => {
+        /** @type StepRunner */
+        onStep: (name, type, op) => {
             return tracer.startActiveSpan(name, async (span) => {
                 span.setAttribute('effect.type', type);
                 try {

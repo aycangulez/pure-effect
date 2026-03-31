@@ -1,8 +1,10 @@
 // @ts-check
 
 import { strict as assert } from 'assert';
-import { Success, Failure, Command, effectPipe, runEffect } from '../index.js';
+import { Success, Failure, Command, effectPipe, runEffect, configureEffect } from '../index.js';
 import { enableTelemetry } from '../opentelemetry-example.js';
+
+/** @import { CommandInterceptor } from "../index.js" */
 
 /** @typedef {{id?: number, email: string, password: string}} User */
 
@@ -57,7 +59,7 @@ const registerUserFlow = (/** @type {User} */ input) =>
     )(input);
 
 async function registerUser(/** @type {User} */ input) {
-    return await runEffect(registerUserFlow(input), 'registerUser');
+    return await runEffect(registerUserFlow(input), { flowName: 'registerUser' });
 }
 
 describe('Pure Effect', function () {
@@ -76,6 +78,16 @@ describe('Pure Effect', function () {
         const step2 = step1.next(null);
         assert.equal(step2.type, 'Command');
         assert.equal(step2.cmd.name, 'cmdSaveUser');
+    });
+
+    it('should access context through onBeforeCommand', async function () {
+        configureEffect({
+            onBeforeCommand: /** @type CommandInterceptor */ async (command, context) =>
+                assert.equal(context.env, 'test'),
+        });
+        const input = { email: 'context@test.com', password: 'password123' };
+        const result = await runEffect(registerUserFlow(input), { env: 'test' });
+        configureEffect({ onBeforeCommand: undefined });
     });
 
     it('should return Success after runEffect with telemetry disabled', async function () {
