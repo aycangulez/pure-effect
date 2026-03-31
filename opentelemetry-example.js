@@ -6,7 +6,7 @@ import { SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import { configureEffect } from './index.js';
 
-/** @import { RunWrapper, StepRunner} from "./index.js" */
+/** @import { RunWrapper, StepRunner } from "./index.js" */
 
 const traceExporter = new OTLPTraceExporter({
     url: 'http://localhost:4318/v1/traces',

@@ -53,12 +53,12 @@ const registerUserFlow = (input) =>
     )(input);
 
 // The Imperative Shell
-async function registerUser() {
+async function registerUser(input) {
     // logic is just a data structure until we pass it to runEffect
     const logic = registerUserFlow(input);
 
     // runEffect performs the actual async work
-    const result = await runEffect(logic, 'registerUser');
+    const result = await runEffect(logic);
 
     if (result.type === 'Success') {
         console.log('User created:', result.value);
@@ -125,11 +125,9 @@ The interpreter. It takes an `effect` object, executes any nested Commands recur
 
 ### `configureEffect(options)`
 
-A configuration function that injects observability, tracing, or logging interceptors into the `runEffect` interpreter. By default, **Pure Effect** executes with zero overhead. By providing `onRun` and `onStep` callbacks, you can wrap pipeline executions and individual commands (e.g., inside OpenTelemetry spans).
+A configuration function that injects observability, tracing, or logging interceptors into the `runEffect` interpreter. By default, **Pure Effect** executes with zero overhead. By providing `onRun` and `onStep` callbacks, you can wrap pipeline executions and individual commands (e.g., inside OpenTelemetry spans). Please see **opentelemetry-example.js** for a quick example.
 
 `configureEffect` also accepts `onBeforeCommand`, which can be used to intercept each `Command` and the context passed to `runEffect` before execution.
-
-Please see **opentelemetry-example.js** for a quick example.
 
 -   `onRun (effect, pipeline, flowName)`  
     Fires once per `runEffect` call. It wraps the entire workflow execution.
@@ -145,7 +143,7 @@ Please see **opentelemetry-example.js** for a quick example.
     -   `type`: Effect type.
     -   `op`: The actual side-effect function. You must `await op()` inside this callback and return its result.
 
--   `onBeforeCommand (effect, context)`
+-   `onBeforeCommand (command, context)`
     Fires before a `Command` is executed. Ideal for inspecting metadata and context. If you throw, the pipeline stops immediately.
-    -   `effect`: The `Command` object.
+    -   `command`: The `Command` object.
     -   `context`: The context object passed to `runEffect`, if any.

@@ -84,9 +84,9 @@ const defaultStepRunner = async (name, type, op) => await op();
 /** @type RunWrapper */
 const defaultRunWrapper = async (effect, op, flowName) => await op();
 
-/** @typedef {(effect: Effect, context?: any) => Promise<any>} CommandInterceptor */
+/** @typedef {(command: CommandState, context?: any) => Promise<any>} CommandInterceptor */
 /** @type CommandInterceptor */
-const defaultCommandInterceptor = async (effect, context) => {};
+const defaultCommandInterceptor = async (command, context) => {};
 
 let stepRunner = defaultStepRunner;
 let runWrapper = defaultRunWrapper;
