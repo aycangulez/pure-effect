@@ -1,11 +1,15 @@
 {
     "name": "pure-effect",
-    "version": "0.4.0",
-    "description": "A tiny, zero-dependency effect system for writing pure, testable JavaScript without mocks.",
+    "version": "0.5.0",
+    "description": "A tiny, zero-dependency effect system for writing pure, testable JavaScript/TypeScript without mocks.",
     "type": "module",
     "exports": "./index.js",
+    "types": "./index.d.ts",
     "scripts": {
-        "test": "mocha"
+        "test": "mocha && tsd"
+    },
+    "tsd": {
+        "directory": "test"
     },
     "author": "Aycan Gulez",
     "homepage": "https://github.com/aycangulez/pure-effect",
@@ -14,6 +18,7 @@
         "@opentelemetry/sdk-node": "^0.211.0",
         "@types/mocha": "^10.0.10",
         "@types/node": "^24.10.1",
-        "mocha": "^11.7.5"
+        "mocha": "^11.7.5",
+        "tsd": "^0.33.0"
     }
 }
