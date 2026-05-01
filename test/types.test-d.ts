@@ -1,9 +1,15 @@
 import { expectType, expectError } from 'tsd';
-import { Success, Failure, Command, effectPipe, runEffect } from '../index.js';
-import type { SuccessState, FailureState, CommandState, Effect } from '../index.js';
+import { Success, Failure, Command, Ask, effectPipe, runEffect } from '../index.js';
+import type { SuccessState, FailureState, CommandState, AskState, Effect } from '../index.js';
 
-interface User { email: string; password: string; }
-interface SavedUser { id: number; email: string; }
+interface User {
+    email: string;
+    password: string;
+}
+interface SavedUser {
+    id: number;
+    email: string;
+}
 
 // --- Success ---
 
@@ -19,15 +25,22 @@ expectType<FailureState<string>>(f);
 // --- Command ---
 
 const cmd = Command(
-    async () => ({ id: 1, email: 'a@b.com' } as SavedUser),
-    (saved) => { expectType<SavedUser>(saved); return Success(saved); }
+    async () => ({ id: 1, email: 'a@b.com' }) as SavedUser,
+    (saved) => {
+        expectType<SavedUser>(saved);
+        return Success(saved);
+    }
 );
 expectType<CommandState<SavedUser, SavedUser, unknown>>(cmd);
 
 // --- effectPipe type propagation ---
 
 const step1 = (input: User) => Success(input);
-const step2 = (user: User) => Command(async () => ({ id: 1, ...user } as SavedUser), (s) => Success(s));
+const step2 = (user: User) =>
+    Command(
+        async () => ({ id: 1, ...user }) as SavedUser,
+        (s) => Success(s)
+    );
 
 const flow = effectPipe(step1, step2);
 expectType<Effect<SavedUser>>(flow({ email: 'a@b.com', password: 'secret123' }));
@@ -51,3 +64,11 @@ if (result.type === 'Success') {
 const failFlow = effectPipe((input: User): Effect<User, string> => Failure<string>('bad'));
 const failResult = await runEffect(failFlow({ email: 'a@b.com', password: 'x' }));
 expectType<SuccessState<User> | FailureState<string>>(failResult);
+
+// --- Ask ---
+
+const ask = Ask((ctx) => Success(ctx as User));
+expectType<AskState<User, unknown>>(ask);
+
+const askFlow = effectPipe((input: User) => Ask((_ctx) => Success(input)));
+expectType<Effect<User>>(askFlow({ email: 'a@b.com', password: 'secret123' }));

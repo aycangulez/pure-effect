@@ -18,17 +18,17 @@ export type CommandState<R, T, E = unknown> = {
     initialInput?: unknown;
 };
 
-export type Effect<T, E = unknown> =
-    | SuccessState<T>
-    | FailureState<E>
-    | CommandState<any, T, E>;
+export type AskState<T, E = unknown> = {
+    type: 'Ask';
+    next: (context: unknown) => Effect<T, E>;
+    initialInput?: unknown;
+};
+
+export type Effect<T, E = unknown> = SuccessState<T> | FailureState<E> | CommandState<any, T, E> | AskState<T, E>;
 
 export declare function Success<T>(value: T): SuccessState<T>;
 
-export declare function Failure<E = unknown>(
-    error: E,
-    initialInput?: unknown
-): FailureState<E>;
+export declare function Failure<E = unknown>(error: E, initialInput?: unknown): FailureState<E>;
 
 export declare function Command<R, T, E = unknown>(
     cmd: () => Promise<R> | R,
@@ -36,9 +36,9 @@ export declare function Command<R, T, E = unknown>(
     meta?: unknown
 ): CommandState<R, T, E>;
 
-export declare function effectPipe<A, B, E = unknown>(
-    f1: (a: A) => Effect<B, E>
-): (start: A) => Effect<B, E>;
+export declare function Ask<T, E = unknown>(next: (context: unknown) => Effect<T, E>): AskState<T, E>;
+
+export declare function effectPipe<A, B, E = unknown>(f1: (a: A) => Effect<B, E>): (start: A) => Effect<B, E>;
 
 export declare function effectPipe<A, B, C, E = unknown>(
     f1: (a: A) => Effect<B, E>,
@@ -101,11 +101,7 @@ export declare function runEffect<T, E = unknown>(
     context?: unknown
 ): Promise<SuccessState<T> | FailureState<E>>;
 
-export type StepRunner = (
-    name: string,
-    type: string,
-    op: () => Promise<unknown>
-) => Promise<unknown>;
+export type StepRunner = (name: string, type: string, op: () => Promise<unknown>) => Promise<unknown>;
 
 export type RunWrapper = (
     effect: Effect<unknown>,
@@ -113,10 +109,7 @@ export type RunWrapper = (
     flowName?: string
 ) => Promise<SuccessState<unknown> | FailureState<unknown>>;
 
-export type CommandInterceptor = (
-    command: CommandState<unknown, unknown>,
-    context?: any
-) => Promise<void>;
+export type CommandInterceptor = (command: CommandState<unknown, unknown>, context?: any) => Promise<void>;
 
 export interface EffectConfiguration {
     onStep?: StepRunner;

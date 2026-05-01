@@ -11,10 +11,17 @@
  *   initialInput?: any
  * }} CommandState
  */
+/**
+ * @typedef {{
+ *   type: 'Ask',
+ *   next: (context: any) => Effect,
+ *   initialInput?: any
+ * }} AskState
+ */
 
 /**
  * The Union type for all possible states
- * @typedef {SuccessState | FailureState | CommandState} Effect
+ * @typedef {SuccessState | FailureState | CommandState | AskState} Effect
  */
 
 /**
@@ -30,7 +37,11 @@ const Success = (value) => ({ type: 'Success', value });
  * @param {any} [initialInput] - initial input passed to the flow (optional)
  * @returns {FailureState}
  */
-const Failure = (error, initialInput) => ({ type: 'Failure', error, initialInput });
+const Failure = (error, initialInput) => ({
+    type: 'Failure',
+    error,
+    initialInput
+});
 
 /**
  * Represents a side effect to be executed later
@@ -42,8 +53,15 @@ const Failure = (error, initialInput) => ({ type: 'Failure', error, initialInput
 const Command = (cmd, next, meta) => ({ type: 'Command', cmd, next, meta });
 
 /**
+ * Reads the context object from the current `runEffect` call.
+ * @param {(context: any) => Effect} next - Receives the context and returns the next Effect
+ * @returns {AskState}
+ */
+const Ask = (next) => ({ type: 'Ask', next });
+
+/**
  * Connects an Effect to the next function in the pipeline.
- * Handles the branching logic for Success, Failure, and Command.
+ * Handles the branching logic for Success, Failure, Command, and Ask.
  *
  * @param {Effect} effect - The current Effect object
  * @param {(value: any) => Effect} fn - The next function to run if the current effect is a Success
@@ -55,9 +73,14 @@ const chain = (effect, fn) => {
             return fn(effect.value);
         case 'Failure':
             return effect;
-        case 'Command':
-            const next = (/** @type {Effect} */ result) => chain(effect.next(result), fn);
+        case 'Command': {
+            const next = (/** @type {any} */ result) => chain(effect.next(result), fn);
             return Command(effect.cmd, next, effect.meta);
+        }
+        case 'Ask': {
+            const next = (/** @type {any} */ ctx) => chain(effect.next(ctx), fn);
+            return Ask(next);
+        }
     }
 };
 
@@ -65,12 +88,12 @@ const chain = (effect, fn) => {
  * Composes a list of functions into a single Effect pipeline.
  * Each function receives the output of the previous one.
  *
- * @param {...(input: any) => Effect} fns - Functions that return Success, Failure, or Command.
+ * @param {...(input: any) => Effect} fns - Functions that return Success, Failure, Command, or Ask.
  * @returns {(start: any) => Effect} A function that accepts an initial input and returns the final Effect tree.
  */
 const effectPipe = (...fns) => {
     return (start) => {
-        const effect = fns.reduce(chain, Success(start));
+        const effect = fns.reduce(chain, /** @type {Effect} */ (Success(start)));
         effect.initialInput = start;
         return effect;
     };
@@ -114,23 +137,29 @@ const runEffect =
     /**
      * The Interpreter
      * Iterates through the Effect tree, executing Commands and handling async flow.
+     * Ask effects are resolved synchronously with the context object.
      *
      * @param {Effect} effect - The Effect tree returned by a pipeline
-     * @param {any} [context] - Optional context object passed to the Command Interceptor
+     * @param {any} [context] - Optional context object. Passed to Ask continuations and the Command Interceptor.
      * @returns {Promise<SuccessState | FailureState>}
      */
     async function runEffect(effect, context = {}) {
         return runWrapper(
             effect,
             async () => {
-                while (effect.type === 'Command') {
+                while (effect.type === 'Command' || effect.type === 'Ask') {
+                    if (effect.type === 'Ask') {
+                        effect = effect.next(context);
+                        continue;
+                    }
                     const cmdName = effect.cmd.name || 'anonymous';
+                    const initialInput = effect.initialInput;
                     try {
                         await commandInterceptor(effect, context);
                         const result = await stepRunner(cmdName, 'Command', effect.cmd);
                         effect = effect.next(result);
                     } catch (e) {
-                        return Failure(e, effect.initialInput);
+                        return Failure(e, initialInput);
                     }
                 }
 
@@ -140,4 +169,4 @@ const runEffect =
         );
     };
 
-export { Success, Failure, Command, effectPipe, runEffect, configureEffect };
+export { Success, Failure, Command, Ask, effectPipe, runEffect, configureEffect };

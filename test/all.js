@@ -1,7 +1,7 @@
 // @ts-check
 
 import { strict as assert } from 'assert';
-import { Success, Failure, Command, effectPipe, runEffect, configureEffect } from '../index.js';
+import { Success, Failure, Command, Ask, effectPipe, runEffect, configureEffect } from '../index.js';
 import { enableTelemetry } from '../opentelemetry-example.js';
 
 /** @import { CommandInterceptor } from "../index.js" */
@@ -17,7 +17,7 @@ const db = {
         const u = { ...user, id: Date.now() };
         this.users.set(user.email, u);
         return u;
-    },
+    }
 };
 
 function validateRegistration(/** @type {User} */ input) {
@@ -83,7 +83,7 @@ describe('Pure Effect', function () {
     it('should access context through onBeforeCommand', async function () {
         configureEffect({
             onBeforeCommand: /** @type CommandInterceptor */ async (command, context) =>
-                assert.equal(context.env, 'test'),
+                assert.equal(context.env, 'test')
         });
         const input = { email: 'context@test.com', password: 'password123' };
         const result = await runEffect(registerUserFlow(input), { env: 'test' });
@@ -101,5 +101,31 @@ describe('Pure Effect', function () {
         const input = { email: 'test-telemetry@test.com', password: 'password123' };
         const result = await registerUser(input);
         assert.equal(result.type, 'Success');
+    });
+
+    it('should access context through Ask', async function () {
+        /** @type {any} */
+        let capturedCtx;
+        const step = () =>
+            Ask((ctx) => {
+                capturedCtx = ctx;
+                return Success(null);
+            });
+        await runEffect(step(), { env: 'test' });
+        assert.equal(capturedCtx.env, 'test');
+    });
+
+    it('should work with Ask at any point in the pipeline', async function () {
+        const flow = effectPipe(
+            () =>
+                Command(
+                    () => 'value',
+                    (r) => Success(r)
+                ),
+            (value) => Ask((/** @type {any} */ ctx) => Success({ value, env: ctx.env }))
+        );
+        const result = await runEffect(flow(null), { env: 'test' });
+        assert.equal(result.type, 'Success');
+        assert.deepEqual(result.value, { value: 'value', env: 'test' });
     });
 });
