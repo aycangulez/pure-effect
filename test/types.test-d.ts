@@ -1,6 +1,14 @@
 import { expectType, expectError } from 'tsd';
-import { Success, Failure, Command, Ask, effectPipe, runEffect } from '../index.js';
-import type { SuccessState, FailureState, CommandState, AskState, Effect } from '../index.js';
+import { Success, Failure, Command, Ask, Retry, effectPipe, runEffect } from '../index.js';
+import type {
+    SuccessState,
+    FailureState,
+    CommandState,
+    AskState,
+    RetryState,
+    RetryExhaustedError,
+    Effect
+} from '../index.js';
 
 interface User {
     email: string;
@@ -72,3 +80,54 @@ expectType<AskState<User, unknown>>(ask);
 
 const askFlow = effectPipe((input: User) => Ask((_ctx) => Success(input)));
 expectType<Effect<User>>(askFlow({ email: 'a@b.com', password: 'secret123' }));
+
+// --- Retry ---
+
+const innerCmd = Command(
+    async () => 42,
+    (n) => Success(n)
+);
+
+// Retry with options preserves T
+const retried = Retry(innerCmd, { attempts: 3 });
+expectType<RetryState<number, unknown>>(retried);
+
+// Retry without options is valid
+const retriedNoOpts = Retry(innerCmd);
+expectType<RetryState<number, unknown>>(retriedNoOpts);
+
+// Retry in effectPipe preserves type flow
+const retryFlow = effectPipe((input: User) =>
+    Retry(
+        Command(
+            async () => ({ id: 1, ...input }) as SavedUser,
+            (s) => Success(s)
+        ),
+        { attempts: 2 }
+    )
+);
+expectType<Effect<SavedUser>>(retryFlow({ email: 'a@b.com', password: 'secret123' }));
+
+// RetryExhaustedError shape is usable for narrowing exhaustion failures
+const exhaustedErr: RetryExhaustedError<Error> = {
+    retryExhausted: true,
+    lastError: new Error('boom'),
+    attempts: 3
+};
+expectType<true>(exhaustedErr.retryExhausted);
+expectType<Error>(exhaustedErr.lastError);
+expectType<number>(exhaustedErr.attempts);
+
+// --- error channel union across effectPipe steps ---
+
+type ValidationError = 'invalid_email' | 'weak_password';
+type DbError = 'db_connection' | 'duplicate_key';
+
+const validateStep = (_input: User): Effect<User, ValidationError> => Failure<ValidationError>('invalid_email');
+const saveStep = (_user: User): Effect<SavedUser, DbError> => Failure<DbError>('db_connection');
+
+const typedFlow = effectPipe(validateStep, saveStep);
+expectType<Effect<SavedUser, ValidationError | DbError>>(typedFlow({ email: 'a@b.com', password: 'secret123' }));
+
+const typedResult = await runEffect(typedFlow({ email: 'a@b.com', password: 'secret123' }));
+expectType<SuccessState<SavedUser> | FailureState<ValidationError | DbError>>(typedResult);

@@ -1,7 +1,7 @@
 {
     "name": "pure-effect",
-    "version": "0.6.0",
-    "description": "A tiny, zero-dependency effect system for writing pure, testable JavaScript/TypeScript without mocks.",
+    "version": "0.7.0",
+    "description": "A TypeScript effect library where effects are plain objects you can inspect, test, and reason about. Learn the whole API in an afternoon. Tiny footprint, zero dependencies, works with plain JavaScript too.",
     "type": "module",
     "exports": "./index.js",
     "types": "./index.d.ts",
