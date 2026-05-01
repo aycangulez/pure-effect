@@ -9,14 +9,14 @@ import { configureEffect } from './index.js';
 /** @import { RunWrapper, StepRunner } from "./index.js" */
 
 const traceExporter = new OTLPTraceExporter({
-    url: 'http://localhost:4318/v1/traces',
+    url: 'http://localhost:4318/v1/traces'
 });
 
 const sdk = new NodeSDK({
     serviceName: 'pure-effect-test',
     traceExporter,
     spanProcessor: new SimpleSpanProcessor(traceExporter),
-    instrumentations: [],
+    instrumentations: []
 });
 
 sdk.start();
@@ -43,7 +43,7 @@ export function enableTelemetry() {
                     if (result.type === 'Failure') {
                         rootSpan.setStatus({
                             code: SpanStatusCode.ERROR,
-                            message: String(result.error),
+                            message: String(result.error)
                         });
                     } else {
                         rootSpan.setStatus({ code: SpanStatusCode.OK });
@@ -79,13 +79,13 @@ export function enableTelemetry() {
                     span.recordException(err);
                     span.setStatus({
                         code: SpanStatusCode.ERROR,
-                        message: err.message,
+                        message: err.message
                     });
                     throw err;
                 } finally {
                     span.end();
                 }
             });
-        },
+        }
     });
 }

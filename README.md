@@ -4,7 +4,7 @@
 
 It implements the "Functional Core, Imperative Shell" pattern, allowing you to decouple your business logic from external side effects like database calls or API requests. Instead of executing side effects immediately, your functions return Commands which are executed later by an interpreter.
 
-**Pure Effect** ships with JSDoc type annotations for JavaScript users and a bundled `index.d.ts` declaration file with full generic types for TypeScript users.
+**Pure Effect** ships with JSDoc type annotations for JavaScript users and a bundled declaration file with full generic types for TypeScript users.
 
 ## Installation
 
@@ -95,6 +95,49 @@ assert.equal(step2.cmd.name, 'cmdSaveUser');
 // ✅ We verified the *intent* of the code without touching a real DB.
 ```
 
+## Passing Runtime Context
+
+Some values come from the framework layer such as the authenticated tenant, a request trace ID, environment config rather than from the data being processed. `Ask` lets a pipeline step read the `context` object passed to `runEffect` without touching the function signatures around it.
+
+In the example below, `ctx.tenant` is identified from the subdomain or JWT by the router. The domain layer never needs it as a parameter; it just asks for it when needed:
+
+```js
+import { Success, Failure, Command, Ask, effectPipe, runEffect } from 'pure-effect';
+
+const findProduct = (productId) =>
+    Ask((ctx) =>
+        Command(
+            () => db[ctx.tenant].findProduct(productId),
+            (product) => (product ? Success(product) : Failure('Product not found.'))
+        )
+    );
+
+const reserveStock = (product) =>
+    Ask((ctx) =>
+        Command(
+            () => db[ctx.tenant].reserveStock(product.id),
+            (reserved) => Success({ product, reserved })
+        )
+    );
+
+const checkoutFlow = (productId) =>
+    effectPipe(
+        () => findProduct(productId),
+        ({ product }) => reserveStock(product)
+    )(productId);
+```
+
+The router identifies the tenant and passes it as context. `checkoutFlow` never needs a tenant parameter:
+
+```js
+app.post('/checkout', async (req, res) => {
+    const result = await runEffect(checkoutFlow(req.body.productId), {
+        tenant: req.subdomains[0] // e.g. 'acme' from acme.myapp.com
+    });
+    res.json(result);
+});
+```
+
 ## API Reference
 
 ### `Success(value)`
@@ -109,9 +152,25 @@ Returns an object `{ type: 'Failure', error, initialInput }`. Represents a faile
 
 Returns an object `{ type: 'Command', cmd, next, meta }`.
 
--   `cmdFn`: A function (sync or async) that performs the side effect.
--   `nextFn`: A function that receives the result of `cmdFn` and returns the next Effect (Success, Failure, or another Command).
--   `meta`: Optional metadata.
+- `cmdFn`: A function (sync or async) that performs the side effect.
+- `nextFn`: A function that receives the result of `cmdFn` and returns the next Effect (Success, Failure, or another Command).
+- `meta`: Optional metadata.
+
+### `Ask(nextFn)`
+
+Returns an object `{ type: 'Ask', next }`. Reads the `context` passed to `runEffect` and passes it to `nextFn`, which returns the next Effect. Works at any point in the pipeline, before or after `Command`s.
+
+```js
+const findProduct = (productId) =>
+    Ask((ctx) =>
+        Command(
+            () => db[ctx.tenant].findProduct(productId),
+            (product) => (product ? Success(product) : Failure('Product not found.'))
+        )
+    );
+```
+
+See [Passing Runtime Context](#passing-runtime-context) for a full example.
 
 ### `effectPipe(...functions)`
 
@@ -119,7 +178,12 @@ A combinator that runs functions in sequence. It automatically handles unpacking
 
 ### `runEffect(effect, context = {})`
 
-The interpreter. It takes an `effect` object, executes any nested Commands recursively using `async/await`, and returns the final `Success` or `Failure`. The optional `context` object is _only_ passed to the command interceptor configured via the `onBeforeCommand` option in `configureEffect` (see below). Additionally, `context.flowName` may be used for naming workflows in telemetry.
+The interpreter. It takes an `effect` object, executes any nested Commands using `async/await`, and returns the final `Success` or `Failure`. The optional `context` object is available to:
+
+- `Ask` continuations — use `Ask` to read context inside pipeline steps
+- The `onBeforeCommand` interceptor (see `configureEffect` below)
+
+`context.flowName` may be used for naming workflows in telemetry.
 
 ---
 
@@ -129,21 +193,19 @@ A configuration function that injects observability, tracing, or logging interce
 
 `configureEffect` also accepts `onBeforeCommand`, which can be used to intercept each `Command` and the context passed to `runEffect` before execution.
 
--   `onRun (effect, pipeline, flowName)`  
-    Fires once per `runEffect` call. It wraps the entire workflow execution.
+- `onRun (effect, pipeline, flowName)`  
+  Fires once per `runEffect` call. It wraps the entire workflow execution.
+    - `effect`: The initial state of the effect tree (useful for extracting `initialInput`).
+    - `pipeline`: The actual interpreter. You must `await pipeline()` inside this callback to run the logic.
+    - `flowName`: The optional name of the workflow passed to `runEffect`.
 
-    -   `effect`: The initial state of the effect tree (useful for extracting `initialInput`).
-    -   `pipeline`: The actual interpreter. You must `await pipeline()` inside this callback to run the logic.
-    -   `flowName`: The optional name of the workflow passed to `runEffect`.
+- `onStep (name, type, op)`  
+  Fires every time a `Command` is executed.
+    - `name`: The name of the command function (e.g., `cmdFindUser`).
+    - `type`: Effect type.
+    - `op`: The actual side-effect function. You must `await op()` inside this callback and return its result.
 
--   `onStep (name, type, op)`  
-    Fires every time a `Command` is executed.
-
-    -   `name`: The name of the command function (e.g., `cmdFindUser`).
-    -   `type`: Effect type.
-    -   `op`: The actual side-effect function. You must `await op()` inside this callback and return its result.
-
--   `onBeforeCommand (command, context)`
-    Fires before a `Command` is executed. Ideal for inspecting metadata and context. If you throw, the pipeline stops immediately.
-    -   `command`: The `Command` object.
-    -   `context`: The context object passed to `runEffect`, if any.
+- `onBeforeCommand (command, context)`
+  Fires before a `Command` is executed. Ideal for inspecting metadata and context. If you throw, the pipeline stops immediately.
+    - `command`: The `Command` object.
+    - `context`: The context object passed to `runEffect`, if any.
