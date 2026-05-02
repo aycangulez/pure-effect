@@ -1,11 +1,12 @@
 import { expectType, expectError } from 'tsd';
-import { Success, Failure, Command, Ask, Retry, effectPipe, runEffect } from '../index.js';
+import { Success, Failure, Command, Ask, Retry, Parallel, effectPipe, runEffect } from '../index.js';
 import type {
     SuccessState,
     FailureState,
     CommandState,
     AskState,
     RetryState,
+    ParallelState,
     RetryExhaustedError,
     Effect
 } from '../index.js';
@@ -131,3 +132,23 @@ expectType<Effect<SavedUser, ValidationError | DbError>>(typedFlow({ email: 'a@b
 
 const typedResult = await runEffect(typedFlow({ email: 'a@b.com', password: 'secret123' }));
 expectType<SuccessState<SavedUser> | FailureState<ValidationError | DbError>>(typedResult);
+
+// --- Parallel ---
+
+// Values tuple is correctly typed
+const par = Parallel([Success(42), Success('hello')], ([n, s]) => {
+    expectType<number>(n);
+    expectType<string>(s);
+    return Success({ n, s });
+});
+expectType<ParallelState<[number, string], { n: number; s: string }>>(par);
+
+// Parallel in effectPipe preserves type flow
+const parallelFlow = effectPipe((input: User) =>
+    Parallel([Success(input.email), Success(input.password)], ([email, password]) => Success({ email, password }))
+);
+expectType<Effect<{ email: string; password: string }>>(parallelFlow({ email: 'a@b.com', password: 'secret123' }));
+
+// runEffect return type flows through Parallel
+const parallelResult = await runEffect(Parallel([Success(1), Success('x')], ([n, s]) => Success({ n, s })));
+expectType<SuccessState<{ n: number; s: string }> | FailureState<unknown>>(parallelResult);

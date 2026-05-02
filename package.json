@@ -1,7 +1,7 @@
 {
     "name": "pure-effect",
-    "version": "0.7.0",
-    "description": "A TypeScript effect library where effects are plain objects you can inspect, test, and reason about. Learn the whole API in an afternoon. Tiny footprint, zero dependencies, works with plain JavaScript too.",
+    "version": "0.8.0",
+    "description": "A zero-dependency effect library for JavaScript and TypeScript with built-in support for dependency injection, retry, and OpenTelemetry where business logic is plain data you can test without mocks.",
     "type": "module",
     "exports": "./index.js",
     "types": "./index.d.ts",
