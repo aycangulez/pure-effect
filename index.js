@@ -20,8 +20,18 @@
  */
 
 /**
+ * @typedef {{
+ *   type: 'Retry',
+ *   effect: Effect,
+ *   options: { attempts?: number, delay?: number, backoff?: number },
+ *   next: (value: any) => Effect,
+ *   initialInput?: any
+ * }} RetryState
+ */
+
+/**
  * The Union type for all possible states
- * @typedef {SuccessState | FailureState | CommandState | AskState} Effect
+ * @typedef {SuccessState | FailureState | CommandState | AskState | RetryState} Effect
  */
 
 /**
@@ -60,26 +70,55 @@ const Command = (cmd, next, meta) => ({ type: 'Command', cmd, next, meta });
 const Ask = (next) => ({ type: 'Ask', next });
 
 /**
+ * Wraps an Effect tree with retry-on-failure semantics.
+ * @param {Effect} effect - The inner Effect tree to retry
+ * @param {Object} [options] - Per-use retry options; merged over global defaults at runtime
+ * @param {number} [options.attempts] - Max retries (not counting first try)
+ * @param {number} [options.delay] - Ms before first retry
+ * @param {number} [options.backoff] - Multiplier applied to delay on each subsequent retry
+ * @returns {RetryState}
+ */
+const Retry = (effect, options = {}) => ({
+    type: 'Retry',
+    effect,
+    options,
+    next: (value) => Success(value)
+});
+
+/**
  * Connects an Effect to the next function in the pipeline.
- * Handles the branching logic for Success, Failure, Command, and Ask.
+ * Handles the branching logic for Success, Failure, Command, Ask, and Retry.
  *
  * @param {Effect} effect - The current Effect object
  * @param {(value: any) => Effect} fn - The next function to run if the current effect is a Success
  * @returns {Effect} The composed Effect
  */
-const chain = (effect, fn) => {
+/**
+ * @param {Effect} effect
+ * @param {(value: any) => Effect} fn
+ * @param {any} [initialInput]
+ * @returns {Effect}
+ */
+const chain = (effect, fn, initialInput) => {
+    const withII = (/** @type {Effect} */ e) =>
+        initialInput !== undefined && e.initialInput === undefined ? { ...e, initialInput } : e;
+
     switch (effect.type) {
         case 'Success':
-            return fn(effect.value);
+            return withII(fn(effect.value));
         case 'Failure':
-            return effect;
+            return withII(effect);
         case 'Command': {
-            const next = (/** @type {any} */ result) => chain(effect.next(result), fn);
-            return Command(effect.cmd, next, effect.meta);
+            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput);
+            return withII(Command(effect.cmd, next, effect.meta));
         }
         case 'Ask': {
-            const next = (/** @type {any} */ ctx) => chain(effect.next(ctx), fn);
-            return Ask(next);
+            const next = (/** @type {any} */ ctx) => chain(effect.next(ctx), fn, initialInput);
+            return withII(Ask(next));
+        }
+        case 'Retry': {
+            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput);
+            return withII({ ...effect, next });
         }
     }
 };
@@ -93,9 +132,8 @@ const chain = (effect, fn) => {
  */
 const effectPipe = (...fns) => {
     return (start) => {
-        const effect = fns.reduce(chain, /** @type {Effect} */ (Success(start)));
-        effect.initialInput = start;
-        return effect;
+        const chainWithII = (/** @type {Effect} */ eff, /** @type {(v: any) => Effect} */ fn) => chain(eff, fn, start);
+        return fns.reduce(chainWithII, /** @type {Effect} */ (Success(start)));
     };
 };
 
@@ -115,11 +153,15 @@ let stepRunner = defaultStepRunner;
 let runWrapper = defaultRunWrapper;
 let commandInterceptor = defaultCommandInterceptor;
 
+const defaultRetryOptions = { attempts: 3, delay: 100, backoff: 1 };
+let retryDefaults = { ...defaultRetryOptions };
+
 /**
  * @typedef {Object} EffectConfiguration
  * @property {StepRunner} [onStep] - Fires once per runEffect call. It wraps the entire workflow execution.
  * @property {RunWrapper} [onRun] - Fires every time a Command is executed.
  * @property {CommandInterceptor} [onBeforeCommand] - Intercepts a Command and any context passed to runEffect before execution.
+ * @property {{ attempts?: number, delay?: number, backoff?: number }} [retry] - Global Retry defaults; merged under per-use options.
  */
 
 /**
@@ -131,6 +173,7 @@ const configureEffect = (options) => {
     stepRunner = options.onStep ? options.onStep : defaultStepRunner;
     runWrapper = options.onRun ? options.onRun : defaultRunWrapper;
     commandInterceptor = options.onBeforeCommand ? options.onBeforeCommand : defaultCommandInterceptor;
+    retryDefaults = options.retry ? { ...defaultRetryOptions, ...options.retry } : defaultRetryOptions;
 };
 
 const runEffect =
@@ -139,34 +182,69 @@ const runEffect =
      * Iterates through the Effect tree, executing Commands and handling async flow.
      * Ask effects are resolved synchronously with the context object.
      *
+     * Per-call config takes precedence over global configureEffect defaults.
+     * onRun fires exactly once per runEffect call — Retry attempts run inside that
+     * single span rather than spawning their own, keeping telemetry non-duplicated.
+     *
      * @param {Effect} effect - The Effect tree returned by a pipeline
      * @param {any} [context] - Optional context object. Passed to Ask continuations and the Command Interceptor.
+     * @param {EffectConfiguration} [callConfig] - Per-call overrides; merged over global configureEffect defaults.
      * @returns {Promise<SuccessState | FailureState>}
      */
-    async function runEffect(effect, context = {}) {
-        return runWrapper(
-            effect,
-            async () => {
-                while (effect.type === 'Command' || effect.type === 'Ask') {
-                    if (effect.type === 'Ask') {
-                        effect = effect.next(context);
-                        continue;
-                    }
-                    const cmdName = effect.cmd.name || 'anonymous';
-                    const initialInput = effect.initialInput;
-                    try {
-                        await commandInterceptor(effect, context);
-                        const result = await stepRunner(cmdName, 'Command', effect.cmd);
-                        effect = effect.next(result);
-                    } catch (e) {
-                        return Failure(e, initialInput);
-                    }
-                }
+    async function runEffect(effect, context = {}, callConfig = {}) {
+        const localStepRunner = callConfig.onStep ? callConfig.onStep : stepRunner;
+        const localRunWrapper = callConfig.onRun ? callConfig.onRun : runWrapper;
+        const localCommandInterceptor = callConfig.onBeforeCommand ? callConfig.onBeforeCommand : commandInterceptor;
+        const localRetryDefaults = callConfig.retry ? { ...retryDefaults, ...callConfig.retry } : retryDefaults;
 
-                return effect;
-            },
-            context?.flowName || ''
-        );
+        /**
+         * @param {Effect} eff
+         * @returns {Promise<SuccessState | FailureState>}
+         */
+        async function execute(eff) {
+            while (eff.type === 'Command' || eff.type === 'Ask' || eff.type === 'Retry') {
+                if (eff.type === 'Ask') {
+                    eff = eff.next(context);
+                    continue;
+                }
+                if (eff.type === 'Retry') {
+                    const opts = { ...localRetryDefaults, ...eff.options };
+                    const { attempts } = opts;
+                    let lastError;
+                    let succeeded = false;
+
+                    for (let attempt = 0; attempt <= attempts; attempt++) {
+                        if (attempt > 0) {
+                            await new Promise((r) => setTimeout(r, opts.delay * Math.pow(opts.backoff, attempt - 1)));
+                        }
+                        const result = await execute(eff.effect);
+                        if (result.type === 'Success') {
+                            eff = eff.next(result.value);
+                            succeeded = true;
+                            break;
+                        }
+                        lastError = result.error;
+                    }
+
+                    if (!succeeded) {
+                        return Failure({ retryExhausted: true, lastError, attempts }, eff.initialInput);
+                    }
+                    continue;
+                }
+                const cmdName = eff.cmd.name || 'anonymous';
+                const initialInput = eff.initialInput;
+                try {
+                    await localCommandInterceptor(eff, context);
+                    const result = await localStepRunner(cmdName, 'Command', eff.cmd);
+                    eff = eff.next(result);
+                } catch (e) {
+                    return Failure(e, initialInput);
+                }
+            }
+            return eff;
+        }
+
+        return localRunWrapper(effect, () => execute(effect), context?.flowName || '');
     };
 
-export { Success, Failure, Command, Ask, effectPipe, runEffect, configureEffect };
+export { Success, Failure, Command, Ask, Retry, effectPipe, runEffect, configureEffect };

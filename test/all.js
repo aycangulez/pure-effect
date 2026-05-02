@@ -1,7 +1,7 @@
 // @ts-check
 
 import { strict as assert } from 'assert';
-import { Success, Failure, Command, Ask, effectPipe, runEffect, configureEffect } from '../index.js';
+import { Success, Failure, Command, Ask, Retry, effectPipe, runEffect, configureEffect } from '../index.js';
 import { enableTelemetry } from '../opentelemetry-example.js';
 
 /** @import { CommandInterceptor } from "../index.js" */
@@ -81,26 +81,15 @@ describe('Pure Effect', function () {
     });
 
     it('should access context through onBeforeCommand', async function () {
-        configureEffect({
-            onBeforeCommand: /** @type CommandInterceptor */ async (command, context) =>
-                assert.equal(context.env, 'test')
-        });
         const input = { email: 'context@test.com', password: 'password123' };
-        const result = await runEffect(registerUserFlow(input), { env: 'test' });
-        configureEffect({ onBeforeCommand: undefined });
-    });
-
-    it('should return Success after runEffect with telemetry disabled', async function () {
-        const input = { email: 'test-no-telemetry@test.com', password: 'password123' };
-        const result = await registerUser(input);
-        assert.equal(result.type, 'Success');
-    });
-
-    it('should return Success after runEffect with telemetry enabled', async function () {
-        enableTelemetry();
-        const input = { email: 'test-telemetry@test.com', password: 'password123' };
-        const result = await registerUser(input);
-        assert.equal(result.type, 'Success');
+        await runEffect(
+            registerUserFlow(input),
+            { env: 'test' },
+            {
+                onBeforeCommand: /** @type CommandInterceptor */ async (command, context) =>
+                    assert.equal(context.env, 'test')
+            }
+        );
     });
 
     it('should access context through Ask', async function () {
@@ -127,5 +116,127 @@ describe('Pure Effect', function () {
         const result = await runEffect(flow(null), { env: 'test' });
         assert.equal(result.type, 'Success');
         assert.deepEqual(result.value, { value: 'value', env: 'test' });
+    });
+
+    it('should return a Retry data structure', function () {
+        const inner = Command(
+            () => 'x',
+            (r) => Success(r)
+        );
+        const effect = Retry(inner, { attempts: 5 });
+        assert.equal(effect.type, 'Retry');
+        assert.deepEqual(effect.options, { attempts: 5 });
+        assert.strictEqual(effect.effect, inner);
+        assert.equal(typeof effect.next, 'function');
+    });
+
+    it('should succeed after transient failures', async function () {
+        let calls = 0;
+        const effect = Retry(
+            Command(
+                function flakyCmd() {
+                    if (++calls < 3) throw new Error('transient');
+                    return 'ok';
+                },
+                (r) => Success(r)
+            ),
+            { attempts: 3, delay: 0 }
+        );
+        const result = await runEffect(effect);
+        assert.equal(result.type, 'Success');
+        assert.equal(result.value, 'ok');
+        assert.equal(calls, 3);
+    });
+
+    it('should return rich Failure when retries are exhausted', async function () {
+        const effect = Retry(
+            Command(
+                function alwaysFails() {
+                    throw new Error('boom');
+                    return /** @type {any} */ (null);
+                },
+                (/** @type {any} */ r) => Success(r)
+            ),
+            { attempts: 2, delay: 0 }
+        );
+        const result = await runEffect(effect);
+        assert.equal(result.type, 'Failure');
+        if (result.type !== 'Failure') throw new Error('expected Failure');
+        const error = /** @type {import('../index.js').RetryExhaustedError<Error>} */ (result.error);
+        assert.equal(error.retryExhausted, true);
+        assert.equal(error.attempts, 2);
+        assert.equal(error.lastError.message, 'boom');
+    });
+
+    it('should apply delay and backoff between retries', async function () {
+        this.timeout(2000);
+        let calls = 0;
+        const start = Date.now();
+        const effect = Retry(
+            Command(
+                function flakyCmd() {
+                    if (++calls < 3) throw new Error('transient');
+                    return 'ok';
+                },
+                (r) => Success(r)
+            ),
+            { attempts: 3, delay: 30, backoff: 1 }
+        );
+        const result = await runEffect(effect);
+        const elapsed = Date.now() - start;
+        assert.equal(result.type, 'Success');
+        // 2 retries × 30 ms = at least 55 ms (5 ms margin for timing variance)
+        assert.ok(elapsed >= 55, `Expected ≥ 55 ms elapsed, got ${elapsed} ms`);
+    });
+
+    it('should merge per-use Retry options with call-level defaults', async function () {
+        // Call-level: attempts 1 (would exhaust on 2nd try)
+        // Per-use: attempts 3 (overrides call-level — should succeed on 3rd try)
+        let calls = 0;
+        const effect = Retry(
+            Command(
+                function flakyCmd() {
+                    if (++calls < 3) throw new Error('x');
+                    return 'ok';
+                },
+                (r) => Success(r)
+            ),
+            { attempts: 3 }
+        );
+        const result = await runEffect(effect, {}, { retry: { attempts: 1, delay: 0, backoff: 1 } });
+        assert.equal(result.type, 'Success');
+        assert.equal(calls, 3);
+    });
+
+    it('should work at any step inside effectPipe', async function () {
+        const flow = effectPipe(
+            (input) =>
+                Retry(
+                    Command(
+                        function fetchCmd() {
+                            return input.toUpperCase();
+                        },
+                        (r) => Success(r)
+                    ),
+                    { attempts: 2, delay: 0 }
+                ),
+            (upper) => Success(`${upper}!`)
+        );
+        const result = await runEffect(flow('hello'));
+        assert.equal(result.type, 'Success');
+        assert.equal(result.value, 'HELLO!');
+    });
+
+    it('should return Success after runEffect with telemetry disabled', async function () {
+        const input = { email: 'test-no-telemetry@test.com', password: 'password123' };
+        const result = await registerUser(input);
+        assert.equal(result.type, 'Success');
+    });
+
+    it('should return Success after runEffect with telemetry enabled', async function () {
+        enableTelemetry();
+        const input = { email: 'test-telemetry@test.com', password: 'password123' };
+        const result = await registerUser(input);
+        assert.equal(result.type, 'Success');
     });
 });
