@@ -8,11 +8,11 @@
 
 - No mocks needed to test async pipelines
 - Inject context without touching function signatures
-- Built-in retry with configurable delay and backoff
+- Built-in retry and parallel execution with configurable delay, backoff, and `Promise.all` semantics
 - OpenTelemetry-ready via lifecycle hooks
 - Zero dependencies, under 1 KB minified and gzipped
 - Works in JavaScript and TypeScript (full generics, bundled `.d.ts`)
-- Five primitives: learn the whole API in an afternoon
+- Six primitives: learn the whole API in an afternoon
 
 ## Table of Contents
 
@@ -21,6 +21,7 @@
 - [Testing Without Mocks](#testing-without-mocks)
 - [Passing Runtime Context](#passing-runtime-context)
 - [Retrying Transient Failures](#retrying-transient-failures)
+- [Running Effects in Parallel](#running-effects-in-parallel)
 - [TypeScript: Typed Errors and Context](#typescript-typed-errors-and-context)
 - [Why Pure Effect](#why-pure-effect)
 - [API Reference](#api-reference)
@@ -44,7 +45,7 @@ const validateRegistration = (input) => {
     return Success(input);
 };
 
-// Theese function return a Command object. They do NOT call the database.
+// These functions return a Command object. They do NOT call the database.
 const findUser = (email) => {
     const cmdFindUser = () => db.findUser(email);
     return Command(cmdFindUser, (user) => Success(user));
@@ -181,6 +182,51 @@ configureEffect({
 Retry(effect, { delay: 500 }); // uses global attempts, custom delay
 ```
 
+## Running Effects in Parallel
+
+`Parallel` runs multiple Effect trees concurrently and passes their results to `next` as an ordered array. If any effect fails, `next` is not called and the `Failure` propagates immediately.
+
+```js
+import { Success, Failure, Command, Parallel, effectPipe, runEffect } from 'pure-effect';
+
+const getUser = (id) => {
+    const cmdGetUser = () => db.users.findById(id);
+    return Command(cmdGetUser, (user) => (user ? Success(user) : Failure('user_not_found')));
+};
+
+const getPermissions = (id) => {
+    const cmdGetPermissions = () => db.permissions.findByUserId(id);
+    return Command(cmdGetPermissions, (perms) => Success(perms));
+};
+
+const loadProfile = (userId) =>
+    Parallel([getUser(userId), getPermissions(userId)], ([user, permissions]) => Success({ user, permissions }));
+```
+
+Because `Parallel` is a plain object, you can assert on its structure without running anything:
+
+```js
+const flow = loadProfile('user-123');
+assert.equal(flow.type, 'Parallel');
+assert.equal(flow.effects.length, 2);
+assert.equal(flow.effects[0].type, 'Command');
+assert.equal(flow.effects[0].cmd.name, 'cmdGetUser');
+```
+
+`Parallel` composes naturally inside `effectPipe`:
+
+```js
+const checkoutFlow = (input) =>
+    effectPipe(
+        validate,
+        ({ productId, userId }) =>
+            Parallel([getProduct(productId), getUser(userId)], ([product, user]) => Success({ product, user })),
+        ({ product, user }) => reserveStock(product, user)
+    )(input);
+```
+
+`Ask` context flows into all parallel branches without any extra wiring.
+
 ## TypeScript: Typed Errors and Context
 
 ### Error union across pipeline steps
@@ -236,11 +282,11 @@ const result = await runEffect(findProduct('abc'), { tenant: 'acme', requestId: 
 
 ## Why Pure Effect
 
-**vs. Effect-TS:** Effect-TS is a full functional programming ecosystem with fibers, streaming, schema validation, dependency injection, and is probably the right choice if you need that breadth. It arguably comes with a steep learning curve though. Pure Effect targets a narrower scope (testable pipelines, context injection, retry) and can be learned in an afternoon.
+**vs. Effect-TS:** Effect-TS is a full functional programming ecosystem with fibers, streaming, schema validation, structured concurrency, and more, though it comes with a steep learning curve. Pure Effect covers a narrower scope: testable pipelines, context injection, retry, and parallel execution. If your problem is testability and async pipeline boilerplate, Pure Effect solves it with just six primitives you can learn in an afternoon. If you need fibers, in-flight cancellation, or streaming, Effect-TS is the right tool.
 
-**vs. fp-ts:** fp-ts applies category theory abstractions (functors, monads) to TypeScript. Pure Effect borrows only the concept of effects as data and expresses it without that vocabulary.
+**vs. fp-ts:** fp-ts brings category theory abstractions (functors, monads, applicatives) to TypeScript. Pure Effect borrows only the concept of effects as data, without that vocabulary.
 
-**vs. plain async/await with mocks:** Mocks can drift from real implementations silently. Pure Effect sidesteps the problem: business logic never executes I/O, so there is nothing to mock.
+**vs. plain async/await with mocks:** A mock that passes all your tests but diverges from what the real database driver or HTTP client actually does is worse than no test at all; it gives false confidence. Pure Effect eliminates the problem at the source: business logic never executes I/O, so there is nothing to mock. You assert on what the code _intends_ to do, not on a substitute that approximates it.
 
 **When to use something else:** If your codebase has little async I/O or test isolation isn't a pain point, plain async/await is the simpler choice.
 
@@ -285,6 +331,13 @@ Returns `{ type: 'Retry', effect, options, next }`. Wraps any Effect with retry-
 
 On exhaustion, returns `Failure({ retryExhausted: true, lastError, attempts })`.
 
+### `Parallel(effects, next)`
+
+Returns `{ type: 'Parallel', effects, next }`. Runs all effects concurrently via `Promise.all`. If any effect fails, the first `Failure` is returned immediately and `next` is not called. `Ask` context flows into all branches.
+
+- `effects`: Array of any Effects such as `Command`s, `effectPipe` results, nested `Retry`s, etc.
+- `next`: Receives the array of unwrapped success values in the same order as `effects`, returns the next Effect.
+
 ### `effectPipe(...functions)`
 
 Composes functions into a sequential pipeline. Each function receives the unwrapped `Success` value from the previous step. A `Failure` from any step stops the pipeline immediately.
@@ -313,7 +366,7 @@ The interpreter. Traverses the effect tree, executes Commands with `async/await`
 
 - `onRun(effect, pipeline, flowName)` wraps the entire workflow; must `await pipeline()`.
 - `onStep(name, type, op)` wraps each Command; must `await op()` and return its result.
-- `onBeforeCommand(command, context)` ires before each Command; throw to abort the pipeline.
+- `onBeforeCommand(command, context)` fires before each Command; throw to abort the pipeline.
 - `retry: { attempts?, delay?, backoff? }` global retry defaults.
 
 See **opentelemetry-example.js** in the repository for a complete OpenTelemetry wiring example.

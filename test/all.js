@@ -1,7 +1,7 @@
 // @ts-check
 
 import { strict as assert } from 'assert';
-import { Success, Failure, Command, Ask, Retry, effectPipe, runEffect, configureEffect } from '../index.js';
+import { Success, Failure, Command, Ask, Retry, Parallel, effectPipe, runEffect, configureEffect } from '../index.js';
 import { enableTelemetry } from '../opentelemetry-example.js';
 
 /** @import { CommandInterceptor } from "../index.js" */
@@ -225,6 +225,71 @@ describe('Pure Effect', function () {
         const result = await runEffect(flow('hello'));
         assert.equal(result.type, 'Success');
         assert.equal(result.value, 'HELLO!');
+    });
+
+    it('should return a Parallel data structure', () => {
+        const e1 = Success(1);
+        const e2 = Success(2);
+        const next = (/** @type {any[]} */ values) => Success(values);
+        const result = Parallel([e1, e2], next);
+        assert.equal(result.type, 'Parallel');
+        assert.deepEqual(result.effects, [e1, e2]);
+        assert.equal(result.next, next);
+    });
+
+    it('should run effects concurrently and pass results to next', async () => {
+        const e1 = Command(
+            async () => 'a',
+            (v) => Success(v)
+        );
+        const e2 = Command(
+            async () => 'b',
+            (v) => Success(v)
+        );
+        const flow = Parallel([e1, e2], ([a, b]) => Success({ a, b }));
+        const result = await runEffect(flow);
+        assert.equal(result.type, 'Success');
+        assert.deepEqual(result.value, { a: 'a', b: 'b' });
+    });
+
+    it('should return Failure if any parallel effect fails', async () => {
+        const e1 = Success('ok');
+        const e2 = Failure('oops');
+        const flow = Parallel([e1, e2], ([a, b]) => Success({ a, b }));
+        const result = await runEffect(flow);
+        assert.equal(result.type, 'Failure');
+        assert.equal(result.error, 'oops');
+    });
+
+    it('should work inside effectPipe', async () => {
+        const flow = effectPipe((input) =>
+            Parallel(
+                [
+                    Command(
+                        async () => input.a,
+                        (v) => Success(v)
+                    ),
+                    Command(
+                        async () => input.b,
+                        (v) => Success(v)
+                    )
+                ],
+                ([a, b]) => Success({ a, b })
+            )
+        );
+        const result = await runEffect(flow({ a: 1, b: 2 }));
+        assert.equal(result.type, 'Success');
+        assert.deepEqual(result.value, { a: 1, b: 2 });
+    });
+
+    it('should pass context to parallel branches via Ask', async () => {
+        const flow = Parallel(
+            [Ask((/** @type {any} */ ctx) => Success(ctx.x)), Ask((/** @type {any} */ ctx) => Success(ctx.y))],
+            ([x, y]) => Success({ x, y })
+        );
+        const result = await runEffect(flow, { x: 10, y: 20 });
+        assert.equal(result.type, 'Success');
+        assert.deepEqual(result.value, { x: 10, y: 20 });
     });
 
     it('should return Success after runEffect with telemetry disabled', async function () {

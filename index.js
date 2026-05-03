@@ -30,8 +30,17 @@
  */
 
 /**
+ * @typedef {{
+ *   type: 'Parallel',
+ *   effects: Effect[],
+ *   next: (values: any[]) => Effect,
+ *   initialInput?: any
+ * }} ParallelState
+ */
+
+/**
  * The Union type for all possible states
- * @typedef {SuccessState | FailureState | CommandState | AskState | RetryState} Effect
+ * @typedef {SuccessState | FailureState | CommandState | AskState | RetryState | ParallelState} Effect
  */
 
 /**
@@ -86,6 +95,14 @@ const Retry = (effect, options = {}) => ({
 });
 
 /**
+ * Runs multiple Effect trees concurrently. If any effect fails, returns the first Failure by array order and skips next.
+ * @param {Effect[]} effects - Array of Effect trees to run concurrently
+ * @param {(values: any[]) => Effect} next - Receives array of success values in order, returns next Effect
+ * @returns {ParallelState}
+ */
+const Parallel = (effects, next) => ({ type: 'Parallel', effects, next });
+
+/**
  * Connects an Effect to the next function in the pipeline.
  * Handles the branching logic for Success, Failure, Command, Ask, and Retry.
  *
@@ -117,6 +134,10 @@ const chain = (effect, fn, initialInput) => {
             return withII(Ask(next));
         }
         case 'Retry': {
+            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput);
+            return withII({ ...effect, next });
+        }
+        case 'Parallel': {
             const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput);
             return withII({ ...effect, next });
         }
@@ -202,7 +223,7 @@ const runEffect =
          * @returns {Promise<SuccessState | FailureState>}
          */
         async function execute(eff) {
-            while (eff.type === 'Command' || eff.type === 'Ask' || eff.type === 'Retry') {
+            while (eff.type === 'Command' || eff.type === 'Ask' || eff.type === 'Retry' || eff.type === 'Parallel') {
                 if (eff.type === 'Ask') {
                     eff = eff.next(context);
                     continue;
@@ -231,6 +252,13 @@ const runEffect =
                     }
                     continue;
                 }
+                if (eff.type === 'Parallel') {
+                    const results = await Promise.all(eff.effects.map((e) => execute(e)));
+                    const failure = results.find((r) => r.type === 'Failure');
+                    if (failure) return failure;
+                    eff = eff.next(results.map((r) => /** @type {SuccessState} */ (r).value));
+                    continue;
+                }
                 const cmdName = eff.cmd.name || 'anonymous';
                 const initialInput = eff.initialInput;
                 try {
@@ -247,4 +275,4 @@ const runEffect =
         return localRunWrapper(effect, () => execute(effect), context?.flowName || '');
     };
 
-export { Success, Failure, Command, Ask, Retry, effectPipe, runEffect, configureEffect };
+export { Success, Failure, Command, Ask, Retry, Parallel, effectPipe, runEffect, configureEffect };

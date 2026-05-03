@@ -44,12 +44,20 @@ export type RetryExhaustedError<E = unknown> = {
     attempts: number;
 };
 
+export type ParallelState<T extends readonly unknown[], R, E = unknown, Ctx = unknown> = {
+    type: 'Parallel';
+    effects: { [K in keyof T]: Effect<T[K], E, Ctx> };
+    next: (values: [...T]) => Effect<R, E, Ctx>;
+    initialInput?: unknown;
+};
+
 export type Effect<T, E = unknown, Ctx = unknown> =
     | SuccessState<T>
     | FailureState<E>
     | CommandState<any, T, E, Ctx>
     | AskState<T, E, Ctx>
-    | RetryState<T, E, Ctx>;
+    | RetryState<T, E, Ctx>
+    | ParallelState<any, T, E, Ctx>;
 
 export declare function Success<T>(value: T): SuccessState<T>;
 
@@ -69,6 +77,11 @@ export declare function Retry<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     options?: RetryOptions
 ): RetryState<T, E, Ctx>;
+
+export declare function Parallel<T extends readonly unknown[], R, E = unknown, Ctx = unknown>(
+    effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
+    next: (values: [...T]) => Effect<R, E, Ctx>
+): ParallelState<[...T], R, E, Ctx>;
 
 export declare function effectPipe<A, B, E1 = unknown, Ctx = unknown>(
     f1: (a: A) => Effect<B, E1, Ctx>

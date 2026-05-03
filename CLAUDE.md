@@ -17,16 +17,17 @@ No build or lint step — the library ships as plain ES modules with no transpil
 
 ### Core abstractions (all in `index.js`)
 
-| Export                                    | Shape                                      | Purpose                                                                                                                                   |
-| ----------------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `Success(value)`                          | `{ type: 'Success', value }`               | Wraps a successful result                                                                                                                 |
-| `Failure(error, initialInput)`            | `{ type: 'Failure', error, initialInput }` | Short-circuits the pipeline                                                                                                               |
-| `Command(cmdFn, nextFn, meta)`            | `{ type: 'Command', cmd, next, meta }`     | Defers a side effect for the interpreter                                                                                                  |
-| `Ask(nextFn)`                             | `{ type: 'Ask', next }`                    | Reads the `context` passed to `runEffect`; passes it to `nextFn`                                                                          |
-| `Retry(effect, options)`                  | `{ type: 'Retry', effect, options, next }` | Wraps any Effect tree with retry-on-failure semantics; handled natively by the interpreter                                                |
-| `effectPipe(...fns)`                      | —                                          | Composes functions into a sequential pipeline via `chain`                                                                                 |
-| `runEffect(effect, context, callConfig?)` | async                                      | Interpreter: traverses the effect tree, executes Commands; resolves `Ask` and `Retry`; per-call `callConfig` overrides global defaults    |
-| `configureEffect(options)`                | —                                          | Sets process-wide telemetry hooks (`onStep`, `onRun`, `onBeforeCommand`) and global `retry` defaults; overridden by per-call `callConfig` |
+| Export                                    | Shape                                      | Purpose                                                                                                                                                  |
+| ----------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Success(value)`                          | `{ type: 'Success', value }`               | Wraps a successful result                                                                                                                                |
+| `Failure(error, initialInput)`            | `{ type: 'Failure', error, initialInput }` | Short-circuits the pipeline                                                                                                                              |
+| `Command(cmdFn, nextFn, meta)`            | `{ type: 'Command', cmd, next, meta }`     | Defers a side effect for the interpreter                                                                                                                 |
+| `Ask(nextFn)`                             | `{ type: 'Ask', next }`                    | Reads the `context` passed to `runEffect`; passes it to `nextFn`                                                                                         |
+| `Retry(effect, options)`                  | `{ type: 'Retry', effect, options, next }` | Wraps any Effect tree with retry-on-failure semantics; handled natively by the interpreter                                                               |
+| `Parallel(effects, next)`                 | `{ type: 'Parallel', effects, next }`      | Runs multiple Effect trees concurrently via `Promise.all`; returns the first Failure by array order if any effect fails; context flows into all branches |
+| `effectPipe(...fns)`                      | —                                          | Composes functions into a sequential pipeline via `chain`                                                                                                |
+| `runEffect(effect, context, callConfig?)` | async                                      | Interpreter: traverses the effect tree, executes Commands; resolves `Ask` and `Retry`; per-call `callConfig` overrides global defaults                   |
+| `configureEffect(options)`                | —                                          | Sets process-wide telemetry hooks (`onStep`, `onRun`, `onBeforeCommand`) and global `retry` defaults; overridden by per-call `callConfig`                |
 
 ### Data flow
 
@@ -43,6 +44,10 @@ runEffect(tree, context, callConfig?)
   → resolves Retry via an inner execute() loop (not recursive runEffect),
     so onRun fires exactly once per runEffect call regardless of attempts;
     on exhaustion returns Failure({ retryExhausted: true, lastError, attempts })
+  → resolves Parallel by running all effects via Promise.all with the same
+    context; if any effect returns Failure, returns the first Failure by
+    array index and skips next; otherwise calls next with the array of
+    unwrapped success values
   → resolves to final Success or Failure
 ```
 
