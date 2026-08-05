@@ -7,5 +7,6 @@
     "jsxSingleQuote": true,
     "printWidth": 120,
     "arrowParens": "always",
-    "endOfLine": "lf"
+    "endOfLine": "lf",
+    "proseWrap": "never"
 }
