@@ -1,12 +1,13 @@
 {
     "name": "pure-effect",
-    "version": "0.8.0",
-    "description": "A zero-dependency effect library for JavaScript and TypeScript with built-in support for dependency injection, retry, and OpenTelemetry where business logic is plain data you can test without mocks.",
+    "version": "0.9.0",
+    "description": "A zero-dependency effect library for JavaScript and TypeScript with time-travel debugging, dependency injection, retry, and OpenTelemetry, where business logic is plain data you can test without mocks.",
     "type": "module",
     "exports": "./index.js",
     "types": "./index.d.ts",
     "scripts": {
-        "test": "mocha && tsd"
+        "test": "mocha && tsd",
+        "format": "prettier --write index.js index.d.ts examples/*.js test/all.js README.md CLAUDE.md"
     },
     "tsd": {
         "directory": "test"
@@ -15,10 +16,15 @@
     "homepage": "https://github.com/aycangulez/pure-effect",
     "license": "MIT",
     "devDependencies": {
-        "@opentelemetry/sdk-node": "^0.211.0",
+        "@opentelemetry/api": "^1.9.1",
+        "@opentelemetry/exporter-trace-otlp-proto": "^0.221.0",
+        "@opentelemetry/sdk-node": "^0.221.0",
+        "@opentelemetry/sdk-trace-base": "^2.10.0",
         "@types/mocha": "^10.0.10",
         "@types/node": "^24.10.1",
-        "mocha": "^11.7.5",
-        "tsd": "^0.33.0"
+        "mocha": "^11.3.0",
+        "prettier": "^3.9.6",
+        "tsd": "^0.33.0",
+        "typescript": "^5.9.3"
     }
 }

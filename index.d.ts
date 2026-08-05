@@ -10,11 +10,18 @@ export type FailureState<E = unknown> = {
     initialInput?: unknown;
 };
 
+/**
+ * Metadata attached to a Command. A string `name` is read by the interpreter as the Command's
+ * identity for traces, replay matching, and telemetry spans; every other key is carried through
+ * untouched for `onBeforeCommand`.
+ */
+export type CommandMeta = { name?: string } & Record<string, unknown>;
+
 export type CommandState<R, T, E = unknown, Ctx = unknown> = {
     type: 'Command';
     cmd: () => Promise<R> | R;
     next: (result: R) => Effect<T, E, Ctx>;
-    meta?: unknown;
+    meta?: CommandMeta;
     initialInput?: unknown;
 };
 
@@ -63,10 +70,16 @@ export declare function Success<T>(value: T): SuccessState<T>;
 
 export declare function Failure<E = unknown>(error: E, initialInput?: unknown): FailureState<E>;
 
-export declare function Command<R, T, E = unknown, Ctx = unknown>(
+/**
+ * `next` is optional and defaults to `(result) => Success(result)`, which is what most Commands want.
+ *
+ * A `meta.name` becomes this Command's identity, which keeps it independent of how `cmd` was declared
+ * and immune to minification. Without one the identity falls back to `cmd.name`, then to 'anonymous'.
+ */
+export declare function Command<R, T = R, E = unknown, Ctx = unknown>(
     cmd: () => Promise<R> | R,
-    next: (result: R) => Effect<T, E, Ctx>,
-    meta?: unknown
+    next?: (result: R) => Effect<T, E, Ctx>,
+    meta?: CommandMeta
 ): CommandState<R, T, E, Ctx>;
 
 export declare function Ask<T, E = unknown, Ctx = unknown>(
@@ -235,10 +248,131 @@ export interface EffectConfiguration {
     retry?: RetryOptions;
 }
 
-export declare function configureEffect(options: EffectConfiguration): void;
+/**
+ * Configures the global runner. Several configurations can be passed and are merged, which is how
+ * independent concerns share the one slot each hook has: `onStep` and `onRun` nest with the first
+ * outermost, `onBeforeCommand` interceptors all run in order, and `retry` merges with later winning.
+ * Merging does not accumulate across calls: a later call replaces the previous wiring, and calling
+ * this with nothing resets every slot to its default.
+ *
+ * Returns a function that puts back whatever was installed when this call was made, so a caller can
+ * install hooks without owning the global wiring forever. Restoring is a snapshot rather than a stack:
+ * if a later call has run since, restoring reverts to the older snapshot and discards the newer one.
+ */
+export declare function configureEffect(...configs: (EffectConfiguration | undefined)[]): () => void;
 
 export declare function runEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     context?: Ctx,
     callConfig?: EffectConfiguration
+): Promise<SuccessState<T> | FailureState<E>>;
+
+export type ReplayStep = {
+    /** Zero-based position in this run's Command sequence. */
+    index: number;
+    /** `cmd.name`, or 'anonymous'. */
+    name: string;
+    /** Always 'Command' today; reserved. */
+    type: string;
+};
+
+/**
+ * What production observed for a step. `{ result }` feeds the Command's `next`;
+ * `{ error }` is thrown so the interpreter produces a Failure. A Resolver returning
+ * `undefined` means "not recorded", which is distinct from `{ result: undefined }`.
+ */
+export type ReplayOutcome = { result: unknown } | { error: unknown };
+
+export type Resolver = (step: ReplayStep) => ReplayOutcome | undefined;
+
+export type TraceEntry = {
+    command: string;
+    result?: unknown;
+    error?: unknown;
+    /** How long the Command took in production, rounded to microseconds. */
+    durationMs?: number;
+};
+
+/** The reference trace format. A convenience, not a contract: write a Resolver for any other shape. */
+export type TraceLog = {
+    flowName?: string;
+    version?: string;
+    initialInput?: unknown;
+    context?: unknown;
+    dropped?: number;
+    trace: TraceEntry[];
+};
+
+export interface RecorderOptions {
+    /**
+     * Scrubs every value a trace holds: each Command's result, each serialized error, and the
+     * `initialInput` and `context` stored on the trace itself. `kind` is `'result'`, `'error'`,
+     * `'initialInput'`, or `'context'`; `name` is the Command's name for the first two and the kind for
+     * the last two. This is the single place PII is kept out of a trace, which is why it sees all four.
+     */
+    redact?: (value: unknown, name: string, kind: 'result' | 'error' | 'initialInput' | 'context') => unknown;
+    /** Cap trace length; further steps are counted in `dropped`, not stored. */
+    maxEntries?: number;
+    /** Record stack traces for thrown errors. Off by default. */
+    stack?: boolean;
+}
+
+export interface TraceMeta {
+    initialInput?: unknown;
+    flowName?: string;
+    context?: unknown;
+    version?: string;
+}
+
+export declare function recorder(options?: RecorderOptions): {
+    onStep: StepRunner;
+    entries: TraceEntry[];
+    toTrace(meta?: TraceMeta): TraceLog;
+};
+
+export declare function recordEffect<T, E = unknown, Ctx = unknown>(
+    flowFn: (input: any) => Effect<T, E, Ctx>,
+    initialInput: any,
+    options?: RecorderOptions & { context?: Ctx; version?: string }
+): Promise<{ result: SuccessState<T> | FailureState<E>; trace: TraceLog }>;
+
+export interface ReplayOptions<Ctx = unknown> {
+    /** Context for `Ask`. Pass the recorded context to reproduce a run faithfully. */
+    context?: Ctx;
+    /** Strip `Retry` delays so a replay does not wait out production backoff (default `true`). */
+    fastRetry?: boolean;
+    /** Allow configured `onRun` / `onBeforeCommand` to fire (default `false`). */
+    hooks?: boolean;
+    /**
+     * What to do when the Resolver has no recording for a step.
+     * `'throw'` (default) fails the replay, making side effects impossible.
+     * `'execute'` runs the real Command: recorded prefix, live tail.
+     */
+    onMissing?: 'throw' | 'execute';
+    onResolved?: (step: ReplayStep, outcome: ReplayOutcome | undefined) => void;
+    /**
+     * Matching mode used when a trace is passed instead of a Resolver. `true` (default)
+     * consumes entries positionally and raises a `TimeParadox` on divergence; `false`
+     * matches per-Command FIFO queues, which is required for flows containing `Parallel`,
+     * whose branches complete out of array order. Ignored when a Resolver is supplied,
+     * since that Resolver has already chosen how it matches.
+     */
+    strict?: boolean;
+}
+
+/**
+ * Pass a trace to replay it directly, or a Resolver when traces are stored in some other
+ * shape. To observe a replay rather than change how it resolves, use `onResolved`.
+ * A malformed trace rejects with a `ReplayError`.
+ */
+export declare function replayEffect<T, E = unknown, Ctx = unknown>(
+    effect: Effect<T, E, Ctx>,
+    traceOrResolver: Resolver | TraceLog | TraceEntry[],
+    options?: ReplayOptions<Ctx>
+): Promise<SuccessState<T> | FailureState<E>>;
+
+export declare function timeTravel<T, E = unknown, Ctx = unknown>(
+    flowFn: (input: any) => Effect<T, E, Ctx>,
+    traceLog: TraceLog,
+    options?: { strict?: boolean; log?: (...args: any[]) => void; context?: Ctx; version?: string }
 ): Promise<SuccessState<T> | FailureState<E>>;

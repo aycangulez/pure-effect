@@ -37,6 +37,17 @@ expectType<FailureState<string>>(f);
 
 // --- Command ---
 
+// next is optional, defaulting to Success
+expectType<CommandState<number, number>>(Command(() => 42));
+expectType<CommandState<number, string>>(
+    Command(
+        () => 42,
+        (n: number) => Success(String(n))
+    )
+);
+Command(() => 42, undefined, { name: 'readRow' });
+expectError(Command());
+
 const cmd = Command(
     async () => ({ id: 1, email: 'a@b.com' }) as SavedUser,
     (saved) => {
