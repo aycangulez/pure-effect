@@ -19,7 +19,14 @@ export type CommandMeta = { name?: string } & Record<string, unknown>;
 
 export type CommandState<R, T, E = unknown, Ctx = unknown> = {
     type: 'Command';
-    cmd: () => Promise<R> | R;
+    /**
+     * Performs the side effect. Inside a `Parallel` branch it receives an `AbortSignal` that fires when a
+     * sibling branch fails; forward it to `fetch`, a driver, or an `AbortController`-aware client to have
+     * the work cancelled in flight. Ignoring it is fine and is what every thunk written before this did:
+     * the interpreter still refuses to start any *later* Command in a cancelled branch. Outside a
+     * `Parallel` no argument is passed at all.
+     */
+    cmd: (signal?: AbortSignal) => Promise<R> | R;
     next: (result: R) => Effect<T, E, Ctx>;
     meta?: CommandMeta;
     initialInput?: unknown;
@@ -77,7 +84,7 @@ export declare function Failure<E = unknown>(error: E, initialInput?: unknown): 
  * and immune to minification. Without one the identity falls back to `cmd.name`, then to 'anonymous'.
  */
 export declare function Command<R, T = R, E = unknown, Ctx = unknown>(
-    cmd: () => Promise<R> | R,
+    cmd: (signal?: AbortSignal) => Promise<R> | R,
     next?: (result: R) => Effect<T, E, Ctx>,
     meta?: CommandMeta
 ): CommandState<R, T, E, Ctx>;
@@ -231,7 +238,12 @@ export declare function effectPipe<
     f8: (i: I) => Effect<J, E8, Ctx>
 ): (start: A) => Effect<J, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8, Ctx>;
 
-export type StepRunner = (name: string, type: string, op: () => Promise<unknown>) => Promise<unknown>;
+/**
+ * Wraps one Command execution. `path` is the Command's position in the Effect tree rather than its
+ * position in completion order, so it is the same in a replay as in the recorded run even when
+ * `Parallel` branches finish in a different order. Hooks that take three parameters are unaffected.
+ */
+export type StepRunner = (name: string, type: string, op: () => Promise<unknown>, path?: string) => Promise<unknown>;
 
 export type RunWrapper = (
     effect: Effect<unknown>,
@@ -268,12 +280,21 @@ export declare function runEffect<T, E = unknown, Ctx = unknown>(
 ): Promise<SuccessState<T> | FailureState<E>>;
 
 export type ReplayStep = {
-    /** Zero-based position in this run's Command sequence. */
+    /**
+     * Zero-based position in this run's completion order. Not stable for a flow containing `Parallel`,
+     * whose branches finish in whatever order they finish in. Prefer `path`.
+     */
     index: number;
     /** `cmd.name`, or 'anonymous'. */
     name: string;
     /** Always 'Command' today; reserved. */
     type: string;
+    /**
+     * The Command's position in the Effect tree, stable across runs: steps are numbered within a
+     * subtree, and each `Parallel` branch and `Retry` attempt opens its own prefix. This is what a
+     * replay matches on, and what a Resolver should key off. Absent on traces recorded before paths.
+     */
+    path?: string;
 };
 
 /**
@@ -287,6 +308,11 @@ export type Resolver = (step: ReplayStep) => ReplayOutcome | undefined;
 
 export type TraceEntry = {
     command: string;
+    /**
+     * The Command's position in the Effect tree. Order-independent, so a replay lines a recorded step
+     * up with the step that asked for it even when `Parallel` branches finish out of order.
+     */
+    path?: string;
     result?: unknown;
     error?: unknown;
     /** How long the Command took in production, rounded to microseconds. */
@@ -351,11 +377,11 @@ export interface ReplayOptions<Ctx = unknown> {
     onMissing?: 'throw' | 'execute';
     onResolved?: (step: ReplayStep, outcome: ReplayOutcome | undefined) => void;
     /**
-     * Matching mode used when a trace is passed instead of a Resolver. `true` (default)
-     * consumes entries positionally and raises a `TimeParadox` on divergence; `false`
-     * matches per-Command FIFO queues, which is required for flows containing `Parallel`,
-     * whose branches complete out of array order. Ignored when a Resolver is supplied,
-     * since that Resolver has already chosen how it matches.
+     * Legacy matching mode, used only for a trace whose entries carry no `path`. `true` (default)
+     * consumes entries positionally and raises a `TimeParadox` on divergence; `false` matches
+     * per-Command FIFO queues, which used to be required for flows containing `Parallel`. Ignored
+     * for a trace carrying paths, which is matched by path, and when a Resolver is supplied, since
+     * that Resolver has already chosen how it matches.
      */
     strict?: boolean;
 }

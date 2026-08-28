@@ -10,7 +10,7 @@
 /**
  * @typedef {{
  *   type: 'Command',
- *   cmd: () => Promise<any>|any,
+ *   cmd: (signal?: AbortSignal) => Promise<any>|any,
  *   next: (result: any) => Effect,
  *   meta?: any,
  *   initialInput?: any
@@ -70,7 +70,10 @@ const Failure = (error, initialInput) => ({
 /**
  * Represents a side effect to be executed later.
  *
- * @param {() => Promise<any>|any} cmd - The side-effect function to execute
+ * @param {(signal?: AbortSignal) => Promise<any>|any} cmd - The side-effect function to execute. Inside a
+ *        `Parallel` branch it receives an `AbortSignal` that fires when a sibling branch fails, so I/O that
+ *        accepts one can be cancelled in flight. Ignoring it is fine: the interpreter still refuses to start
+ *        any later Command in a cancelled branch. Outside a `Parallel` no argument is passed.
  * @param {(result: any) => Effect} [next] - Receives the result of `cmd` and returns the next Effect.
  *        Defaults to `(result) => Success(result)`, which is what most Commands want.
  * @param {CommandMeta} [meta] - Optional metadata, passed to `onBeforeCommand`. A string `meta.name`
@@ -132,7 +135,15 @@ const Retry = (effect, options = {}) => ({
 });
 
 /**
- * Runs multiple Effect trees concurrently. If any effect fails, returns the first Failure by array order and skips next.
+ * Runs multiple Effect trees concurrently. The first branch to fail cancels its siblings, and that
+ * branch's Failure is what the Parallel returns; `next` is skipped. When several branches fail in the
+ * same tick, the first by array order wins.
+ *
+ * Cancellation is cooperative and works at two levels. A cancelled branch starts no further Commands,
+ * which needs nothing from the caller. Stopping the Command already in flight needs its thunk to accept
+ * the `AbortSignal` it is passed and hand it to whatever performs the I/O; a thunk that ignores the
+ * signal runs to completion, so a branch's first Command can still write after a sibling has failed.
+ *
  * @param {Effect[]} effects - Array of Effect trees to run concurrently
  * @param {(values: any[]) => Effect} next - Receives array of success values in order, returns next Effect
  * @returns {ParallelState}
@@ -244,7 +255,13 @@ const effectPipe = (...fns) => {
     };
 };
 
-/** @typedef {(name: string, type: string, op: function) => Promise<any>} StepRunner */
+/**
+ * Wraps one Command execution. `path` identifies the Command's position in the Effect tree rather than
+ * its position in completion order, so it is the same in a replay as it was in the recorded run even
+ * when `Parallel` branches finish in a different order. Hooks written before `path` existed take three
+ * parameters and are unaffected.
+ * @typedef {(name: string, type: string, op: function, path?: string) => Promise<any>} StepRunner
+ */
 /** @type StepRunner */
 const defaultStepRunner = async (name, type, op) => await op();
 
@@ -336,12 +353,14 @@ const configureEffect = (...configs) => {
  * @typedef {Object} StepStart
  * @property {string} name - `cmd.name`, or 'anonymous'.
  * @property {string} type - Always 'Command' today.
+ * @property {string} [path] - The Command's position in the Effect tree.
  */
 
 /**
  * @typedef {Object} StepEnd
  * @property {string} name
  * @property {string} type
+ * @property {string} [path]
  * @property {any} [result] - What the Command returned, when it succeeded.
  * @property {any} [error] - What it threw, when it did not.
  * @property {number} durationMs
@@ -355,11 +374,11 @@ const now = () => (typeof performance === 'object' ? performance.now() : Date.no
  * @param {(start: StepStart) => (end: StepEnd) => void} handler - Returns a finisher for the outcome
  * @returns {StepRunner}
  */
-const observeSteps = (handler) => async (name, type, op) => {
+const observeSteps = (handler) => async (name, type, op, path) => {
     /** @type {((end: StepEnd) => void) | undefined} */
     let finish;
     try {
-        finish = handler({ name, type });
+        finish = handler({ name, type, path });
     } catch {
         finish = undefined;
     }
@@ -374,10 +393,10 @@ const observeSteps = (handler) => async (name, type, op) => {
     const started = now();
     try {
         const result = await op();
-        report({ name, type, result, durationMs: now() - started });
+        report({ name, type, path, result, durationMs: now() - started });
         return result;
     } catch (error) {
-        report({ name, type, error, durationMs: now() - started });
+        report({ name, type, path, error, durationMs: now() - started });
         throw error;
     }
 };
@@ -411,7 +430,7 @@ const chainHooks = (...configs) => {
 
     if (steps.length) {
         merged.onStep = steps.reduceRight(
-            (inner, outer) => (name, type, op) => outer(name, type, () => inner(name, type, op))
+            (inner, outer) => (name, type, op, path) => outer(name, type, () => inner(name, type, op, path), path)
         );
     }
     if (runs.length) {
@@ -427,6 +446,45 @@ const chainHooks = (...configs) => {
     if (retries.length) merged.retry = Object.assign({}, ...retries);
     return merged;
 };
+
+/**
+ * The Failure a `Parallel` branch resolves to when a sibling branch has already failed.
+ *
+ * Branches are cancelled, not merely ignored: this is what `Parallel` returns for a branch that was
+ * still in flight, and it is deliberately distinguishable so it can be told apart from the genuine
+ * failure that triggered the cancellation.
+ * @returns {Error}
+ */
+const parallelCancelled = () =>
+    Object.assign(new Error('Parallel branch cancelled.'), {
+        name: 'ParallelCancelled'
+    });
+
+/**
+ * Sleeps, but gives up early when the surrounding branch is cancelled, so a sibling's failure does not
+ * have to wait out a retry backoff that is now pointless. Resolves either way: the caller's abort check
+ * is what turns a cancelled wait into a Failure.
+ *
+ * @param {number} ms
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<void>}
+ */
+const delayFor = (ms, signal) =>
+    new Promise((resolve) => {
+        if (!signal) {
+            setTimeout(resolve, ms);
+            return;
+        }
+        const onAbort = () => {
+            clearTimeout(timer);
+            resolve();
+        };
+        const timer = setTimeout(() => {
+            signal.removeEventListener('abort', onAbort);
+            resolve();
+        }, ms);
+        signal.addEventListener('abort', onAbort, { once: true });
+    });
 
 const runEffect =
     /**
@@ -451,13 +509,25 @@ const runEffect =
 
         /**
          * @param {Effect} eff
+         * @param {AbortSignal} [signal] - Cancellation for this subtree, set for `Parallel` branches.
+         *        A branch stops starting new Commands once it is aborted, and the signal is handed to
+         *        each Command's thunk so I/O that accepts one can be cancelled in flight.
+         * @param {string} [path] - Prefix identifying this subtree's position in the Effect tree.
+         *        Steps are numbered sequentially within a subtree and each `Parallel` branch and `Retry`
+         *        attempt opens its own prefix, so a Command's full path depends only on the shape of the
+         *        tree and not on the order branches happen to finish in. That is what lets a replay line
+         *        a recorded step up with the step that asked for it.
          * @returns {Promise<SuccessState | FailureState>}
          */
-        async function execute(eff) {
+        async function execute(eff, signal, path = '') {
+            let step = 0;
             while (
                 eff &&
                 (eff.type === 'Command' || eff.type === 'Ask' || eff.type === 'Retry' || eff.type === 'Parallel')
             ) {
+                // Checked before every node, which is what short-circuits a branch whose Commands
+                // ignore the signal: the one in flight cannot be stopped, but the next never starts.
+                if (signal?.aborted) return Failure(parallelCancelled(), eff.initialInput);
                 if (eff.type === 'Ask') {
                     eff = eff.next(context);
                     continue;
@@ -467,12 +537,19 @@ const runEffect =
                     const { attempts } = opts;
                     let lastError;
                     let succeeded = false;
+                    // Each attempt gets its own prefix, so the Commands of attempt 2 cannot be mistaken
+                    // for the Commands of attempt 1 when a trace is matched back up.
+                    const retryPath = `${path}${step++}r`;
 
                     for (let attempt = 0; attempt <= attempts; attempt++) {
                         if (attempt > 0) {
-                            await new Promise((r) => setTimeout(r, opts.delay * Math.pow(opts.backoff, attempt - 1)));
+                            await delayFor(opts.delay * Math.pow(opts.backoff, attempt - 1), signal);
                         }
-                        const result = await execute(eff.effect);
+                        // Checked after the wait, so a branch cancelled mid-backoff stops here rather
+                        // than buying one more attempt, and a sibling's failure does not pay for the
+                        // rest of this branch's retry schedule.
+                        if (signal?.aborted) return Failure(parallelCancelled(), eff.initialInput);
+                        const result = await execute(eff.effect, signal, `${retryPath}${attempt}/`);
                         if (result.type === 'Success') {
                             eff = eff.next(result.value);
                             succeeded = true;
@@ -487,17 +564,60 @@ const runEffect =
                     continue;
                 }
                 if (eff.type === 'Parallel') {
-                    const results = await Promise.all(eff.effects.map((e) => execute(e)));
-                    const failure = results.find((r) => r.type === 'Failure');
+                    // Branch prefixes come from the branch's index in the array, never from the order
+                    // branches complete in, which is the whole point: two branches calling the same
+                    // Command are told apart by where they are rather than by who finished first.
+                    const branchPath = `${path}${step++}p`;
+                    // One scope per Parallel, linked to the enclosing one so cancellation nests.
+                    // Absent AbortController (very old runtimes), `branchSignal` stays undefined and
+                    // the old run-everything-to-completion behaviour is what happens.
+                    const scope = typeof AbortController === 'function' ? new AbortController() : undefined;
+                    const branchSignal = scope?.signal;
+                    const relay = () => scope?.abort();
+                    if (signal && scope) {
+                        if (signal.aborted) scope.abort();
+                        else signal.addEventListener('abort', relay, { once: true });
+                    }
+
+                    /** @type {(SuccessState | FailureState)[]} */
+                    const results = new Array(eff.effects.length);
+                    // Which branch failed on its own account rather than because it was cancelled.
+                    const triggered = new Array(eff.effects.length).fill(false);
+                    try {
+                        // Still awaits every branch, so no cancelled work is left running unobserved
+                        // after the Failure is returned. Cancelled branches settle promptly; a branch
+                        // whose in-flight Command ignores the signal is the one case that does not.
+                        await Promise.all(
+                            eff.effects.map(async (e, i) => {
+                                const result = await execute(e, branchSignal, `${branchPath}${i}/`);
+                                results[i] = result;
+                                // Read-then-abort is atomic here, so exactly one branch is the trigger.
+                                if (result.type === 'Failure' && !branchSignal?.aborted) {
+                                    triggered[i] = true;
+                                    scope?.abort();
+                                }
+                            })
+                        );
+                    } finally {
+                        if (signal && scope) signal.removeEventListener('abort', relay);
+                    }
+
+                    const trigger = triggered.indexOf(true);
+                    const failure = trigger >= 0 ? results[trigger] : results.find((r) => r.type === 'Failure');
                     if (failure) return failure;
                     eff = eff.next(results.map((r) => /** @type {SuccessState} */ (r).value));
                     continue;
                 }
                 const cmdName = commandName(eff);
                 const initialInput = eff.initialInput;
+                const cmdPath = `${path}${step++}`;
+                const cmd = eff.cmd;
+                // The signal reaches the thunk only inside a Parallel, so a thunk written to take a
+                // parameter is not handed an argument it never expected anywhere else.
+                const op = signal ? () => cmd(signal) : cmd;
                 try {
                     await localCommandInterceptor(eff, context);
-                    const result = await localStepRunner(cmdName, 'Command', eff.cmd);
+                    const result = await localStepRunner(cmdName, 'Command', op, cmdPath);
                     eff = eff.next(result);
                 } catch (e) {
                     // A malformed flow is a bug, not a domain failure, so it must not masquerade as one.
@@ -512,7 +632,12 @@ const runEffect =
         return localRunWrapper(effect, () => execute(effect), context?.flowName || '');
     };
 
-/** @typedef {{ index: number, name: string, type: string }} ReplayStep */
+/**
+ * The step a replay is asking about. `path` is the Command's position in the Effect tree and is stable
+ * across runs; `index` is its position in this run's completion order, which is not stable for a flow
+ * containing `Parallel`. Prefer `path` when writing a Resolver.
+ * @typedef {{ index: number, name: string, type: string, path?: string }} ReplayStep
+ */
 
 /**
  * What production observed for a step. `{ result }` is handed to the Command's
@@ -527,7 +652,9 @@ const runEffect =
 /**
  * A recorded step. `durationMs` is how long the Command took in production, rounded to microseconds,
  * which is the one question a trace could not answer before: which step was slow.
- * @typedef {{ command: string, result?: any, error?: any, durationMs?: number }} TraceEntry
+ * `path` locates the Command in the Effect tree, which is what a replay matches on: it does not move
+ * when `Parallel` branches finish in a different order than they did in production.
+ * @typedef {{ command: string, path?: string, result?: any, error?: any, durationMs?: number }} TraceEntry
  */
 
 /**
@@ -560,12 +687,17 @@ const replayError = (message, props = {}) => Object.assign(new Error(message), {
  * @returns {Error}
  */
 const timeParadox = (step, recorded) =>
-    replayError(`Time paradox at step ${step.index}: flow asked for '${step.name}', trace recorded '${recorded}'`, {
-        name: 'TimeParadox',
-        index: step.index,
-        expected: recorded,
-        actual: step.name
-    });
+    replayError(
+        `Time paradox at ${step.path !== undefined ? `path '${step.path}'` : `step ${step.index}`}: ` +
+            `flow asked for '${step.name}', trace recorded '${recorded}'`,
+        {
+            name: 'TimeParadox',
+            index: step.index,
+            path: step.path,
+            expected: recorded,
+            actual: step.name
+        }
+    );
 
 /**
  * Converts a thrown value into something JSON can carry. `message` and `stack` are
@@ -678,16 +810,17 @@ const recorder = (options = {}) => {
 
     // Built on `observe` so the hook contract lives in one place: `op` always runs, its result is
     // always returned, and its error always propagates.
-    const onStep = observeSteps(({ name }) => (end) => {
+    const onStep = observeSteps(({ name, path }) => (end) => {
         const durationMs = Math.round(end.durationMs * 1000) / 1000;
         push(
             'error' in end
                 ? {
                       command: name,
+                      path,
                       error: snapshot(safeRedact(serializeError(end.error, stack), name, 'error')),
                       durationMs
                   }
-                : { command: name, result: snapshot(safeRedact(end.result, name, 'result')), durationMs }
+                : { command: name, path, result: snapshot(safeRedact(end.result, name, 'result')), durationMs }
         );
     });
 
@@ -741,24 +874,51 @@ const entryToOutcome = (entry) => ('error' in entry ? { error: reviveError(entry
  * when handed a trace instead of a Resolver, and is the only caller. Callers with traces
  * in some other shape write a Resolver instead, which is the extension point.
  *
- * Strict matching consumes entries in recorded order and verifies that the flow asks
- * for the Command the trace expects, which is what detects divergence between the
- * recorded run and the code being replayed.
+ * Path matching is used whenever every entry carries a `path`, which is every trace this
+ * version records. A path is the Command's position in the Effect tree, so it is order-independent
+ * and still paradox-detecting: it works for `Parallel` without `strict: false`, and it tells two
+ * branches that call the same Command apart by where they are rather than by which finished first.
+ * `strict` does not apply, since path matching is neither positional nor lenient.
  *
- * Name matching is required for flows containing `Parallel`: branches run through
- * `Promise.all` and therefore complete out of array order, so recorded positions are
- * not stable. It resolves per-Command FIFO queues instead, which is order-independent
- * and still keeps duplicate Command names apart.
+ * The two older modes remain for traces recorded before paths existed. Strict matching consumes
+ * entries in recorded order and verifies the flow asks for the Command the trace expects. Name
+ * matching resolves per-Command FIFO queues, which was the only option for `Parallel` and is the
+ * mode that could pair a branch with a sibling's result when both called the same Command.
  *
  * @param {TraceLog | TraceEntry[]} traceLog - A reference-format trace, or a bare array of entries
  * @param {Object} [options]
- * @param {boolean} [options.strict] - Positional matching with paradox detection (default `true`)
+ * @param {boolean} [options.strict] - Positional matching with paradox detection (default `true`).
+ *        Ignored for a trace carrying paths.
  * @returns {Resolver}
  */
 const fromTrace = (traceLog, options = {}) => {
     const { strict = true } = options;
     const entries = Array.isArray(traceLog) ? traceLog : traceLog?.trace;
     if (!Array.isArray(entries)) throw replayError('Trace has no `trace` array.');
+
+    // Paths win when the trace has them, whatever `strict` says: a caller who passed `strict: false`
+    // to work around Parallel should get the correct matching once their traces carry paths, rather
+    // than keeping the mode that option existed to work around.
+    if (entries.length > 0 && entries.every((e) => typeof e.path === 'string')) {
+        const byPath = new Map(entries.map((e) => [e.path, e]));
+        // Paths are derived from tree position, so they are unique by construction. A collision means
+        // either a hand-built trace or a bug in path derivation, and silently keeping the last entry
+        // would reintroduce exactly the wrong-result-per-branch failure paths exist to prevent.
+        if (byPath.size !== entries.length) {
+            throw replayError('Trace has duplicate step paths, so it cannot be matched by path.');
+        }
+        return (step) => {
+            const entry = byPath.get(step.path);
+            if (!entry) {
+                throw replayError(`Trace has no step at path '${step.path}' for '${step.name}'.`, {
+                    command: step.name,
+                    path: step.path
+                });
+            }
+            if (entry.command !== step.name) throw timeParadox(step, entry.command);
+            return entryToOutcome(entry);
+        };
+    }
 
     if (strict) {
         return (step) => {
@@ -863,8 +1023,8 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     let index = 0;
 
     /** @type {StepRunner} */
-    const onStep = async (name, type, op) => {
-        const step = { index: index++, name, type };
+    const onStep = async (name, type, op, path) => {
+        const step = { index: index++, name, type, path };
         const outcome = resolve(step);
         if (onResolved) onResolved(step, outcome);
         if (outcome === undefined) {
@@ -918,17 +1078,19 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
     if (version && traceVersion && version !== traceVersion) {
         log(`Warning: trace was recorded at ${traceVersion}, replaying against ${version}.`);
     }
-    const stepsText = (trace.length === 0 || trace.length > 1) ? 'steps' : 'step';
+    const stepsText = trace.length === 0 || trace.length > 1 ? 'steps' : 'step';
     log(`Replaying '${flowName || 'flow'}' (${trace.length} recorded ${stepsText})`);
     log(`Initial input: ${format(initialInput)}`);
 
     // Narration goes through `onResolved` rather than a wrapped Resolver: observing each
     // step is all this needs, and `replayEffect` already resolves the trace itself.
     let consumed = 0;
-    // Only strict matching maps a replayed step back to its recorded entry by position, so timings
-    // are narrated there and omitted when per-Command queues are matching by name.
+    // A path maps a replayed step back to its recorded entry whatever order branches finished in, so
+    // timings are narrated for Parallel too. Positional lookup is the fallback for a legacy trace with
+    // no paths, and only under strict matching, since per-Command queues carry no position.
+    const byPath = new Map(trace.filter((e) => typeof e.path === 'string').map((e) => [e.path, e]));
     const timing = (/** @type {ReplayStep} */ step) => {
-        const recorded = strict ? trace[step.index] : undefined;
+        const recorded = byPath.get(step.path) ?? (strict ? trace[step.index] : undefined);
         return typeof recorded?.durationMs === 'number' ? ` in ${recorded.durationMs}ms` : '';
     };
     const result = await replayEffect(flowFn(initialInput), traceLog, {
