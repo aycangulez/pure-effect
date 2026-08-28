@@ -1,15 +1,15 @@
 # Pure Effect
 
-[![npm version](https://img.shields.io/npm/v/pure-effect)](https://www.npmjs.com/package/pure-effect) [![bundle size](https://img.shields.io/badge/minified%2Bgzipped-%3C3.4KB-brightgreen)](https://bundlephobia.com/package/pure-effect) [![license](https://img.shields.io/npm/l/pure-effect)](https://github.com/aycangulez/pure-effect/blob/main/LICENSE)
+[![npm version](https://img.shields.io/npm/v/pure-effect)](https://www.npmjs.com/package/pure-effect) [![bundle size](https://img.shields.io/badge/minified%2Bgzipped-4KB-brightgreen)](https://bundlephobia.com/package/pure-effect) [![license](https://img.shields.io/npm/l/pure-effect)](https://github.com/aycangulez/pure-effect/blob/main/LICENSE)
 
 **Pure Effect** is a zero-dependency effect library for JavaScript and TypeScript with time-travel debugging, dependency injection, retry, and OpenTelemetry, where business logic is plain data you can test without mocks.
 
 - Replay a production failure locally, with no database and no network
 - No mocks needed to test async pipelines
 - Inject context without touching function signatures
-- Built-in retry and parallel execution with configurable delay, backoff, and `Promise.all` semantics
+- Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks
-- Zero dependencies, under 3.4 KB minified and gzipped
+- Zero dependencies, under 4 KB minified and gzipped
 - Works in JavaScript and TypeScript (full generics, bundled `.d.ts`)
 
 ## Table of Contents
@@ -47,19 +47,21 @@ const validateRegistration = (input) => {
     return Success(input);
 };
 
-// These functions return a Command object. They do NOT call the database.
-// Name the thunk: traces, replay matching, and telemetry spans are keyed on it.
+// These following two functions return a Command object. They do NOT call the database.
+// Name the commands since traces, replay matching, and telemetry spans are keyed on them.
 const ensureEmailAvailable = (input) => {
     const cmdFindUser = () => db.findUser(input.email);
-    return Command(cmdFindUser, (found) => (found ? Failure('Email already in use.') : Success(input)));
+    const next = (found) => (found ? Failure('Email already in use.') : Success(input));
+    return Command(cmdFindUser, next);
 };
 
-// With no continuation, the result passes straight through.
+// With no continuation (next), the result passes straight through.
 const saveUser = (input) => {
     const cmdSaveUser = () => db.saveUser(input);
     return Command(cmdSaveUser);
 };
 
+// Create flow (not executed yet)
 const registerUserFlow = (input) => effectPipe(validateRegistration, ensureEmailAvailable, saveUser)(input);
 
 // Imperative shell: this is the only place side effects run
@@ -125,7 +127,7 @@ it('prod incident 8f3a: a 100% promo produces a $0 charge', async () => {
 });
 ```
 
-The test verifies that the flow still takes the recorded path and handles the recorded outcomes the same way: a refactor that reorders or drops a step raises a `TimeParadox`, and changed error handling fails the assertion.
+The test verifies that the flow still takes the recorded path and handles the recorded outcomes the same way: a refactor that reorders or drops a step raises a `TimeParadox` naming the path it diverged at, and changed error handling fails the assertion.
 
 **Nondeterminism belongs inside a Command.** A value that varies between runs (the current time, a random ID) is I/O as far as replay is concerned. Wrap it in a Command and it is recorded and replayed like any other response; a step that calls `Date.now()` directly computes a fresh value on every replay and silently diverges from the trace.
 
@@ -223,7 +225,7 @@ Every attempt is a recorded step, so a replay reproduces the exact sequence of f
 
 ## Running Effects in Parallel
 
-`Parallel` runs multiple Effect trees concurrently and passes their results to `next` as an ordered array. If any effect fails, `next` is not called and the `Failure` propagates immediately.
+`Parallel` runs multiple Effect trees concurrently and passes their results to `next` as an ordered array. The first branch to fail cancels its siblings, `next` is not called, and that branch's `Failure` is what propagates.
 
 ```js
 import { Success, Command, Parallel } from 'pure-effect';
@@ -234,7 +236,17 @@ const loadProfile = (userId) =>
 
 `Ask` context flows into all parallel branches without any extra wiring.
 
-Note for replay: branches complete out of array order, so recorded positions are not stable. Replay flows containing `Parallel` with `{ strict: false }`, which matches per-Command queues instead of positions.
+**Cancellation is cooperative, and it works at two levels.** A cancelled branch starts no further Commands. For example, a three-step branch whose first step is in flight when a sibling fails runs that step and stops. Cancelling the step already in flight needs the function to accept the `AbortSignal` it is handed and pass it to whatever performs the I/O:
+
+```js
+// Cancellable: the request is aborted the moment a sibling branch fails.
+const fetchProfile = (userId) => Command((signal) => fetch(`/users/${userId}`, { signal }).then((r) => r.json()));
+
+// Not cancellable: this runs to completion even after a sibling fails.
+const fetchProfileUncancellable = (userId) => Command(() => fetch(`/users/${userId}`).then((r) => r.json()));
+```
+
+Outside a `Parallel` the function is called with no arguments at all, so nothing changes for a Command that never runs in a branch. A `Retry` inside a cancelled branch stops retrying rather than working through the rest of its backoff schedule.
 
 ## TypeScript: Typed Errors and Context
 
@@ -296,7 +308,7 @@ Returns `{ type: 'Failure', error, initialInput }`. Stops the pipeline immediate
 
 Returns `{ type: 'Command', cmd, next, meta }`.
 
-- `cmd`: A function (sync or async) that performs the side effect.
+- `cmd`: A function (sync or async) that performs the side effect. Inside a `Parallel` branch it is called with an `AbortSignal` that fires when a sibling branch fails; elsewhere it is called with no arguments.
 - `next`: Receives the result of `cmd` and returns the next Effect. Optional, defaulting to `(result) => Success(result)`, which is what most Commands want.
 - `meta`: Optional metadata, passed to `onBeforeCommand`. A string `meta.name` becomes the Command's identity. Otherwise, the name of the function is used (`cmd.name`).
 
@@ -324,7 +336,7 @@ Returns `{ type: 'Retry', effect, options, next }`.
 
 #### `Parallel(effects, next)`
 
-Returns `{ type: 'Parallel', effects, next }`. Runs all effects concurrently via `Promise.all`. The first `Failure` is returned immediately and `next` is not called.
+Returns `{ type: 'Parallel', effects, next }`. Runs all effects concurrently. The first branch to fail cancels its siblings and its `Failure` is returned; `next` is not called. When several branches fail in the same tick, the first by array order wins. Each branch's Commands receive an `AbortSignal` as their only argument, so I/O that accepts one is cancelled in flight; see [Running Effects in Parallel](#running-effects-in-parallel).
 
 ### Combinators
 
@@ -404,7 +416,7 @@ restore();
 
 Returns `{ onStep, entries, toTrace }`. Pass `onStep` to `runEffect` or `configureEffect` to record what every Command returned.
 
-Each entry is `{ command, result, durationMs }`, or `{ command, error, durationMs }` when the Command threw, so a trace also answers which step was slow. Results are snapshotted on capture, so a later step that mutates a returned object cannot rewrite what the trace says an earlier step saw. Values that cannot be structurally cloned, such as an object holding a function, are stored by reference instead. Recording cannot change a run: a `redact` that throws records `'[redaction failed]'` for that step instead of failing the flow.
+Each entry is `{ command, path, result, durationMs }`, or `{ command, path, error, durationMs }` when the Command threw, so a trace also answers which step was slow. `path` is the Command's position in the Effect tree, which is what a replay matches on. Results are snapshotted on capture, so a later step that mutates a returned object cannot rewrite what the trace says an earlier step saw. Values that cannot be structurally cloned, such as an object holding a function, are stored by reference instead. Recording cannot change a run: a `redact` that throws records `'[redaction failed]'` for that step instead of failing the flow.
 
 - `options.redact(value, name, kind)`: The single place PII is kept out of a trace. It sees every value a trace holds, with `kind` distinguishing them:
 
@@ -433,7 +445,6 @@ Runs a flow for real while recording, returning `{ result, trace }`. Accepts `re
 Replays an effect tree, feeding recorded results to Commands instead of running them.
 
 - `traceOrResolver`: a trace (or bare entries array) to replay directly, or a resolver function for traces stored in some other shape. A resolver returns `{ result }`, `{ error }`, or `undefined` if the step is unrecorded. A malformed trace rejects with a `ReplayError`.
-- `options.strict` (default `true`): consume trace entries in recorded order and raise `TimeParadox` if the flow asks for a different Command. Set `false` for flows containing `Parallel`, whose branches complete out of array order, to match per-Command queues instead of positions. Ignored when a resolver was passed, since it already matches its own way.
 - `options.context`: context for `Ask`; pass the recorded context.
 - `options.onMissing`: `'throw'` (default) fails on an unrecorded step; `'execute'` runs the real Command, giving a recorded prefix with a live tail.
 - `options.fastRetry` (default `true`): strip `Retry` delays.
@@ -442,14 +453,14 @@ Replays an effect tree, feeding recorded results to Commands instead of running 
 
 #### `timeTravel(flowFn, traceLog, options?)`
 
-Replays a trace and narrates each step with its recorded duration, warning when recorded steps were never reached or when the trace's `version` differs from `options.version`. Durations are reported only under `strict` matching, where a replayed step maps back to its recorded entry by position. Takes `options.strict` (default `true`; set `false` for `Parallel`), `options.context` to override the trace's, and `options.log` in place of `console.log`.
+Replays a trace and narrates each step with its recorded duration, warning when recorded steps were never reached or when the trace's `version` differs from `options.version`. Takes `options.context` to override the trace's, and `options.log` in place of `console.log`.
 
 ## Limitations
 
 - **`Retry` repeats the whole wrapped tree.** Commands that already succeeded run again on every attempt, so wrapping a pipeline re-executes its side effects. Wrap the single Command that fails transiently unless every Command in the tree is idempotent.
-- **`Parallel` has no cancellation.** Every branch runs to completion even after another fails, because the results are collected with `Promise.all` and the first `Failure` is selected afterwards. A branch that fails validation does not prevent a sibling branch from writing.
+- **`Parallel` cancellation is cooperative, so it cannot stop everything.** A cancelled branch starts no further Commands, and a function that accepts the `AbortSignal` it is passed can be cut off in flight. A function that ignores the signal cannot: it runs to completion, so a branch whose _first_ Command is a write can still write after a sibling has failed. `Parallel` also waits for every branch to settle before returning, deliberately, so no cancelled work is left running unobserved after the `Failure` is returned.
 - **A `Failure` is complete by design.** It carries the full error and the `initialInput` that `effectPipe` stamped on it, and neither is trimmed, because a test asserting on a Failure and a developer debugging one both need everything. Keeping PII out of a **trace** is `redact`'s job. Keeping it out of your **logs** is the shell's: log `result.error` rather than serializing the whole `Failure`, which for a login or registration flow holds the credentials that flow received.
-- **Replay reproduces observed inputs, not concurrency.** A stale read replays exactly. A race between two concurrent requests does not: a trace records one flow's view, and `Parallel` interleaving is not captured.
+- **Replay reproduces observed inputs, not concurrency.** A stale read replays exactly. A race between two concurrent requests does not: a trace records one flow's view. `Parallel` branches replay with the results their own branch saw, since every step is matched by its position in the tree, but the interleaving between them is not reproduced, so a flow whose branches race each other through shared state is not something a replay can settle.
 - **A trace records responses, not requests.** Command arguments live in a closure and are unreachable, so a trace shows what a call returned but not what was passed to it. This also bounds what a replay verifies: the flow's path and its handling of recorded outcomes. The upside is that arguments can never leak into a trace.
 - **Global configuration is per module instance.** `configureEffect` writes to module-level state, so two copies of the library in one process, from a dual ESM and CJS resolution, two versions in a dependency tree, or a worker thread, each carry their own wiring. Code that configures one gets nothing in the other, with no error.
 - **A Command needs an identity.** `meta.name` is stable under minification; relying on `cmd.name` instead means a mangler renames every step of every trace, so mangling has to be disabled or names preserved.

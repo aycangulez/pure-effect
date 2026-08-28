@@ -474,7 +474,7 @@ describe('Recording and replay', function () {
         assert.equal(error.lastError.message, 'down');
     });
 
-    it('should require name matching for Parallel, whose branches finish out of order', async function () {
+    it('should replay a Parallel flow whose branches finish out of order', async function () {
         const flow = (/** @type {any} */ id) =>
             Parallel(
                 [
@@ -500,14 +500,115 @@ describe('Recording and replay', function () {
             ['cmdFast', 'cmdSlow'],
             'recording order follows completion, not the effects array'
         );
+        assert.deepEqual(
+            trace.trace.map((e) => e.path),
+            ['0p1/0', '0p0/0'],
+            'each entry is labelled by its branch, so completion order does not matter'
+        );
 
-        const strictReplay = await replayEffect(flow('u1'), trace);
-        assert.equal(strictReplay.type, 'Failure', 'positional matching reports a false paradox');
-        assert.equal(/** @type {Error} */ (errorOf(strictReplay)).name, 'TimeParadox');
-
-        const replayed = await replayEffect(flow('u1'), trace, { strict: false });
+        // No `strict: false` needed: paths are order-independent, so the default replays correctly.
+        const replayed = await replayEffect(flow('u1'), trace);
         assert.equal(replayed.type, 'Success');
         assert.deepEqual(valueOf(replayed), valueOf(result));
+    });
+
+    it('should keep two Parallel branches that call the same Command apart', async function () {
+        // The failure this pins is silent: per-Command queues pair branches by completion order, so
+        // reversing the branch latencies between recording and replay swapped one branch's result
+        // onto the other and the replay still reported Success.
+        const flow = (/** @type {[number, number]} */ delays) =>
+            Parallel(
+                [
+                    Command(
+                        function cmdFetch() {
+                            return new Promise((r) => setTimeout(() => r('A'), delays[0]));
+                        },
+                        (/** @type {any} */ v) => Success(v)
+                    ),
+                    Command(
+                        function cmdFetch() {
+                            return new Promise((r) => setTimeout(() => r('B'), delays[1]));
+                        },
+                        (/** @type {any} */ v) => Success(v)
+                    )
+                ],
+                (/** @type {any} */ vals) => Success(vals)
+            );
+
+        const { result, trace } = await recordEffect(flow, [40, 5]);
+        assert.deepEqual(valueOf(result), ['A', 'B']);
+
+        // Replay with the latencies reversed, so completion order is the opposite of the recorded run.
+        const replayed = await replayEffect(flow([5, 40]), trace);
+        assert.equal(replayed.type, 'Success');
+        assert.deepEqual(valueOf(replayed), ['A', 'B'], 'branch results were not swapped');
+    });
+
+    it('should still resolve a legacy trace that carries no paths', async function () {
+        const a = makeFlow();
+        const { result, trace } = await recordEffect(a.flow, { id: 'legacy' });
+        const legacy = {
+            ...trace,
+            trace: trace.trace.map(({ path, ...rest }) => rest)
+        };
+        assert.ok(
+            legacy.trace.every((e) => e.path === undefined),
+            'the fixture really has no paths'
+        );
+
+        const b = makeFlow();
+        const replayed = await replayEffect(b.flow(trace.initialInput), legacy);
+        assert.equal(replayed.type, 'Success');
+        assert.deepEqual(valueOf(replayed), valueOf(result));
+        assert.deepEqual(b.calls, { read: 0, write: 0 }, 'a legacy trace still performs no I/O');
+    });
+
+    it('should raise a TimeParadox naming the path when a flow diverges', async function () {
+        const original = (/** @type {any} */ id) =>
+            effectPipe(
+                () =>
+                    Command(
+                        function cmdRead() {
+                            return id;
+                        },
+                        (/** @type {any} */ v) => Success(v)
+                    ),
+                (/** @type {any} */ v) =>
+                    Command(
+                        function cmdWrite() {
+                            return v;
+                        },
+                        (/** @type {any} */ w) => Success(w)
+                    )
+            )(id);
+        const { trace } = await recordEffect(original, 'x1');
+
+        // The second step is a different Command than the trace recorded at that path.
+        const diverged = (/** @type {any} */ id) =>
+            effectPipe(
+                () =>
+                    Command(
+                        function cmdRead() {
+                            return id;
+                        },
+                        (/** @type {any} */ v) => Success(v)
+                    ),
+                (/** @type {any} */ v) =>
+                    Command(
+                        function cmdAudit() {
+                            return v;
+                        },
+                        (/** @type {any} */ w) => Success(w)
+                    )
+            )(id);
+
+        const replayed = await replayEffect(diverged('x1'), trace);
+        assert.equal(replayed.type, 'Failure');
+        const error = /** @type {any} */ (errorOf(replayed));
+        assert.equal(error.name, 'TimeParadox');
+        assert.equal(error.path, '1');
+        assert.equal(error.expected, 'cmdWrite');
+        assert.equal(error.actual, 'cmdAudit');
     });
 
     it('should accept a trace directly, without building a Resolver', async function () {
@@ -1665,8 +1766,11 @@ describe('Documented sharp edges', function () {
         assert.equal(charges.length, 3, 'one order, three charges: wrap the Command, not the pipeline');
     });
 
-    it('should run every Parallel branch to completion even after one fails', async function () {
-        // Pinned deliberately: Promise.all has no cancellation, so a Failure does not stop sibling I/O.
+    it('should not stop an in-flight Command whose thunk ignores the signal', async function () {
+        // Pinned deliberately: cancellation is cooperative. The sibling's write is already in flight
+        // inside the branch's first Command, and a thunk that ignores its signal cannot be interrupted,
+        // so the write still lands. What cancellation does buy is in the suite below: no *later*
+        // Command in that branch starts, and a thunk that honours the signal is cut off.
         /** @type {string[]} */
         const written = [];
         const result = await runEffect(
@@ -1695,7 +1799,7 @@ describe('Documented sharp edges', function () {
         );
         assert.equal(result.type, 'Failure');
         assert.equal(errorOf(result), 'validation_failed');
-        assert.deepEqual(written, ['wrote'], 'the sibling branch still performed its write');
+        assert.deepEqual(written, ['wrote'], 'an uninterruptible in-flight write still performed');
     });
 
     it('should carry the initial input on every Failure', async function () {
@@ -1797,5 +1901,167 @@ describe('Malformed flows', function () {
         );
         assert.equal(result.type, 'Failure', 'domain failures are unaffected by the new guard');
         assert.equal(/** @type {Error} */ (errorOf(result)).message, 'boom');
+    });
+});
+
+describe('Parallel cancellation', function () {
+    beforeEach(function () {
+        configureEffect();
+    });
+
+    /** Resolves after `ms`, or rejects as soon as `signal` aborts. */
+    const cancellableSleep = (/** @type {number} */ ms, /** @type {AbortSignal} */ signal) =>
+        new Promise((resolve, reject) => {
+            const timer = setTimeout(resolve, ms);
+            signal?.addEventListener(
+                'abort',
+                () => {
+                    clearTimeout(timer);
+                    reject(new Error('aborted'));
+                },
+                { once: true }
+            );
+        });
+
+    it('should cancel a branch whose thunk honours the signal', async function () {
+        let completed = false;
+        const started = Date.now();
+        const result = await runEffect(
+            Parallel(
+                [
+                    Command(function cmdFail() {
+                        throw new Error('fail_fast');
+                    }),
+                    Command(async function cmdSlow(/** @type {AbortSignal} */ signal) {
+                        await cancellableSleep(400, signal);
+                        completed = true;
+                        return 'wrote';
+                    })
+                ],
+                (/** @type {any} */ v) => Success(v)
+            )
+        );
+        assert.equal(result.type, 'Failure');
+        assert.equal(/** @type {Error} */ (errorOf(result)).message, 'fail_fast');
+        assert.equal(completed, false, 'the cancelled branch never finished its work');
+        assert.ok(Date.now() - started < 200, 'the run did not wait out the cancelled branch');
+    });
+
+    it('should not start a later Command in a cancelled branch', async function () {
+        /** @type {string[]} */
+        const ran = [];
+        const step = (/** @type {string} */ name) => () =>
+            Command(
+                async function cmdWrite() {
+                    await cancellableSleep(30, undefined);
+                    ran.push(name);
+                    return name;
+                },
+                (/** @type {any} */ v) => Success(v)
+            );
+        const result = await runEffect(
+            Parallel(
+                [
+                    Command(async function cmdFail() {
+                        await cancellableSleep(5, undefined);
+                        throw new Error('validation_failed');
+                    }),
+                    effectPipe(step('write1'), step('write2'), step('write3'))(null)
+                ],
+                (/** @type {any} */ v) => Success(v)
+            )
+        );
+        assert.equal(result.type, 'Failure');
+        assert.deepEqual(ran, ['write1'], 'the in-flight write landed; the two after it never started');
+    });
+
+    it('should stop retrying in a cancelled branch', async function () {
+        let attempts = 0;
+        const result = await runEffect(
+            Parallel(
+                [
+                    Command(async function cmdFail() {
+                        await cancellableSleep(30, undefined);
+                        throw new Error('primary_failed');
+                    }),
+                    Retry(
+                        Command(function cmdFlaky() {
+                            attempts++;
+                            throw new Error('flaky');
+                        }),
+                        { attempts: 5, delay: 100 }
+                    )
+                ],
+                (/** @type {any} */ v) => Success(v)
+            )
+        );
+        assert.equal(/** @type {Error} */ (errorOf(result)).message, 'primary_failed');
+        assert.ok(attempts < 5, `the cancelled branch stopped retrying (made ${attempts} attempts, not 6)`);
+    });
+
+    it('should propagate cancellation into a nested Parallel', async function () {
+        let inner = false;
+        const result = await runEffect(
+            Parallel(
+                [
+                    Command(function cmdOuterFail() {
+                        throw new Error('outer_failed');
+                    }),
+                    Parallel(
+                        [
+                            Command(async function cmdInner(/** @type {AbortSignal} */ signal) {
+                                await cancellableSleep(300, signal);
+                                inner = true;
+                                return 1;
+                            })
+                        ],
+                        (/** @type {any} */ v) => Success(v)
+                    )
+                ],
+                (/** @type {any} */ v) => Success(v)
+            )
+        );
+        assert.equal(/** @type {Error} */ (errorOf(result)).message, 'outer_failed');
+        assert.equal(inner, false, 'the inner branch was cancelled with the outer one');
+    });
+
+    it('should return the triggering Failure rather than the cancellation', async function () {
+        const result = await runEffect(
+            Parallel(
+                [
+                    Command(async function cmdSlowOk(/** @type {AbortSignal} */ signal) {
+                        await cancellableSleep(200, signal);
+                        return 'ok';
+                    }),
+                    Command(function cmdRealFailure() {
+                        throw new Error('THE_REAL_ERROR');
+                    })
+                ],
+                (/** @type {any} */ v) => Success(v)
+            )
+        );
+        assert.equal(
+            /** @type {Error} */ (errorOf(result)).message,
+            'THE_REAL_ERROR',
+            'a cancelled sibling must not displace the failure that caused the cancellation'
+        );
+    });
+
+    it('should still pick the first Failure by array order when branches fail together', async function () {
+        const result = await runEffect(Parallel([Failure('a'), Failure('b')], (/** @type {any} */ v) => Success(v)));
+        assert.equal(errorOf(result), 'a');
+    });
+
+    it('should pass no argument to a Command outside a Parallel', async function () {
+        /** @type {any[]} */
+        const args = [];
+        const result = await runEffect(
+            Command(function cmdRecordArgs() {
+                args.push([...arguments]);
+                return 'done';
+            })
+        );
+        assert.equal(result.type, 'Success');
+        assert.deepEqual(args, [[]], 'a thunk outside a Parallel is called with no arguments at all');
     });
 });

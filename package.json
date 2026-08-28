@@ -1,6 +1,6 @@
 {
     "name": "pure-effect",
-    "version": "0.9.0",
+    "version": "0.10.0",
     "description": "A zero-dependency effect library for JavaScript and TypeScript with time-travel debugging, dependency injection, retry, and OpenTelemetry, where business logic is plain data you can test without mocks.",
     "type": "module",
     "exports": "./index.js",
