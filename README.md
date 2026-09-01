@@ -2,14 +2,14 @@
 
 [![npm version](https://img.shields.io/npm/v/pure-effect)](https://www.npmjs.com/package/pure-effect) [![bundle size](https://img.shields.io/badge/minified%2Bgzipped-4KB-brightgreen)](https://bundlephobia.com/package/pure-effect) [![license](https://img.shields.io/npm/l/pure-effect)](https://github.com/aycangulez/pure-effect/blob/main/LICENSE)
 
-**Pure Effect** is a zero-dependency effect library for JavaScript and TypeScript with time-travel debugging, dependency injection, retry, and OpenTelemetry, where business logic is plain data you can test without mocks.
+**Pure Effect** records what your business logic did in production and replays it anywhere: time-travel debugging for JavaScript and TypeScript, with zero dependencies. Business logic is plain data you can test without mocks.
 
 - Replay a production failure locally, with no database and no network
 - No mocks needed to test async pipelines
 - Inject context without touching function signatures
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks
-- Zero dependencies, under 4 KB minified and gzipped
+- Zero dependencies, 4 KB minified and gzipped
 - Works in JavaScript and TypeScript (full generics, bundled `.d.ts`)
 
 ## Table of Contents
@@ -17,11 +17,14 @@
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Testing Without Mocks](#testing-without-mocks)
+- [How It Works](#how-it-works)
 - [Time-Travel Debugging](#time-travel-debugging)
 - [Recording in Production](#recording-in-production)
 - [Passing Runtime Context](#passing-runtime-context)
 - [Retrying Transient Failures](#retrying-transient-failures)
 - [Running Effects in Parallel](#running-effects-in-parallel)
+- [Composing Larger Flows](#composing-larger-flows)
+- [Which Errors Are Data](#which-errors-are-data)
 - [TypeScript: Typed Errors and Context](#typescript-typed-errors-and-context)
 - [Why Pure Effect](#why-pure-effect)
 - [API Reference](#api-reference)
@@ -35,7 +38,7 @@ npm install pure-effect
 
 ## Quick Start
 
-A complete user registration flow. Every step receives the value the previous step produced, so the pipeline reads top-to-bottom as the flow of data:
+A complete user registration flow. Every step receives the value the previous step produced, so the pipeline reads top-to-bottom as the flow of data. Each I/O step is a pair: the call to make, plus a `next` function that receives its answer and decides what follows.
 
 ```js
 import { Success, Failure, Command, effectPipe, runEffect } from 'pure-effect';
@@ -55,13 +58,13 @@ const ensureEmailAvailable = (input) => {
     return Command(cmdFindUser, next);
 };
 
-// With no continuation (next), the result passes straight through.
+// With no next function, the result passes straight through.
 const saveUser = (input) => {
     const cmdSaveUser = () => db.saveUser(input);
     return Command(cmdSaveUser);
 };
 
-// Create flow (not executed yet)
+// Build the flow. Validation runs now; no I/O happens until runEffect.
 const registerUserFlow = (input) => effectPipe(validateRegistration, ensureEmailAvailable, saveUser)(input);
 
 // Imperative shell: this is the only place side effects run
@@ -93,6 +96,14 @@ const step2 = step1.next(null); // simulate "user not found"
 assert.equal(step2.cmd.name, 'cmdSaveUser');
 // The full flow is verified. The database was never touched.
 ```
+
+## How It Works
+
+A flow is a chain of pairs: an I/O call to make, plus a `next` function that receives its answer and returns whatever comes after, another Command, a Success, or a Failure. `runEffect` walks that chain in a loop. 
+
+Recording and replay attach at the single point where a Command's function is called: recording wraps that call to write down each answer, and replay substitutes the recorded answer without making the call, which is why a replayed flow performs no I/O.
+
+Building a flow runs the pure steps immediately: `registerUserFlow(badInput)` returns the validation `Failure` synchronously, which is why the tests above do not need `runEffect`. Only the I/O inside Commands requires it.
 
 ## Time-Travel Debugging
 
@@ -130,6 +141,14 @@ it('prod incident 8f3a: a 100% promo produces a $0 charge', async () => {
 The test verifies that the flow still takes the recorded path and handles the recorded outcomes the same way: a refactor that reorders or drops a step raises a `TimeParadox` naming the path it diverged at, and changed error handling fails the assertion.
 
 **Nondeterminism belongs inside a Command.** A value that varies between runs (the current time, a random ID) is I/O as far as replay is concerned. Wrap it in a Command and it is recorded and replayed like any other response; a step that calls `Date.now()` directly computes a fresh value on every replay and silently diverges from the trace.
+
+**A determinism check is one round trip.** Record a flow, replay it immediately, and compare the outcomes. A step that computes a fresh nondeterministic value surfaces as a `TimeParadox` when it changes which Commands run, or as a mismatch in the final value:
+
+```js
+const { result, trace } = await recordEffect(registerUserFlow, input);
+const replayed = await replayEffect(registerUserFlow(input), trace);
+assert.deepEqual(replayed, result); // fails if any step computed a fresh value
+```
 
 **The trace format is yours.** `replayEffect` also takes a resolver function in place of a trace, so OpenTelemetry spans, a log pipeline, or a database table work as well as the JSON that `recorder` produces.
 
@@ -221,7 +240,21 @@ When all attempts are exhausted, `runEffect` returns a structured `Failure`:
 { retryExhausted: true, lastError: <the last error>, attempts: 3 }
 ```
 
-Every attempt is a recorded step, so a replay reproduces the exact sequence of failures. It also skips the delays, because waiting out production backoff during debugging is never what you want.
+In TypeScript, a `Retry` contributes `RetryExhaustedError<E>` to the pipeline's error union rather than the inner `E` itself, matching what the Failure actually carries: the wrapped tree's error type survives as `result.error.lastError`.
+
+**Recover from exhaustion in-flow with `onExhausted`.** When every attempt has failed, the fallback Effect runs instead of returning the structured Failure. Its success feeds the rest of the pipeline exactly as the primary's would have, and its failure propagates unwrapped:
+
+```js
+const fetchPrice = (sku) =>
+    Retry(fetchLivePrice(sku), {
+        attempts: 3,
+        onExhausted: (err) => fetchCachedPrice(sku) // err = { retryExhausted, lastError, attempts }
+    });
+```
+
+Fallback steps are recorded under their own trace paths, so a replay reproduces the fallback exactly, and a fallback never starts in a `Parallel` branch that a sibling's failure has already cancelled. With `onExhausted` set, the exhaustion error never escapes, so in TypeScript the node contributes the fallback's error type to the pipeline's union instead of `RetryExhaustedError<E>`.
+
+Every attempt is a recorded step, so a replay reproduces the exact sequence of failures. It also skips the delays.
 
 ## Running Effects in Parallel
 
@@ -233,6 +266,8 @@ import { Success, Command, Parallel } from 'pure-effect';
 const loadProfile = (userId) =>
     Parallel([getUser(userId), getPermissions(userId)], ([user, permissions]) => Success({ user, permissions }));
 ```
+
+`next` is optional, defaulting to `(values) => Success(values)` just like `Command`'s, so a bare `Parallel(effects)` resolves to the ordered array of success values.
 
 `Ask` context flows into all parallel branches without any extra wiring.
 
@@ -247,6 +282,68 @@ const fetchProfileUncancellable = (userId) => Command(() => fetch(`/users/${user
 ```
 
 Outside a `Parallel` the function is called with no arguments at all, so nothing changes for a Command that never runs in a branch. A `Retry` inside a cancelled branch stops retrying rather than working through the rest of its backoff schedule.
+
+## Composing Larger Flows
+
+`effectPipe` is a straight line, but flows rarely are. Branching and fan-in work with the existing primitives. Here is how:
+
+**A step can return a sub-pipeline.** `effectPipe(...)(value)` returns an Effect like any other, so a step can branch into a whole sub-flow, and the sub-flow's `Failure` short-circuits the outer pipeline exactly like a local one:
+
+```js
+const processOrder = (order) => (order.isGift ? giftFlow(order) : standardFlow(order));
+
+const fulfillment = effectPipe(validateOrder, processOrder, scheduleShipping);
+```
+
+**Independent fan-in: `Parallel`.** When a later step needs several values that do not depend on each other, run them concurrently and join structurally. With `next` omitted, the branch results arrive as an ordered array:
+
+```js
+const loadCheckout = effectPipe(
+    (input) => Parallel([fetchCart(input.cartId), fetchUser(input.userId)]),
+    ([cart, user]) => Success({ cart, user, total: cartTotal(cart) })
+);
+```
+
+**Dependent fan-in: join locally.** When step B needs step A's result and step C needs both, carry both forward in a value shaped for the next step. A local sub-pipeline that closes over its own parameter makes the join without nested callbacks:
+
+```js
+const applyLoyaltyDiscount = (orderId) =>
+    effectPipe(
+        fetchOrder,
+        (order) => effectPipe(fetchCustomer, (customer) => Success({ order, customer }))(order.customerId),
+        ({ order, customer }) => Success(discountedTotal(order, customer))
+    )(orderId);
+```
+
+**Carry exactly what downstream needs, never an accumulator.** Passing a minimal, purpose-shaped value between steps, rather than a scope object that grows with everything ever computed, is a strategy for avoiding bugs, not a style preference. Each step's input is its complete contract, so a step cannot quietly depend on a value produced far upstream, a stale field cannot outlive the step that should have replaced it, and two steps cannot collide on a key neither knows the other uses. It also keeps data alive no longer than the flow needs it, which matters when the values are credentials or PII. In TypeScript the same discipline is what keeps the pipeline checked end to end: every step consumes the value it receives, so changing what an upstream step produces is a compile error at exactly the step that reads it, instead of an `undefined` at runtime.
+
+## Which Errors Are Data
+
+There is no catch combinator, and that is deliberate. A flow's outcomes divide into two kinds, and the division decides how each is written.
+
+**An outcome the flow handles is data.** A Command's `next` receives the result and can branch into any Effect, including a whole fallback sub-pipeline. When the I/O itself can reject, catch inside the Command's `cmd` function and return the miss as a value:
+
+```js
+const fetchCachedPrice = (sku) => {
+    const cmdFetchCachedPrice = () => cache.get(sku);
+    return Command(cmdFetchCachedPrice, (price) => Success({ ...price, stale: true }));
+};
+
+const fetchPrice = (sku) => {
+    const cmdFetchLivePrice = () =>
+        pricing
+            .get(sku)
+            .then((price) => ({ ok: true, price }))
+            .catch((error) => ({ ok: false, error }));
+    return Command(cmdFetchLivePrice, (r) => (r.ok ? Success({ ...r.price, stale: false }) : fetchCachedPrice(sku)));
+};
+```
+
+The failed live attempt is recorded as that Command's result, error included, so a replay takes the same fallback branch and an incident trace still becomes a regression test. Nothing is hidden; the miss is simply categorized as what it is, an outcome the flow was written to handle.
+
+**A `Failure` means abort.** It short-circuits everything and lands in the shell, which is the one place that decides what a dead flow means: an HTTP status, a queue retry, an alert. Reserving `Failure` for outcomes the flow cannot handle keeps its meaning brutally simple; a reader never has to scan up the tree for a handler, because there is none. A catch combinator would reintroduce exactly the non-local control flow that writing effects as data is meant to eliminate.
+
+The rule of thumb: if you would handle it, return it; if you would only report it, fail with it. The one handled outcome that cannot be modeled as data is retry exhaustion, since the failing happens inside the `Retry` node; that case has its own in-flow form, the `onExhausted` option in [Retrying Transient Failures](#retrying-transient-failures).
 
 ## TypeScript: Typed Errors and Context
 
@@ -284,9 +381,9 @@ const result = await runEffect(findProduct('abc'), { tenant: 'acme', requestId: 
 
 ## Why Pure Effect
 
-**vs. Effect-TS:** Effect-TS is a full functional programming ecosystem with fibers, streaming, schema validation, structured concurrency, and more, though it comes with a steep learning curve. Pure Effect covers a narrower scope: testable pipelines, context injection, retry, parallel execution, and replayable traces. If you need fibers, in-flight cancellation, or streaming, Effect-TS is the right tool.
+**vs. Temporal and durable execution (Restate, Inngest):** The closest relatives, because they are built on the same idea: record what every step returned, replay it deterministically. Those engines run it as a managed execution guarantee: histories persist server-side, and workflows resume automatically after a crash. The difference is who operates it. An engine stores histories and restarts dead runs for you; with Pure Effect that is your application's job, and there is no infrastructure to run.
 
-**vs. fp-ts:** fp-ts brings category theory abstractions (functors, monads, applicatives) to TypeScript. Pure Effect borrows only the concept of effects as data, without that vocabulary.
+**vs. Effect-TS (and fp-ts):** A full functional programming ecosystem with fibers, streaming, schema validation, structured concurrency, and more, though it comes with a steep learning curve and a vocabulary of its own. Pure Effect borrows only the concept of effects as data, and covers a narrower scope: testable pipelines, context injection, retry, parallel execution, and replayable traces. If you need fibers, in-flight cancellation, or streaming, Effect-TS is the right tool.
 
 **vs. plain async/await with mocks:** A mock that passes all your tests but diverges from what the real driver does is worse than no test. Business logic never executes I/O, so there is nothing to mock.
 
@@ -333,12 +430,13 @@ Returns `{ type: 'Retry', effect, options, next }`.
 - `options.attempts`: Max retries, not counting the first try (default: `3`).
 - `options.delay`: Ms before the first retry (default: `100`).
 - `options.backoff`: Multiplier applied to delay on each attempt (default: `1`, flat).
+- `options.onExhausted(error)`: Runs a fallback Effect when every attempt has failed, receiving `{ retryExhausted, lastError, attempts }`. The fallback's success feeds `next`; its failure propagates unwrapped. Per-use only. See [Retrying Transient Failures](#retrying-transient-failures).
 
-#### `Parallel(effects, next)`
+#### `Parallel(effects, next?)`
 
-Returns `{ type: 'Parallel', effects, next }`. Runs all effects concurrently. The first branch to fail cancels its siblings and its `Failure` is returned; `next` is not called. When several branches fail in the same tick, the first by array order wins. Each branch's Commands receive an `AbortSignal` as their only argument, so I/O that accepts one is cancelled in flight; see [Running Effects in Parallel](#running-effects-in-parallel).
+Returns `{ type: 'Parallel', effects, next }`. Runs all effects concurrently. `next` receives the ordered array of success values and is optional, defaulting to `(values) => Success(values)` like `Command`'s. The first branch to fail cancels its siblings and its `Failure` is returned; `next` is not called. When several branches fail in the same tick, the first by array order wins. Each branch's Commands receive an `AbortSignal` as their only argument, so I/O that accepts one is cancelled in flight; see [Running Effects in Parallel](#running-effects-in-parallel).
 
-### Combinators
+### Building pipelines
 
 #### `effectPipe(...functions)`
 
@@ -370,7 +468,7 @@ Commands are data, so a Command that is constructed and discarded never runs, an
 
 Traverses the effect tree, executes Commands with `async/await`, resolves `Ask` with the supplied `context`, and returns the final `Success` or `Failure`.
 
-- `context`: Passed to `Ask` continuations and `onBeforeCommand`. `context.flowName` names the workflow in telemetry.
+- `context`: Passed to `Ask`'s next function and to `onBeforeCommand`. `context.flowName` names the workflow in telemetry.
 - `callConfig`: Per-call overrides for `onStep`, `onRun`, `onBeforeCommand`, and `retry`. Takes precedence over `configureEffect` globals.
 - `onRun` fires exactly once per `runEffect` call. Retry attempts run inside that single span.
 
@@ -381,7 +479,7 @@ Step 'validateRegistration' returned a plain object. Return Success, Failure, Co
 Retry, or Parallel: a plain value has to be wrapped, as in Success(value).
 ```
 
-The same check catches a missing `return`, a Command continuation that returns a plain value, and `runEffect(flow)` where `runEffect(flow(input))` was meant. A Command that throws is still a `Failure`.
+The same check catches a missing `return`, a Command's next function returning a plain value, and `runEffect(flow)` where `runEffect(flow(input))` was meant. A Command that throws is still a `Failure`.
 
 #### `configureEffect(...configs)`
 

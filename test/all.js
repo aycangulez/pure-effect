@@ -16,6 +16,8 @@ import {
     replayEffect,
     timeTravel
 } from '../index.js';
+import * as lib from '../index.js';
+import ts from 'typescript';
 import { enableTelemetry, telemetryHooks } from '../examples/opentelemetry-example.js';
 import { enableRecording, recordingHooks } from '../examples/recording-example.js';
 
@@ -247,6 +249,14 @@ describe('Core', function () {
         assert.equal(result.next, next);
     });
 
+    it('should default next to Success of the values array when omitted', async () => {
+        const e1 = Command(async () => 'a');
+        const e2 = Command(async () => 'b');
+        const result = await runEffect(Parallel([e1, e2]));
+        assert.equal(result.type, 'Success');
+        assert.deepEqual(result.value, ['a', 'b']);
+    });
+
     it('should run effects concurrently and pass results to next', async () => {
         const e1 = Command(
             async () => 'a',
@@ -306,6 +316,138 @@ describe('Core', function () {
         const input = { email: 'test-no-telemetry@test.com', password: 'password123' };
         const result = await registerUser(input);
         assert.equal(result.type, 'Success');
+    });
+});
+
+describe('Retry onExhausted', function () {
+    beforeEach(() => configureEffect());
+
+    it('should run the fallback on exhaustion and feed its value downstream', async function () {
+        let liveCalls = 0;
+        /** @type {any} */
+        let sawError;
+        const flow = effectPipe(
+            (/** @type {any} */ sku) =>
+                Retry(
+                    Command(function cmdFetchLive() {
+                        liveCalls++;
+                        return Promise.reject(new Error('down'));
+                    }),
+                    {
+                        attempts: 2,
+                        delay: 0,
+                        onExhausted: (/** @type {any} */ err) => {
+                            sawError = err;
+                            return Command(function cmdFetchCached() {
+                                return Promise.resolve({ sku, amount: 95 });
+                            });
+                        }
+                    }
+                ),
+            (/** @type {any} */ price) => Success({ ...price, stale: true })
+        );
+        const result = /** @type {any} */ (await runEffect(flow('sku-1')));
+        assert.equal(result.type, 'Success');
+        assert.deepEqual(result.value, { sku: 'sku-1', amount: 95, stale: true });
+        assert.equal(liveCalls, 3, 'the primary still runs the full retry schedule first');
+        assert.equal(sawError.retryExhausted, true);
+        assert.equal(sawError.attempts, 2);
+        assert.equal(sawError.lastError.message, 'down');
+    });
+
+    it('should propagate a failing fallback unwrapped', async function () {
+        const flow = Retry(
+            Command(function cmdPrimary() {
+                return Promise.reject('primary down');
+            }),
+            { attempts: 0, delay: 0, onExhausted: () => Failure('cache empty') }
+        );
+        const result = /** @type {any} */ (await runEffect(flow));
+        assert.equal(result.type, 'Failure');
+        assert.equal(result.error, 'cache empty', 'the fallback failure must not be wrapped in retryExhausted');
+    });
+
+    it('should not run the fallback in a cancelled Parallel branch', async function () {
+        let fallbackRuns = 0;
+        const slowFailing = Retry(
+            Command(async function cmdSlowFail() {
+                await new Promise((resolve) => setTimeout(resolve, 30));
+                throw new Error('slow branch failed');
+            }),
+            {
+                attempts: 0,
+                delay: 0,
+                onExhausted: () => {
+                    fallbackRuns++;
+                    return Success('recovered');
+                }
+            }
+        );
+        const fastFailing = Command(async function cmdFastFail() {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            throw new Error('fast branch failed');
+        });
+        const result = /** @type {any} */ (await runEffect(Parallel([fastFailing, slowFailing])));
+        assert.equal(result.type, 'Failure');
+        assert.equal(result.error.message, 'fast branch failed');
+        assert.equal(fallbackRuns, 0, 'a cancelled branch must not start its fallback');
+    });
+
+    it('should record the fallback under its own path and replay it with zero I/O', async function () {
+        const calls = { live: 0, cached: 0 };
+        const flow = (/** @type {any} */ sku) =>
+            Retry(
+                Command(function cmdFetchLive() {
+                    calls.live++;
+                    return Promise.reject(new Error('down'));
+                }),
+                {
+                    attempts: 1,
+                    delay: 0,
+                    onExhausted: () =>
+                        Command(function cmdFetchCached() {
+                            calls.cached++;
+                            return Promise.resolve(95);
+                        })
+                }
+            );
+        const { result, trace } = await recordEffect(flow, 'sku-1');
+        assert.equal(result.type, 'Success');
+        assert.ok(
+            trace.trace.some((/** @type {any} */ e) => e.command === 'cmdFetchCached' && /f\//.test(e.path)),
+            'the fallback step must be recorded under a fallback path prefix'
+        );
+        const before = { ...calls };
+        const replayed = /** @type {any} */ (await replayEffect(flow('sku-1'), trace));
+        assert.equal(replayed.type, 'Success');
+        assert.deepEqual(replayed.value, /** @type {any} */ (result).value);
+        assert.deepEqual(calls, before, 'replay must perform no I/O');
+    });
+
+    it('should strip Retry delays inside the fallback during replay', async function () {
+        const flow = (/** @type {any} */ n) =>
+            Retry(
+                Command(function cmdPrimary() {
+                    return Promise.reject('nope');
+                }),
+                {
+                    attempts: 0,
+                    delay: 0,
+                    onExhausted: () =>
+                        Retry(
+                            Command(function cmdSecondary() {
+                                return Promise.reject('still nope');
+                            }),
+                            { attempts: 2, delay: 200 }
+                        )
+                }
+            );
+        const { trace } = await recordEffect(flow, 1);
+        const started = Date.now();
+        const replayed = /** @type {any} */ (await replayEffect(flow(1), trace));
+        const elapsed = Date.now() - started;
+        assert.equal(replayed.type, 'Failure');
+        assert.ok(elapsed < 150, `replay must not wait out the fallback backoff, took ${elapsed}ms`);
     });
 });
 
@@ -626,6 +768,41 @@ describe('Recording and replay', function () {
         const fromEntries = await replayEffect(c.flow(trace.initialInput), trace.trace);
         assert.equal(fromEntries.type, 'Success');
         assert.deepEqual(valueOf(fromEntries), valueOf(result));
+    });
+
+    it('should carry an error cause through a trace and back', async function () {
+        const flow = (/** @type {any} */ input) =>
+            Command(function cmdCharge() {
+                return Promise.reject(new Error('charge declined', { cause: new Error('card expired') }));
+            });
+
+        const { result, trace } = await recordEffect(flow, { id: 'cause' });
+        assert.equal(result.type, 'Failure');
+
+        // The trace must survive JSON, which is where a non-enumerable cause would silently vanish.
+        const stored = JSON.parse(JSON.stringify(trace));
+        const replayed = await replayEffect(flow(stored.initialInput), stored);
+        assert.equal(replayed.type, 'Failure');
+        const error = /** @type {any} */ (errorOf(replayed));
+        assert.equal(error.message, 'charge declined');
+        assert.ok(error.cause instanceof Error, 'the revived error must keep its cause');
+        assert.equal(error.cause.message, 'card expired');
+    });
+
+    it('should carry a nested cause chain and a non-Error cause', async function () {
+        const flow = (/** @type {any} */ input) =>
+            Command(function cmdFetch() {
+                return Promise.reject(
+                    new Error('fetch failed', { cause: new Error('socket closed', { cause: 'ECONNRESET' }) })
+                );
+            });
+
+        const { trace } = await recordEffect(flow, { id: 'chain' });
+        const stored = JSON.parse(JSON.stringify(trace));
+        const replayed = await replayEffect(flow(stored.initialInput), stored);
+        const error = /** @type {any} */ (errorOf(replayed));
+        assert.equal(error.cause.message, 'socket closed');
+        assert.equal(error.cause.cause, 'ECONNRESET', 'a non-Error cause must pass through unchanged');
     });
 
     it('should reject a malformed trace as a ReplayError, not a TypeError', async function () {
@@ -2063,5 +2240,26 @@ describe('Parallel cancellation', function () {
         );
         assert.equal(result.type, 'Success');
         assert.deepEqual(args, [[]], 'a thunk outside a Parallel is called with no arguments at all');
+    });
+});
+
+describe('Declaration parity', function () {
+    it('should declare exactly the exports the runtime ships', function () {
+        // index.d.ts is hand-maintained beside index.js, so the two can drift silently: a
+        // declaration once vanished as edit collateral while every check stayed green. This pins
+        // existence in both directions; signatures remain tsd's job.
+        const program = ts.createProgram(['index.d.ts'], { noEmit: true });
+        const source = program.getSourceFile('index.d.ts');
+        assert.ok(source, 'index.d.ts must be part of the program');
+        const checker = program.getTypeChecker();
+        const moduleSymbol = checker.getSymbolAtLocation(/** @type {import('typescript').Node} */ (source));
+        assert.ok(moduleSymbol, 'index.d.ts must be a module');
+        const declared = checker
+            .getExportsOfModule(moduleSymbol)
+            .filter((s) => s.flags & ts.SymbolFlags.Value)
+            .map((s) => s.name)
+            .sort();
+        const shipped = Object.keys(lib).sort();
+        assert.deepEqual(declared, shipped);
     });
 });

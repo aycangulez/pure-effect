@@ -104,13 +104,14 @@ const innerCmd = Command(
     (n) => Success(n)
 );
 
-// Retry with options preserves T
+// Retry with options preserves T; the error type is the exhaustion failure, not the inner error,
+// because the interpreter wraps the last inner error rather than letting it escape
 const retried = Retry(innerCmd, { attempts: 3 });
-expectType<RetryState<number, unknown>>(retried);
+expectType<RetryState<number, RetryExhaustedError<unknown>>>(retried);
 
 // Retry without options is valid
 const retriedNoOpts = Retry(innerCmd);
-expectType<RetryState<number, unknown>>(retriedNoOpts);
+expectType<RetryState<number, RetryExhaustedError<unknown>>>(retriedNoOpts);
 
 // Retry in effectPipe preserves type flow
 const retryFlow = effectPipe((input: User) =>
@@ -122,7 +123,35 @@ const retryFlow = effectPipe((input: User) =>
         { attempts: 2 }
     )
 );
-expectType<Effect<SavedUser>>(retryFlow({ email: 'a@b.com', password: 'secret123' }));
+expectType<Effect<SavedUser, RetryExhaustedError<unknown>>>(retryFlow({ email: 'a@b.com', password: 'secret123' }));
+
+// The inner error type survives inside the exhaustion failure, so lastError is typed
+const retriedTyped = Retry(Success(1) as Effect<number, 'net_down'>);
+expectType<RetryState<number, RetryExhaustedError<'net_down'>>>(retriedTyped);
+
+const retryResult = await runEffect(Retry(Success(1) as Effect<number, 'flaky'>, { attempts: 1 }));
+if (retryResult.type === 'Failure') {
+    expectType<RetryExhaustedError<'flaky'>>(retryResult.error);
+    expectType<'flaky'>(retryResult.error.lastError);
+}
+
+// onExhausted consumes the exhaustion, so the fallback's error type is what remains
+const recovered = Retry(Success(1) as Effect<number, 'flaky'>, {
+    attempts: 1,
+    onExhausted: (err) => {
+        expectType<RetryExhaustedError<'flaky'>>(err);
+        return Success(0) as Effect<number, 'cache_miss'>;
+    }
+});
+expectType<RetryState<number, 'cache_miss'>>(recovered);
+
+const recoveredResult = await runEffect(recovered);
+if (recoveredResult.type === 'Failure') {
+    expectType<'cache_miss'>(recoveredResult.error);
+}
+
+// onExhausted is per-use only: global retry defaults cannot carry a fallback
+expectError(configureEffect({ retry: { attempts: 2, onExhausted: () => Success(1) } }));
 
 // RetryExhaustedError shape is usable for narrowing exhaustion failures
 const exhaustedErr: RetryExhaustedError<Error> = {
@@ -167,6 +196,14 @@ expectType<Effect<{ email: string; password: string }>>(parallelFlow({ email: 'a
 // runEffect return type flows through Parallel
 const parallelResult = await runEffect(Parallel([Success(1), Success('x')], ([n, s]) => Success({ n, s })));
 expectType<SuccessState<{ n: number; s: string }> | FailureState<unknown>>(parallelResult);
+
+// With next omitted, the Parallel resolves to the values tuple itself
+const parBare = Parallel([Success(42), Success('hello')]);
+expectType<ParallelState<[number, string], [number, string]>>(parBare);
+const parBareResult = await runEffect(parBare);
+if (parBareResult.type === 'Success') {
+    expectType<[number, string]>(parBareResult.value);
+}
 
 // --- Ctx (context type) ---
 
