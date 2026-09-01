@@ -44,10 +44,15 @@ export type RetryOptions = {
     backoff?: number;
 };
 
+/**
+ * `E` is the error the node contributes to its pipeline, which for a Retry is the exhaustion failure:
+ * the interpreter never lets an inner attempt's error escape unwrapped, so the wrapped tree's own
+ * error type is consumed by the retry loop rather than exposed here.
+ */
 export type RetryState<T, E = unknown, Ctx = unknown> = {
     type: 'Retry';
-    effect: Effect<T, E, Ctx>;
-    options: RetryOptions;
+    effect: Effect<T, any, Ctx>;
+    options: RetryOptions & { onExhausted?: (error: RetryExhaustedError<any>) => Effect<T, any, Ctx> };
     next: (value: T) => Effect<T, E, Ctx>;
     initialInput?: unknown;
 };
@@ -93,10 +98,35 @@ export declare function Ask<T, E = unknown, Ctx = unknown>(
     next: (context: Ctx) => Effect<T, E, Ctx>
 ): AskState<T, E, Ctx>;
 
+/**
+ * With `onExhausted`, the exhaustion failure never escapes: the fallback Effect runs instead, its
+ * success feeds `next`, and its failure propagates unwrapped, so the node's declared error is the
+ * fallback's own error type. `onExhausted` is a per-use option only; the global `retry` defaults in
+ * `EffectConfiguration` deliberately cannot carry one.
+ */
+export declare function Retry<T, E = unknown, E2 = unknown, Ctx = unknown>(
+    effect: Effect<T, E, Ctx>,
+    options: RetryOptions & { onExhausted: (error: RetryExhaustedError<E>) => Effect<T, E2, Ctx> }
+): RetryState<T, E2, Ctx>;
+
+/**
+ * Without `onExhausted`, the declared error type is `RetryExhaustedError<E>`, because that is what
+ * a Retry's Failure actually carries: on exhaustion the interpreter returns
+ * `Failure({ retryExhausted: true, lastError, attempts })` rather than the inner error itself,
+ * so `result.error.lastError` is where the wrapped tree's `E` survives.
+ */
 export declare function Retry<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     options?: RetryOptions
-): RetryState<T, E, Ctx>;
+): RetryState<T, RetryExhaustedError<E>, Ctx>;
+
+/**
+ * `next` is optional and defaults to `(values) => Success(values)`, same as `Command`'s default,
+ * so a bare `Parallel(effects)` resolves to the ordered array of success values.
+ */
+export declare function Parallel<T extends readonly unknown[], E = unknown, Ctx = unknown>(effects: {
+    [K in keyof T]: Effect<T[K], E, Ctx>;
+}): ParallelState<[...T], [...T], E, Ctx>;
 
 export declare function Parallel<T extends readonly unknown[], R, E = unknown, Ctx = unknown>(
     effects: { [K in keyof T]: Effect<T[K], E, Ctx> },

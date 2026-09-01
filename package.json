@@ -1,19 +1,19 @@
 {
     "name": "pure-effect",
-    "version": "0.10.0",
-    "description": "A zero-dependency effect library for JavaScript and TypeScript with time-travel debugging, dependency injection, retry, and OpenTelemetry, where business logic is plain data you can test without mocks.",
+    "version": "0.11.0",
+    "description": "Records what your business logic did in production and replays it anywhere: time-travel debugging for JavaScript and TypeScript, with zero dependencies. Business logic is plain data you can test without mocks.",
     "type": "module",
     "exports": "./index.js",
     "types": "./index.d.ts",
     "scripts": {
-        "test": "mocha && tsd",
+        "test": "mocha && tsd && tsc -p tsconfig.check.json",
         "format": "prettier --write index.js index.d.ts examples/*.js test/all.js README.md CLAUDE.md"
     },
     "tsd": {
         "directory": "test"
     },
     "author": "Aycan Gulez",
-    "homepage": "https://github.com/aycangulez/pure-effect",
+    "homepage": "https://pure-effect.org",
     "license": "MIT",
     "devDependencies": {
         "@opentelemetry/api": "^1.9.1",

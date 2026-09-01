@@ -28,7 +28,7 @@
  * @typedef {{
  *   type: 'Retry',
  *   effect: Effect,
- *   options: { attempts?: number, delay?: number, backoff?: number },
+ *   options: { attempts?: number, delay?: number, backoff?: number, onExhausted?: (error: any) => Effect },
  *   next: (value: any) => Effect,
  *   initialInput?: any
  * }} RetryState
@@ -125,6 +125,10 @@ const Ask = (next) => ({ type: 'Ask', next });
  * @param {number} [options.attempts] - Max retries (not counting first try)
  * @param {number} [options.delay] - Ms before first retry
  * @param {number} [options.backoff] - Multiplier applied to delay on each subsequent retry
+ * @param {(error: any) => Effect} [options.onExhausted] - Runs a fallback Effect when every attempt has
+ *        failed, receiving `{ retryExhausted, lastError, attempts }`. The fallback's success feeds `next`
+ *        exactly as the primary's would have; its failure propagates unwrapped. Per-use only, never a
+ *        global default, and a fallback never starts in a `Parallel` branch a sibling has cancelled.
  * @returns {RetryState}
  */
 const Retry = (effect, options = {}) => ({
@@ -145,10 +149,15 @@ const Retry = (effect, options = {}) => ({
  * signal runs to completion, so a branch's first Command can still write after a sibling has failed.
  *
  * @param {Effect[]} effects - Array of Effect trees to run concurrently
- * @param {(values: any[]) => Effect} next - Receives array of success values in order, returns next Effect
+ * @param {(values: any[]) => Effect} [next] - Receives array of success values in order, returns next Effect.
+ *        Defaults to `(values) => Success(values)`, same as `Command`'s default.
  * @returns {ParallelState}
  */
-const Parallel = (effects, next) => ({ type: 'Parallel', effects, next });
+const Parallel = (effects, next = (/** @type {any[]} */ values) => Success(values)) => ({
+    type: 'Parallel',
+    effects,
+    next
+});
 
 /**
  * Describes a value for an error message, leading with the mistake it most likely is.
@@ -540,6 +549,9 @@ const runEffect =
                     // Each attempt gets its own prefix, so the Commands of attempt 2 cannot be mistaken
                     // for the Commands of attempt 1 when a trace is matched back up.
                     const retryPath = `${path}${step++}r`;
+                    // Captured while `eff` is still narrowed to a Retry node: the loop reassigns `eff`
+                    // on success, after which the checker cannot prove the fallback path still holds it.
+                    const retryNext = eff.next;
 
                     for (let attempt = 0; attempt <= attempts; attempt++) {
                         if (attempt > 0) {
@@ -551,7 +563,7 @@ const runEffect =
                         if (signal?.aborted) return Failure(parallelCancelled(), eff.initialInput);
                         const result = await execute(eff.effect, signal, `${retryPath}${attempt}/`);
                         if (result.type === 'Success') {
-                            eff = eff.next(result.value);
+                            eff = retryNext(result.value);
                             succeeded = true;
                             break;
                         }
@@ -559,7 +571,23 @@ const runEffect =
                     }
 
                     if (!succeeded) {
-                        return Failure({ retryExhausted: true, lastError, attempts }, eff.initialInput);
+                        const exhausted = { retryExhausted: true, lastError, attempts };
+                        const { onExhausted } = opts;
+                        if (typeof onExhausted !== 'function') return Failure(exhausted, eff.initialInput);
+                        // A cancelled branch must not start its fallback, for the same reason it starts
+                        // no further Commands: recovery must not resurrect work a sibling's failure ended.
+                        if (signal?.aborted) return Failure(parallelCancelled(), eff.initialInput);
+                        // The fallback gets its own path prefix, so a fallback-path trace can never be
+                        // confused with a success-path one when it is matched back up on replay.
+                        const fallback = await execute(
+                            asEffect(onExhausted(exhausted), "Retry option 'onExhausted'"),
+                            signal,
+                            `${retryPath}f/`
+                        );
+                        // A failing fallback propagates as-is: the flow's last word was the fallback's
+                        // error, not the exhaustion it was already told about.
+                        if (fallback.type === 'Failure') return fallback;
+                        eff = retryNext(fallback.value);
                     }
                     continue;
                 }
@@ -712,6 +740,8 @@ const serializeError = (e, withStack) => {
     /** @type {any} */
     const out = { __error: true, name: e.name, message: e.message };
     if (withStack) out.stack = e.stack;
+    // `cause` is non-enumerable too, and it can itself be an Error, so it is carried recursively.
+    if ('cause' in e) out.cause = serializeError(e.cause, withStack);
     for (const k of Object.keys(e)) out[k] = /** @type {any} */ (e)[k];
     return out;
 };
@@ -727,7 +757,9 @@ const reviveError = (v) => {
     const e = new Error(v.message);
     e.name = v.name;
     for (const [k, val] of Object.entries(v)) {
-        if (k !== '__error' && k !== 'name' && k !== 'message') /** @type {any} */ (e)[k] = val;
+        if (k !== '__error' && k !== 'name' && k !== 'message') {
+            /** @type {any} */ (e)[k] = k === 'cause' ? reviveError(val) : val;
+        }
     }
     return e;
 };
@@ -956,13 +988,21 @@ const fromTrace = (traceLog, options = {}) => {
 const zeroRetryDelays = (eff) => {
     if (!eff || typeof eff.type !== 'string') return eff;
     switch (eff.type) {
-        case 'Retry':
+        case 'Retry': {
+            const options = { ...eff.options, delay: 0, backoff: 1 };
+            // The fallback tree only exists once onExhausted runs, so it is rewritten lazily too;
+            // otherwise a Retry inside the fallback keeps its production backoff during replay.
+            if (typeof options.onExhausted === 'function') {
+                const original = options.onExhausted;
+                options.onExhausted = (/** @type {any} */ error) => zeroRetryDelays(original(error));
+            }
             return {
                 ...eff,
-                options: { ...eff.options, delay: 0, backoff: 1 },
+                options,
                 effect: zeroRetryDelays(eff.effect),
                 next: (/** @type {any} */ value) => zeroRetryDelays(eff.next(value))
             };
+        }
         case 'Command':
             return { ...eff, next: (/** @type {any} */ result) => zeroRetryDelays(eff.next(result)) };
         case 'Ask':
