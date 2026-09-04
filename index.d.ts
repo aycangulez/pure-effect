@@ -27,14 +27,19 @@ export type CommandState<R, T, E = unknown, Ctx = unknown> = {
      * `Parallel` no argument is passed at all.
      */
     cmd: (signal?: AbortSignal) => Promise<R> | R;
-    next: (result: R) => Effect<T, E, Ctx>;
+    /**
+     * Method syntax, not a function-typed property, on every state's `next`: `strictFunctionTypes`
+     * checks a property's parameter contravariantly, which made a `CommandState<never, ...>` (a `cmd`
+     * that only throws) unassignable to `Effect`. Method parameters are bivariant, so it is accepted.
+     */
+    next(result: R): Effect<T, E, Ctx>;
     meta?: CommandMeta;
     initialInput?: unknown;
 };
 
 export type AskState<T, E = unknown, Ctx = unknown> = {
     type: 'Ask';
-    next: (context: Ctx) => Effect<T, E, Ctx>;
+    next(context: Ctx): Effect<T, E, Ctx>;
     initialInput?: unknown;
 };
 
@@ -53,7 +58,7 @@ export type RetryState<T, E = unknown, Ctx = unknown> = {
     type: 'Retry';
     effect: Effect<T, any, Ctx>;
     options: RetryOptions & { onExhausted?: (error: RetryExhaustedError<any>) => Effect<T, any, Ctx> };
-    next: (value: T) => Effect<T, E, Ctx>;
+    next(value: T): Effect<T, E, Ctx>;
     initialInput?: unknown;
 };
 
@@ -66,7 +71,7 @@ export type RetryExhaustedError<E = unknown> = {
 export type ParallelState<T extends readonly unknown[], R, E = unknown, Ctx = unknown> = {
     type: 'Parallel';
     effects: { [K in keyof T]: Effect<T[K], E, Ctx> };
-    next: (values: [...T]) => Effect<R, E, Ctx>;
+    next(values: [...T]): Effect<R, E, Ctx>;
     initialInput?: unknown;
 };
 
@@ -406,29 +411,45 @@ export interface ReplayOptions<Ctx = unknown> {
      */
     onMissing?: 'throw' | 'execute';
     onResolved?: (step: ReplayStep, outcome: ReplayOutcome | undefined) => void;
-    /**
-     * Legacy matching mode, used only for a trace whose entries carry no `path`. `true` (default)
-     * consumes entries positionally and raises a `TimeParadox` on divergence; `false` matches
-     * per-Command FIFO queues, which used to be required for flows containing `Parallel`. Ignored
-     * for a trace carrying paths, which is matched by path, and when a Resolver is supplied, since
-     * that Resolver has already chosen how it matches.
-     */
-    strict?: boolean;
+}
+
+/**
+ * What a replay returns: the flow's own outcome and, for a trace, the recorded entries the flow
+ * never asked for. A flow that stops issuing Commands early mismatches nothing, so `result` can be a
+ * `Success` with steps left over; `unreached` is where that shows. It is absent for a Resolver,
+ * since only a trace knows what it holds.
+ */
+export interface Replay<T, E = unknown> {
+    result: SuccessState<T> | FailureState<E>;
+    unreached: TraceEntry[];
 }
 
 /**
  * Pass a trace to replay it directly, or a Resolver when traces are stored in some other
  * shape. To observe a replay rather than change how it resolves, use `onResolved`.
  * A malformed trace rejects with a `ReplayError`.
+ *
+ * Three overloads: a trace yields `unreached`, a Resolver yields none, and a source only known
+ * as the union of the two (a wrapper forwarding whatever it was handed) yields it as optional.
  */
+export declare function replayEffect<T, E = unknown, Ctx = unknown>(
+    effect: Effect<T, E, Ctx>,
+    trace: TraceLog | TraceEntry[],
+    options?: ReplayOptions<Ctx>
+): Promise<Replay<T, E>>;
+export declare function replayEffect<T, E = unknown, Ctx = unknown>(
+    effect: Effect<T, E, Ctx>,
+    resolver: Resolver,
+    options?: ReplayOptions<Ctx>
+): Promise<Omit<Replay<T, E>, 'unreached'>>;
 export declare function replayEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     traceOrResolver: Resolver | TraceLog | TraceEntry[],
     options?: ReplayOptions<Ctx>
-): Promise<SuccessState<T> | FailureState<E>>;
+): Promise<Omit<Replay<T, E>, 'unreached'> & { unreached?: TraceEntry[] }>;
 
 export declare function timeTravel<T, E = unknown, Ctx = unknown>(
     flowFn: (input: any) => Effect<T, E, Ctx>,
     traceLog: TraceLog,
-    options?: { strict?: boolean; log?: (...args: any[]) => void; context?: Ctx; version?: string }
+    options?: { log?: (...args: any[]) => void; context?: Ctx; version?: string }
 ): Promise<SuccessState<T> | FailureState<E>>;

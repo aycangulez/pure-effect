@@ -1,5 +1,16 @@
-import { expectType, expectError } from 'tsd';
-import { Success, Failure, Command, Ask, Retry, Parallel, effectPipe, runEffect, configureEffect } from '../index.js';
+import { expectType, expectAssignable } from 'tsd';
+import {
+    Success,
+    Failure,
+    Command,
+    Ask,
+    Retry,
+    Parallel,
+    effectPipe,
+    runEffect,
+    configureEffect,
+    replayEffect
+} from '../index.js';
 import type {
     SuccessState,
     FailureState,
@@ -12,7 +23,12 @@ import type {
     EffectConfiguration,
     StepRunner,
     RunWrapper,
-    CommandInterceptor
+    CommandInterceptor,
+    TraceEntry,
+    TraceLog,
+    Resolver,
+    ReplayOptions,
+    Replay
 } from '../index.js';
 
 interface User {
@@ -28,7 +44,8 @@ interface SavedUser {
 
 const s = Success(42);
 expectType<SuccessState<number>>(s);
-expectError(Success()); // missing argument
+// @ts-expect-error missing argument
+Success();
 
 // --- Failure ---
 
@@ -46,7 +63,8 @@ expectType<CommandState<number, string>>(
     )
 );
 Command(() => 42, undefined, { name: 'readRow' });
-expectError(Command());
+// @ts-expect-error missing cmd
+Command();
 
 const cmd = Command(
     async () => ({ id: 1, email: 'a@b.com' }) as SavedUser,
@@ -56,6 +74,18 @@ const cmd = Command(
     }
 );
 expectType<CommandState<SavedUser, SavedUser, unknown>>(cmd);
+
+// A cmd that only throws, or returns Promise.reject, infers R as never. That has to stay assignable
+// to Effect under strictFunctionTypes, which is why every state's `next` is a method signature
+// (bivariant parameter) rather than a function-typed property (contravariant, so `never` could not
+// widen to the `any` in `Effect`'s CommandState member).
+const throwing = Command(() => {
+    throw new Error('boom');
+});
+expectAssignable<Effect<never>>(throwing);
+expectAssignable<Effect<never>>(Command(() => Promise.reject(new Error('down'))));
+expectAssignable<Effect<never>>(Retry(throwing));
+expectAssignable<Effect<never>>(effectPipe(() => throwing)(null));
 
 // --- effectPipe type propagation ---
 
@@ -68,7 +98,8 @@ const step2 = (user: User) =>
 
 const flow = effectPipe(step1, step2);
 expectType<Effect<SavedUser>>(flow({ email: 'a@b.com', password: 'secret123' }));
-expectError(flow({ email: 'a@b.com' })); // missing password
+// @ts-expect-error missing password
+flow({ email: 'a@b.com' });
 
 // --- runEffect return type ---
 
@@ -151,7 +182,8 @@ if (recoveredResult.type === 'Failure') {
 }
 
 // onExhausted is per-use only: global retry defaults cannot carry a fallback
-expectError(configureEffect({ retry: { attempts: 2, onExhausted: () => Success(1) } }));
+// @ts-expect-error onExhausted is not a global retry default
+configureEffect({ retry: { attempts: 2, onExhausted: () => Success(1) } });
 
 // RetryExhaustedError shape is usable for narrowing exhaustion failures
 const exhaustedErr: RetryExhaustedError<Error> = {
@@ -226,7 +258,8 @@ const ctxResult = await runEffect(ctxFlow({ email: 'a@b.com', password: 'secret1
 expectType<SuccessState<{ email: string; password: string; conn: string }> | FailureState<unknown>>(ctxResult);
 
 // wrong context shape should error
-expectError(runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { wrong: 'thing' }));
+// @ts-expect-error context does not match Ctx
+runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { wrong: 'thing' });
 
 // --- configureEffect / EffectConfiguration ---
 
@@ -243,8 +276,10 @@ configureEffect({ retry: { attempts: 5 } });
 configureEffect({});
 
 // rejects invalid shapes
-expectError(configureEffect({ onStep: 'not-a-function' }));
-expectError(configureEffect({ retry: { attempts: 'three' } }));
+// @ts-expect-error onStep must be a function
+configureEffect({ onStep: 'not-a-function' });
+// @ts-expect-error attempts must be a number
+configureEffect({ retry: { attempts: 'three' } });
 
 // hook types are correctly shaped
 const myStep: StepRunner = async (name, type, op) => {
@@ -266,3 +301,35 @@ const myInterceptor: CommandInterceptor = async (cmd, _ctx) => {
 // EffectConfiguration is a usable type
 const config: EffectConfiguration = { onStep: myStep, onRun: myRun, onBeforeCommand: myInterceptor };
 expectType<EffectConfiguration>(config);
+
+// replayEffect returns the flow's outcome beside the unreached entries for a trace, and no unreached for a Resolver
+const traceLog: TraceLog = { trace: [{ command: 'cmdRead', path: '0', result: 1 }] };
+const readRow = Command(() => 42);
+const replayOptions: ReplayOptions = {
+    onResolved: (step, outcome) => {
+        expectType<string>(step.name);
+        expectType<number>(step.index);
+    }
+};
+expectType<Promise<Replay<number, unknown>>>(replayEffect(readRow, traceLog, replayOptions));
+expectType<Promise<Replay<number, unknown>>>(replayEffect(readRow, traceLog.trace));
+(async () => {
+    const { result, unreached } = await replayEffect(readRow, traceLog);
+    expectType<SuccessState<number> | FailureState<unknown>>(result);
+    expectType<TraceEntry[]>(unreached);
+    const fromResolver = await replayEffect(readRow, () => ({ result: 42 }));
+    expectType<SuccessState<number> | FailureState<unknown>>(fromResolver.result);
+    // @ts-expect-error a Resolver cannot know what was left unreached
+    fromResolver.unreached;
+})();
+// A source typed as the union (a wrapper forwarding whatever it was handed) still type-checks, with unreached optional
+declare const traceOrResolver: TraceLog | TraceEntry[] | Resolver;
+(async () => {
+    const forwarded = await replayEffect(readRow, traceOrResolver);
+    expectType<SuccessState<number> | FailureState<unknown>>(forwarded.result);
+    expectType<TraceEntry[] | undefined>(forwarded.unreached);
+})();
+// @ts-expect-error strict was removed: paths make it unnecessary
+replayEffect(readRow, traceLog, { strict: false });
+// @ts-expect-error unreached is returned, not observed
+replayEffect(readRow, traceLog, { onUnreached: () => {} });

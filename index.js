@@ -89,7 +89,7 @@ const Command = (cmd, next = (/** @type {any} */ result) => Success(result), met
 });
 
 /**
- * The name a Command is known by: what a trace records, what strict replay matches on, and what a
+ * The name a Command is known by: what a trace records, what replay matches on, and what a
  * telemetry span is called.
  *
  * `meta.name` wins when it is a non-empty string. Otherwise the identity is the thunk's own `name`,
@@ -755,11 +755,17 @@ const serializeError = (e, withStack) => {
 const reviveError = (v) => {
     if (!v || typeof v !== 'object' || v.__error !== true) return v;
     const e = new Error(v.message);
-    e.name = v.name;
+    // `name` and `cause` are non-enumerable on a native Error (`name` is inherited, `cause` is set by the
+    // constructor), so they are defined the same way here. Assigning them would make them own enumerable
+    // keys, and the revived error would then never compare deep-equal to the one the Command threw, which
+    // is what the record-then-replay determinism check relies on. Everything else was enumerable on the
+    // original, since `serializeError` read it through `Object.keys`, so plain assignment is faithful.
+    const hidden = { enumerable: false, configurable: true, writable: true };
+    Object.defineProperty(e, 'name', { ...hidden, value: v.name });
     for (const [k, val] of Object.entries(v)) {
-        if (k !== '__error' && k !== 'name' && k !== 'message') {
-            /** @type {any} */ (e)[k] = k === 'cause' ? reviveError(val) : val;
-        }
+        if (k === '__error' || k === 'name' || k === 'message') continue;
+        if (k === 'cause') Object.defineProperty(e, 'cause', { ...hidden, value: reviveError(val) });
+        else /** @type {any} */ (e)[k] = val;
     }
     return e;
 };
@@ -908,36 +914,36 @@ const entryToOutcome = (entry) => ('error' in entry ? { error: reviveError(entry
  *
  * Path matching is used whenever every entry carries a `path`, which is every trace this
  * version records. A path is the Command's position in the Effect tree, so it is order-independent
- * and still paradox-detecting: it works for `Parallel` without `strict: false`, and it tells two
- * branches that call the same Command apart by where they are rather than by which finished first.
- * `strict` does not apply, since path matching is neither positional nor lenient.
+ * and still paradox-detecting: it works for `Parallel` as it is, and it tells two branches that
+ * call the same Command apart by where they are rather than by which finished first.
  *
- * The two older modes remain for traces recorded before paths existed. Strict matching consumes
- * entries in recorded order and verifies the flow asks for the Command the trace expects. Name
- * matching resolves per-Command FIFO queues, which was the only option for `Parallel` and is the
- * mode that could pair a branch with a sibling's result when both called the same Command.
+ * A trace whose entries carry no path (recorded before paths existed, or written by hand) is
+ * matched positionally: entries are consumed in recorded order and each must name the Command the
+ * flow asks for. That is exact for sequential flows and cannot tell `Parallel` branches apart, which
+ * is what paths were added to fix.
  *
  * @param {TraceLog | TraceEntry[]} traceLog - A reference-format trace, or a bare array of entries
  * @param {Object} [options]
- * @param {boolean} [options.strict] - Positional matching with paradox detection (default `true`).
- *        Ignored for a trace carrying paths.
+ * @param {(entry: TraceEntry) => void} [options.onEntry] - Observes each entry as it is handed to a step,
+ *        which is how `replayEffect` learns which recorded entries the flow never asked for.
  * @returns {Resolver}
  */
 const fromTrace = (traceLog, options = {}) => {
-    const { strict = true } = options;
+    const { onEntry } = options;
     const entries = Array.isArray(traceLog) ? traceLog : traceLog?.trace;
     if (!Array.isArray(entries)) throw replayError('Trace has no `trace` array.');
+    const resolveEntry = (/** @type {TraceEntry} */ entry) => {
+        if (onEntry) onEntry(entry);
+        return entryToOutcome(entry);
+    };
 
-    // Paths win when the trace has them, whatever `strict` says: a caller who passed `strict: false`
-    // to work around Parallel should get the correct matching once their traces carry paths, rather
-    // than keeping the mode that option existed to work around.
     if (entries.length > 0 && entries.every((e) => typeof e.path === 'string')) {
         const byPath = new Map(entries.map((e) => [e.path, e]));
         // Paths are derived from tree position, so they are unique by construction. A collision means
         // either a hand-built trace or a bug in path derivation, and silently keeping the last entry
         // would reintroduce exactly the wrong-result-per-branch failure paths exist to prevent.
         if (byPath.size !== entries.length) {
-            throw replayError('Trace has duplicate step paths, so it cannot be matched by path.');
+            throw replayError('Trace has duplicate step paths.');
         }
         return (step) => {
             const entry = byPath.get(step.path);
@@ -948,29 +954,24 @@ const fromTrace = (traceLog, options = {}) => {
                 });
             }
             if (entry.command !== step.name) throw timeParadox(step, entry.command);
-            return entryToOutcome(entry);
+            return resolveEntry(entry);
         };
     }
 
-    if (strict) {
-        return (step) => {
-            const entry = entries[step.index];
-            if (!entry) throw replayError(`Trace exhausted: no entry #${step.index} for '${step.name}'.`);
-            if (entry.command !== step.name) throw timeParadox(step, entry.command);
-            return entryToOutcome(entry);
-        };
-    }
-
-    /** @type {Map<string, TraceEntry[]>} */
-    const queues = new Map();
-    for (const entry of entries) {
-        if (!queues.has(entry.command)) queues.set(entry.command, []);
-        /** @type {TraceEntry[]} */ (queues.get(entry.command)).push(entry);
-    }
     return (step) => {
-        const queue = queues.get(step.name);
-        if (!queue || queue.length === 0) throw replayError(`No recorded result left for '${step.name}'.`);
-        return entryToOutcome(/** @type {TraceEntry} */ (queue.shift()));
+        // Positional matching pairs steps by completion order, which is exactly what makes Parallel
+        // branches indistinguishable. Refusing is better than a result that is right only when the
+        // replay happens to finish in production's order.
+        if (typeof step.path === 'string' && /p\d+\//.test(step.path)) {
+            throw replayError(
+                `Trace carries no paths, so '${step.name}' inside a Parallel cannot be matched positionally.`,
+                { command: step.name, path: step.path }
+            );
+        }
+        const entry = entries[step.index];
+        if (!entry) throw replayError(`Trace exhausted: no entry #${step.index} for '${step.name}'.`);
+        if (entry.command !== step.name) throw timeParadox(step, entry.command);
+        return resolveEntry(entry);
     };
 };
 
@@ -1028,10 +1029,19 @@ const zeroRetryDelays = (eff) => {
  *           `'throw'` (default) fails the replay, which makes side effects impossible for the whole run.
  *           `'execute'` runs the real Command, giving partial replay: recorded prefix, live tail.
  * @property {(step: ReplayStep, outcome: ReplayOutcome | undefined) => void} [onResolved] - Observes each step.
- * @property {boolean} [strict] - Matching mode used when a trace is passed instead of a Resolver.
- *           `true` (default) consumes entries positionally and raises a `TimeParadox` on divergence;
- *           `false` matches per-Command FIFO queues, which is required for flows containing `Parallel`.
- *           Ignored when a Resolver is supplied, since that Resolver has already chosen how it matches.
+ */
+
+/**
+ * What a replay returns: the flow's own outcome, and, when a trace was supplied, the recorded
+ * entries the flow never asked for. `unreached` is absent for a Resolver, since only a trace
+ * knows what it holds.
+ *
+ * A flow that stops issuing Commands before its recording ends mismatches nothing, so no
+ * `TimeParadox` fires and `result` can be a `Success` with recorded steps left over. That is
+ * sometimes the point of a fix and sometimes a fix that quietly dropped a step; `unreached` is
+ * the only place the difference shows, which is why it travels with the result rather than
+ * behind an option.
+ * @typedef {{ result: SuccessState | FailureState, unreached?: TraceEntry[] }} Replay
  */
 
 /**
@@ -1051,15 +1061,20 @@ const zeroRetryDelays = (eff) => {
  *        Resolver supplying each Command's recorded outcome (`undefined` if it has none). Write a Resolver when
  *        traces are stored in some other shape; to observe a replay without one, use `onResolved`.
  * @param {ReplayOptions} [options]
- * @returns {Promise<SuccessState | FailureState>}
+ * @returns {Promise<Replay>} `{ result, unreached }` for a trace, `{ result }` for a Resolver
  */
 // `async` so a malformed trace arrives as a rejection rather than a synchronous throw:
 // the function otherwise returns a promise, and callers should not have to handle both.
 const replayEffect = async (effect, traceOrResolver, options = {}) => {
-    const { context = {}, fastRetry = true, hooks = false, onMissing = 'throw', onResolved, strict = true } = options;
+    const { context = {}, fastRetry = true, hooks = false, onMissing = 'throw', onResolved } = options;
     // A trace is data and a Resolver is a function, so nothing else is needed to tell them
     // apart, including the bare entries array that `fromTrace` also accepts.
-    const resolve = typeof traceOrResolver === 'function' ? traceOrResolver : fromTrace(traceOrResolver, { strict });
+    const fromResolver = typeof traceOrResolver === 'function';
+    /** @type {Set<TraceEntry>} */
+    const reached = new Set();
+    const resolve = fromResolver
+        ? traceOrResolver
+        : fromTrace(traceOrResolver, { onEntry: (entry) => void reached.add(entry) });
     let index = 0;
 
     /** @type {StepRunner} */
@@ -1088,25 +1103,29 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
         callConfig.onBeforeCommand = async () => {};
     }
 
-    return runEffect(fastRetry ? zeroRetryDelays(effect) : effect, context, callConfig);
+    const result = await runEffect(fastRetry ? zeroRetryDelays(effect) : effect, context, callConfig);
+    if (fromResolver) return { result };
+    // `fromTrace` has already validated the shape, so the entries are here in one form or the other.
+    const entries = Array.isArray(traceOrResolver) ? traceOrResolver : traceOrResolver.trace;
+    return { result, unreached: entries.filter((entry) => !reached.has(entry)) };
 };
 
 /**
  * Replays a reference-format trace and narrates each step. Rebuilds the flow from the
- * recorded input, reports the outcome, and warns when recorded steps were never
+ * recorded input, reports the outcome, and names any recorded steps that were never
  * reached, which means the current code issued fewer Commands than production did.
  *
  * @param {(input: any) => Effect} flowFn - The same flow function that produced the trace
  * @param {TraceLog} traceLog - A trace from `recordEffect` or a `recorder`
  * @param {Object} [options]
- * @param {boolean} [options.strict] - Positional matching with paradox detection; set `false` for `Parallel`
  * @param {(...args: any[]) => void} [options.log] - Defaults to `console.log`
  * @param {any} [options.context] - Overrides the context stored on the trace
  * @param {string} [options.version] - Current build id; warns when it differs from the trace's
- * @returns {Promise<SuccessState | FailureState>}
+ * @returns {Promise<SuccessState | FailureState>} The flow's outcome. Narration is the point of this function;
+ *          a caller who wants the unreached entries as data uses `replayEffect`.
  */
 const timeTravel = async (flowFn, traceLog, options = {}) => {
-    const { strict = true, log = console.log, context, version } = options;
+    const { log = console.log, context, version } = options;
     const { initialInput, trace, flowName, version: traceVersion } = traceLog;
     // `message` and `stack` are non-enumerable on Error, so JSON.stringify alone would
     // drop the most useful line of the report.
@@ -1124,22 +1143,19 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
 
     // Narration goes through `onResolved` rather than a wrapped Resolver: observing each
     // step is all this needs, and `replayEffect` already resolves the trace itself.
-    let consumed = 0;
     // A path maps a replayed step back to its recorded entry whatever order branches finished in, so
-    // timings are narrated for Parallel too. Positional lookup is the fallback for a legacy trace with
-    // no paths, and only under strict matching, since per-Command queues carry no position.
+    // timings are narrated for Parallel too. Positional lookup is the fallback for a trace with no paths,
+    // which is how such a trace is matched anyway.
     const byPath = new Map(trace.filter((e) => typeof e.path === 'string').map((e) => [e.path, e]));
     const timing = (/** @type {ReplayStep} */ step) => {
-        const recorded = byPath.get(step.path) ?? (strict ? trace[step.index] : undefined);
+        const recorded = byPath.get(step.path) ?? trace[step.index];
         return typeof recorded?.durationMs === 'number' ? ` in ${recorded.durationMs}ms` : '';
     };
-    const result = await replayEffect(flowFn(initialInput), traceLog, {
-        strict,
+    const replay = await replayEffect(flowFn(initialInput), traceLog, {
         context: context !== undefined ? context : traceLog.context || {},
         onResolved: (step, outcome) => {
             // Resolving from a trace either answers or throws, so this is never undefined.
             if (outcome === undefined) return;
-            consumed++;
             log(
                 'error' in outcome
                     ? `Step ${step.index + 1}: ${step.name} threw${timing(step)} ${format(outcome.error)}`
@@ -1147,11 +1163,21 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
             );
         }
     });
+    const { result, unreached = [] } = replay;
 
     log(`Replay finished with state: ${result.type}`);
     log(result.type === 'Failure' ? `Error: ${format(result.error)}` : `Result: ${format(result.value)}`);
-    if (consumed < trace.length) {
-        log(`Warning: ${trace.length - consumed} recorded ${stepsText} were never reached. The flow diverged.`);
+    // After a replay error the flow never got past the divergence, so the entries behind it are not
+    // news; the error already names where the timeline split. Only a flow that ended on its own terms
+    // with steps left over is worth a warning.
+    const haltedByReplay = result.type === 'Failure' && /^(TimeParadox|ReplayError)$/.test(result.error?.name);
+    if (unreached.length > 0 && !haltedByReplay) {
+        // Named, not just counted: the step a fix stopped issuing is usually the one under suspicion.
+        const names = unreached.map((e) =>
+            typeof e.path === 'string' ? `${e.command} (path '${e.path}')` : e.command
+        );
+        const count = unreached.length === 1 ? '1 recorded step was' : `${unreached.length} recorded steps were`;
+        log(`Warning: ${count} never reached: ${names.join(', ')}. The flow diverged.`);
     }
     return result;
 };

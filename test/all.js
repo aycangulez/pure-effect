@@ -418,7 +418,7 @@ describe('Retry onExhausted', function () {
             'the fallback step must be recorded under a fallback path prefix'
         );
         const before = { ...calls };
-        const replayed = /** @type {any} */ (await replayEffect(flow('sku-1'), trace));
+        const { result: replayed } = /** @type {any} */ (await replayEffect(flow('sku-1'), trace));
         assert.equal(replayed.type, 'Success');
         assert.deepEqual(replayed.value, /** @type {any} */ (result).value);
         assert.deepEqual(calls, before, 'replay must perform no I/O');
@@ -444,7 +444,7 @@ describe('Retry onExhausted', function () {
             );
         const { trace } = await recordEffect(flow, 1);
         const started = Date.now();
-        const replayed = /** @type {any} */ (await replayEffect(flow(1), trace));
+        const { result: replayed } = /** @type {any} */ (await replayEffect(flow(1), trace));
         const elapsed = Date.now() - started;
         assert.equal(replayed.type, 'Failure');
         assert.ok(elapsed < 150, `replay must not wait out the fallback backoff, took ${elapsed}ms`);
@@ -470,7 +470,10 @@ describe('Recording and replay', function () {
             'every Command in the flow is recorded, including the guard'
         );
 
-        const replayed = await replayEffect(registerUserFlow(/** @type {User} */ (trace.initialInput)), trace);
+        const { result: replayed } = await replayEffect(
+            registerUserFlow(/** @type {User} */ (trace.initialInput)),
+            trace
+        );
         assert.equal(replayed.type, 'Success');
         assert.deepEqual(valueOf(replayed), valueOf(result));
     });
@@ -509,7 +512,7 @@ describe('Recording and replay', function () {
         assert.equal(trace.version, 'abc123');
 
         const b = makeFlow();
-        const replayed = await replayEffect(b.flow(trace.initialInput), trace);
+        const { result: replayed } = await replayEffect(b.flow(trace.initialInput), trace);
         assert.equal(replayed.type, 'Success');
         assert.deepEqual(valueOf(replayed), valueOf(result));
         assert.deepEqual(b.calls, { read: 0, write: 0 }, 'replay must not touch the world');
@@ -542,7 +545,7 @@ describe('Recording and replay', function () {
         );
 
         n = 100;
-        const replayed = await replayEffect(readTwice(null), trace);
+        const { result: replayed } = await replayEffect(readTwice(null), trace);
         assert.deepEqual(valueOf(replayed), [1, 2], 'each call got its own recorded value');
         assert.equal(n, 100, 'the real command never ran');
     });
@@ -561,7 +564,7 @@ describe('Recording and replay', function () {
         const { trace } = await recordEffect(flow, 'sku-1', { context: { tenant: 'acme', flowName: 'lookup' } });
         assert.equal(/** @type {any} */ (trace.context).tenant, 'acme');
 
-        const replayed = await replayEffect(flow('sku-1'), trace, { context: trace.context });
+        const { result: replayed } = await replayEffect(flow('sku-1'), trace, { context: trace.context });
         assert.deepEqual(valueOf(replayed), { id: 'sku-1', tenant: 'acme' });
     });
 
@@ -586,7 +589,7 @@ describe('Recording and replay', function () {
 
         attempt = 0;
         const start = Date.now();
-        const replayed = await replayEffect(flow(), trace);
+        const { result: replayed } = await replayEffect(flow(), trace);
         const elapsed = Date.now() - start;
         assert.deepEqual(valueOf(replayed), { tempC: 21 });
         assert.equal(attempt, 0, 'no attempt was re-executed');
@@ -608,7 +611,7 @@ describe('Recording and replay', function () {
         const { result, trace } = await recordEffect(flow, null);
         assert.equal(result.type, 'Failure');
 
-        const replayed = await replayEffect(flow(), trace);
+        const { result: replayed } = await replayEffect(flow(), trace);
         assert.equal(replayed.type, 'Failure');
         const error = /** @type {import('../index.js').RetryExhaustedError<Error>} */ (errorOf(replayed));
         assert.equal(error.retryExhausted, true);
@@ -648,8 +651,8 @@ describe('Recording and replay', function () {
             'each entry is labelled by its branch, so completion order does not matter'
         );
 
-        // No `strict: false` needed: paths are order-independent, so the default replays correctly.
-        const replayed = await replayEffect(flow('u1'), trace);
+        // Paths are order-independent, so the trace replays correctly whatever order the branches finished in.
+        const { result: replayed } = await replayEffect(flow('u1'), trace);
         assert.equal(replayed.type, 'Success');
         assert.deepEqual(valueOf(replayed), valueOf(result));
     });
@@ -681,7 +684,7 @@ describe('Recording and replay', function () {
         assert.deepEqual(valueOf(result), ['A', 'B']);
 
         // Replay with the latencies reversed, so completion order is the opposite of the recorded run.
-        const replayed = await replayEffect(flow([5, 40]), trace);
+        const { result: replayed } = await replayEffect(flow([5, 40]), trace);
         assert.equal(replayed.type, 'Success');
         assert.deepEqual(valueOf(replayed), ['A', 'B'], 'branch results were not swapped');
     });
@@ -694,12 +697,12 @@ describe('Recording and replay', function () {
             trace: trace.trace.map(({ path, ...rest }) => rest)
         };
         assert.ok(
-            legacy.trace.every((e) => e.path === undefined),
+            legacy.trace.every((e) => !('path' in e)),
             'the fixture really has no paths'
         );
 
         const b = makeFlow();
-        const replayed = await replayEffect(b.flow(trace.initialInput), legacy);
+        const { result: replayed } = await replayEffect(b.flow(trace.initialInput), legacy);
         assert.equal(replayed.type, 'Success');
         assert.deepEqual(valueOf(replayed), valueOf(result));
         assert.deepEqual(b.calls, { read: 0, write: 0 }, 'a legacy trace still performs no I/O');
@@ -744,7 +747,7 @@ describe('Recording and replay', function () {
                     )
             )(id);
 
-        const replayed = await replayEffect(diverged('x1'), trace);
+        const { result: replayed } = await replayEffect(diverged('x1'), trace);
         assert.equal(replayed.type, 'Failure');
         const error = /** @type {any} */ (errorOf(replayed));
         assert.equal(error.name, 'TimeParadox');
@@ -753,19 +756,137 @@ describe('Recording and replay', function () {
         assert.equal(error.actual, 'cmdAudit');
     });
 
+    it('should report recorded steps a shortened flow never reached, which no TimeParadox covers', async function () {
+        const a = makeFlow();
+        const { trace } = await recordEffect(a.flow, { id: 'x1' });
+        assert.equal(trace.trace.length, 2);
+
+        // The same flow with its last Command removed: no step mismatches, so replay ends in Success
+        // with the recorded write never asked for. That silence is the gap `unreached` closes.
+        const shortened = (/** @type {any} */ input) =>
+            effectPipe(
+                (/** @type {any} */ i) => (i.id ? Success(i) : Failure('no_id')),
+                (/** @type {any} */ i) =>
+                    Command(
+                        function cmdRead() {
+                            return { row: i.id };
+                        },
+                        (/** @type {any} */ row) => Success({ ...i, ...row })
+                    )
+            )(input);
+
+        const { result: replayed, unreached } = await replayEffect(shortened(trace.initialInput), trace);
+        assert.equal(replayed.type, 'Success');
+        assert.deepEqual(
+            unreached.map((/** @type {any} */ e) => e.command),
+            ['cmdWrite']
+        );
+        assert.equal(unreached[0].path, '1');
+        assert.strictEqual(unreached[0], trace.trace[1], 'the recorded entry itself, not a copy');
+    });
+
+    it('should report an empty unreached list when every recorded step was replayed', async function () {
+        const a = makeFlow();
+        const { trace } = await recordEffect(a.flow, { id: 'x1' });
+        const b = makeFlow();
+        const { unreached } = await replayEffect(b.flow(trace.initialInput), trace);
+        assert.deepEqual(unreached, []);
+    });
+
+    it('should still report unreached steps when replay halts on a TimeParadox', async function () {
+        const a = makeFlow();
+        const { trace } = await recordEffect(a.flow, { id: 'x1' });
+        const diverged = (/** @type {any} */ input) =>
+            effectPipe(
+                (/** @type {any} */ i) => Success(i),
+                (/** @type {any} */ i) =>
+                    Command(
+                        function cmdAudit() {
+                            return i;
+                        },
+                        (/** @type {any} */ v) => Success(v)
+                    )
+            )(input);
+        const { result: replayed, unreached } = await replayEffect(diverged(trace.initialInput), trace);
+        assert.equal(/** @type {any} */ (errorOf(replayed)).name, 'TimeParadox');
+        // The paradox fired at the first step, so nothing in the trace was handed out.
+        assert.deepEqual(
+            unreached.map((/** @type {any} */ e) => e.command),
+            ['cmdRead', 'cmdWrite']
+        );
+    });
+
+    it('should report unreached steps for a legacy trace and for a bare entries array', async function () {
+        const a = makeFlow();
+        const { trace } = await recordEffect(a.flow, { id: 'legacy' });
+        const legacy = trace.trace.map(({ path, ...rest }) => rest);
+        const readOnly = (/** @type {any} */ input) =>
+            effectPipe(
+                (/** @type {any} */ i) => Success(i),
+                (/** @type {any} */ i) =>
+                    Command(
+                        function cmdRead() {
+                            return { row: i.id };
+                        },
+                        (/** @type {any} */ row) => Success(row)
+                    )
+            )(input);
+
+        const { result: replayed, unreached } = await replayEffect(readOnly(trace.initialInput), legacy);
+        assert.equal(replayed.type, 'Success');
+        assert.deepEqual(
+            unreached.map((/** @type {any} */ e) => e.command),
+            ['cmdWrite']
+        );
+    });
+
+    it('should return no unreached list when a Resolver supplies the outcomes', async function () {
+        const a = makeFlow();
+        const { trace } = await recordEffect(a.flow, { id: 'x1' });
+        const b = makeFlow();
+        const replay = await replayEffect(b.flow(trace.initialInput), (step) => ({
+            result: trace.trace[step.index].result
+        }));
+        assert.equal(replay.result.type, 'Success');
+        assert.equal('unreached' in replay, false, 'only a trace knows what it holds');
+    });
+
+    it('should refuse to match a Parallel step positionally when the trace carries no paths', async function () {
+        const flow = (/** @type {any} */ id) =>
+            Parallel(
+                [
+                    Command(function cmdLeft() {
+                        return { id };
+                    }),
+                    Command(function cmdRight() {
+                        return 'r';
+                    })
+                ],
+                (/** @type {any} */ v) => Success(v)
+            );
+        const { trace } = await recordEffect(flow, 'u1');
+        const legacy = trace.trace.map(({ path, ...rest }) => rest);
+
+        const { result: replayed } = await replayEffect(flow('u1'), legacy);
+        assert.equal(replayed.type, 'Failure');
+        const error = /** @type {any} */ (errorOf(replayed));
+        assert.equal(error.name, 'ReplayError');
+        assert.match(error.message, /Parallel/);
+    });
+
     it('should accept a trace directly, without building a Resolver', async function () {
         const a = makeFlow();
         const { result, trace } = await recordEffect(a.flow, { id: 'direct' });
 
         const b = makeFlow();
-        const replayed = await replayEffect(b.flow(trace.initialInput), trace);
+        const { result: replayed } = await replayEffect(b.flow(trace.initialInput), trace);
         assert.equal(replayed.type, 'Success');
         assert.deepEqual(valueOf(replayed), valueOf(result));
         assert.deepEqual(b.calls, { read: 0, write: 0 });
 
         // A bare entries array is a valid trace too, without the surrounding TraceLog.
         const c = makeFlow();
-        const fromEntries = await replayEffect(c.flow(trace.initialInput), trace.trace);
+        const { result: fromEntries } = await replayEffect(c.flow(trace.initialInput), trace.trace);
         assert.equal(fromEntries.type, 'Success');
         assert.deepEqual(valueOf(fromEntries), valueOf(result));
     });
@@ -781,7 +902,7 @@ describe('Recording and replay', function () {
 
         // The trace must survive JSON, which is where a non-enumerable cause would silently vanish.
         const stored = JSON.parse(JSON.stringify(trace));
-        const replayed = await replayEffect(flow(stored.initialInput), stored);
+        const { result: replayed } = await replayEffect(flow(stored.initialInput), stored);
         assert.equal(replayed.type, 'Failure');
         const error = /** @type {any} */ (errorOf(replayed));
         assert.equal(error.message, 'charge declined');
@@ -799,10 +920,46 @@ describe('Recording and replay', function () {
 
         const { trace } = await recordEffect(flow, { id: 'chain' });
         const stored = JSON.parse(JSON.stringify(trace));
-        const replayed = await replayEffect(flow(stored.initialInput), stored);
+        const { result: replayed } = await replayEffect(flow(stored.initialInput), stored);
         const error = /** @type {any} */ (errorOf(replayed));
         assert.equal(error.cause.message, 'socket closed');
         assert.equal(error.cause.cause, 'ECONNRESET', 'a non-Error cause must pass through unchanged');
+    });
+
+    it('should revive an error that compares deep-equal to the one the Command threw', async function () {
+        // The README's determinism check is `assert.deepEqual(replayed, result)`, so it has to hold for a
+        // Failure too. `name` and `cause` are non-enumerable on a native Error; a revived error that carried
+        // them as own enumerable keys would never compare equal, whatever its message said.
+        const flow = (/** @type {any} */ input) =>
+            Command(function cmdCharge() {
+                const e = Object.assign(new Error('declined', { cause: new Error('expired') }), {
+                    code: 'card_declined'
+                });
+                return Promise.reject(e);
+            });
+
+        const { result, trace } = await recordEffect(flow, { id: 'deq' });
+        const stored = JSON.parse(JSON.stringify(trace));
+        const { result: replayed } = await replayEffect(flow({ id: 'deq' }), stored);
+        assert.deepEqual(replayed, result);
+
+        const error = /** @type {any} */ (errorOf(replayed));
+        assert.deepEqual(Object.keys(error), ['code'], 'only the custom property is an own enumerable key');
+        assert.equal(error.name, 'Error');
+        assert.equal(error.cause.message, 'expired');
+    });
+
+    it('should keep a custom error name readable after revival', async function () {
+        const flow = (/** @type {any} */ input) =>
+            Command(function cmdCharge() {
+                return Promise.reject(Object.assign(new Error('nope'), { name: 'GatewayError' }));
+            });
+        const { trace } = await recordEffect(flow, { id: 'named' });
+        const { result: replayed } = await replayEffect(flow({ id: 'named' }), JSON.parse(JSON.stringify(trace)));
+        const error = /** @type {any} */ (errorOf(replayed));
+        assert.equal(error.name, 'GatewayError');
+        assert.match(String(error), /^GatewayError: nope/);
+        assert.equal(JSON.stringify(error), '{}', 'name stays non-enumerable, as on a native Error');
     });
 
     it('should reject a malformed trace as a ReplayError, not a TypeError', async function () {
@@ -833,7 +990,7 @@ describe('Recording and replay', function () {
             );
 
         const { trace } = await recordEffect(flowA, null);
-        const replayed = await replayEffect(flowB(), trace);
+        const { result: replayed } = await replayEffect(flowB(), trace);
         assert.equal(replayed.type, 'Failure');
         assert.equal(/** @type {Error} */ (errorOf(replayed)).name, 'TimeParadox');
         assert.match(
@@ -844,14 +1001,14 @@ describe('Recording and replay', function () {
 
     it('should report an exhausted trace rather than silently succeeding', async function () {
         const { flow } = makeFlow();
-        const replayed = await replayEffect(flow({ id: 'x' }), { trace: [] });
+        const { result: replayed } = await replayEffect(flow({ id: 'x' }), { trace: [] });
         assert.equal(replayed.type, 'Failure');
         assert.match(/** @type {Error} */ (errorOf(replayed)).message, /Trace exhausted/);
     });
 
     it('should refuse to run an unrecorded Command by default', async function () {
         const { flow, calls } = makeFlow();
-        const replayed = await replayEffect(flow({ id: 'x' }), () => undefined);
+        const { result: replayed } = await replayEffect(flow({ id: 'x' }), () => undefined);
         assert.equal(replayed.type, 'Failure');
         assert.match(/** @type {Error} */ (errorOf(replayed)).message, /refusing to run the real Command/);
         assert.deepEqual(calls, { read: 0, write: 0 });
@@ -863,7 +1020,7 @@ describe('Recording and replay', function () {
         /** @type {import('../index.js').Resolver} */
         const resolve = (step) => (step.index === 0 ? { result: recorded[0].result } : undefined);
 
-        const replayed = await replayEffect(flow({ id: 'x' }), resolve, { onMissing: 'execute' });
+        const { result: replayed } = await replayEffect(flow({ id: 'x' }), resolve, { onMissing: 'execute' });
         assert.equal(replayed.type, 'Success');
         assert.deepEqual(valueOf(replayed), { written: 'FROM_TRACE' });
         assert.deepEqual(calls, { read: 0, write: 1 }, 'only the unrecorded step performed I/O');
@@ -996,7 +1153,7 @@ describe('Recording and replay', function () {
         assert.equal(result.type, 'Success');
         assert.equal(/** @type {any} */ (trace.initialInput).password, '[redacted]');
 
-        const replayed = await replayEffect(flow(trace.initialInput), trace);
+        const { result: replayed } = await replayEffect(flow(trace.initialInput), trace);
         assert.equal(replayed.type, 'Success', 'the redacted input still rebuilds a matching flow');
         assert.deepEqual(valueOf(replayed), valueOf(result), 'and the recorded hash comes back intact');
     });
@@ -1054,10 +1211,33 @@ describe('Recording and replay', function () {
         assert.match(out, /Replaying 'checkout' \(2 recorded steps\)/);
         assert.match(out, /Step 1: cmdRead returned/);
         assert.doesNotMatch(out, / in \d/, 'a hand-written trace has no timings to narrate');
-        assert.match(out, /1 recorded steps were never reached/);
+        assert.match(out, /1 recorded step was never reached: cmdWrite\. The flow diverged/);
     });
 
-    it('should narrate a Parallel flow when strict is off', async function () {
+    it('should not warn about unreached steps when a TimeParadox already named the divergence', async function () {
+        const a = makeFlow();
+        const { trace } = await recordEffect(a.flow, { id: 'x1' });
+        const diverged = (/** @type {any} */ input) =>
+            effectPipe(
+                (/** @type {any} */ i) => Success(i),
+                (/** @type {any} */ i) =>
+                    Command(
+                        function cmdAudit() {
+                            return i;
+                        },
+                        (/** @type {any} */ v) => Success(v)
+                    )
+            )(input);
+        /** @type {string[]} */
+        const lines = [];
+        const result = await timeTravel(diverged, trace, { log: (l) => lines.push(l) });
+        assert.equal(/** @type {any} */ (errorOf(result)).name, 'TimeParadox');
+        const out = lines.join('\n');
+        assert.match(out, /Time paradox at path '0'/);
+        assert.doesNotMatch(out, /never reached/, 'the paradox is the news; the steps behind it are not');
+    });
+
+    it('should narrate a Parallel flow', async function () {
         const flow = (/** @type {any} */ id) =>
             Parallel(
                 [
@@ -1080,9 +1260,9 @@ describe('Recording and replay', function () {
         const { trace } = await recordEffect(flow, 'u1');
         /** @type {string[]} */
         const lines = [];
-        const result = await timeTravel(flow, trace, { strict: false, log: (l) => lines.push(l) });
+        const result = await timeTravel(flow, trace, { log: (l) => lines.push(l) });
 
-        assert.equal(result.type, 'Success', 'strict must reach the trace resolution');
+        assert.equal(result.type, 'Success');
         const out = lines.join('\n');
         assert.match(out, /cmdSlow returned/);
         assert.match(out, /cmdFast returned/);
@@ -1118,10 +1298,7 @@ describe('Recording and replay', function () {
         assert.equal(invocations, 3);
 
         invocations = 0;
-        const replayed = await replayEffect(flow({ id: 1 }), trace, {
-            strict: false,
-            context: trace.context
-        });
+        const { result: replayed } = await replayEffect(flow({ id: 1 }), trace, { context: trace.context });
         assert.equal(replayed.type, 'Success');
         assert.deepEqual(valueOf(replayed), valueOf(result));
         assert.equal(invocations, 0, 'no Command thunk was applied');
@@ -1695,7 +1872,7 @@ describe('Recorded step timings', function () {
         const flow = (/** @type {any} */ input) => effectPipe(() => slow(5))(input);
         const { result, trace } = await recordEffect(flow, { id: 1 });
         assert.equal(typeof trace.trace[0].durationMs, 'number');
-        const replayed = await replayEffect(flow({ id: 1 }), trace);
+        const { result: replayed } = await replayEffect(flow({ id: 1 }), trace);
         assert.equal(replayed.type, 'Success');
         assert.deepEqual(valueOf(replayed), valueOf(result));
     });
@@ -1806,7 +1983,7 @@ describe('Command identity', function () {
                 },
                 (/** @type {any} */ v) => Success(v)
             );
-        for (const meta of ['a string', 42, null, { name: 7 }, { name: '' }]) {
+        for (const meta of /** @type {any[]} */ (['a string', 42, null, { name: 7 }, { name: '' }])) {
             const effect = Command(named().cmd, (/** @type {any} */ v) => Success(v), meta);
             await runEffect(effect, {}, { onStep });
         }
@@ -1837,8 +2014,8 @@ describe('Command identity', function () {
             'meta.name survives the rebuild chain performs on each pipe step'
         );
 
-        const replayed = await replayEffect(flow({ id: 'x1' }), trace);
-        assert.equal(replayed.type, 'Success', 'strict matching lines up on meta.name');
+        const { result: replayed } = await replayEffect(flow({ id: 'x1' }), trace);
+        assert.equal(replayed.type, 'Success', 'replay matching lines up on meta.name');
         assert.deepEqual(valueOf(replayed), valueOf(result));
     });
 });
@@ -2017,7 +2194,7 @@ describe('Malformed flows', function () {
 
     it('should call a missing return what it usually is', async function () {
         function ensureEmailAvailable() {}
-        const e = await errorFrom(() => runEffect(effectPipe(ensureEmailAvailable)({ id: 1 })));
+        const e = await errorFrom(() => runEffect(effectPipe(/** @type {any} */ (ensureEmailAvailable))({ id: 1 })));
         assert.equal(e?.name, 'EffectTypeError');
         assert.match(e.message, /returned undefined, which usually means a missing return/);
     });
@@ -2086,8 +2263,12 @@ describe('Parallel cancellation', function () {
         configureEffect();
     });
 
-    /** Resolves after `ms`, or rejects as soon as `signal` aborts. */
-    const cancellableSleep = (/** @type {number} */ ms, /** @type {AbortSignal} */ signal) =>
+    /**
+     * Resolves after `ms`, or rejects as soon as `signal` aborts.
+     * @param {number} ms
+     * @param {AbortSignal} [signal] - Optional, matching the Command contract: absent outside a `Parallel`.
+     */
+    const cancellableSleep = (ms, signal) =>
         new Promise((resolve, reject) => {
             const timer = setTimeout(resolve, ms);
             signal?.addEventListener(
@@ -2109,7 +2290,7 @@ describe('Parallel cancellation', function () {
                     Command(function cmdFail() {
                         throw new Error('fail_fast');
                     }),
-                    Command(async function cmdSlow(/** @type {AbortSignal} */ signal) {
+                    Command(async function cmdSlow(/** @type {AbortSignal | undefined} */ signal) {
                         await cancellableSleep(400, signal);
                         completed = true;
                         return 'wrote';
@@ -2186,7 +2367,7 @@ describe('Parallel cancellation', function () {
                     }),
                     Parallel(
                         [
-                            Command(async function cmdInner(/** @type {AbortSignal} */ signal) {
+                            Command(async function cmdInner(/** @type {AbortSignal | undefined} */ signal) {
                                 await cancellableSleep(300, signal);
                                 inner = true;
                                 return 1;
@@ -2206,7 +2387,7 @@ describe('Parallel cancellation', function () {
         const result = await runEffect(
             Parallel(
                 [
-                    Command(async function cmdSlowOk(/** @type {AbortSignal} */ signal) {
+                    Command(async function cmdSlowOk(/** @type {AbortSignal | undefined} */ signal) {
                         await cancellableSleep(200, signal);
                         return 'ok';
                     }),
