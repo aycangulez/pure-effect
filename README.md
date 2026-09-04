@@ -99,7 +99,7 @@ assert.equal(step2.cmd.name, 'cmdSaveUser');
 
 ## How It Works
 
-A flow is a chain of pairs: an I/O call to make, plus a `next` function that receives its answer and returns whatever comes after, another Command, a Success, or a Failure. `runEffect` walks that chain in a loop. 
+A flow is a chain of pairs: an I/O call to make, plus a `next` function that receives its answer and returns whatever comes after, another Command, a Success, or a Failure. `runEffect` walks that chain in a loop.
 
 Recording and replay attach at the single point where a Command's function is called: recording wraps that call to write down each answer, and replay substitutes the recorded answer without making the call, which is why a replayed flow performs no I/O.
 
@@ -132,13 +132,28 @@ A production incident becomes a permanent test of the flow's logic, with no mock
 
 ```js
 it('prod incident 8f3a: a 100% promo produces a $0 charge', async () => {
-    const result = await replayEffect(checkoutFlow(trace.initialInput), trace);
+    const { result } = await replayEffect(checkoutFlow(trace.initialInput), trace);
     assert.equal(result.type, 'Failure');
     assert.equal(result.error.code, 'invalid_amount');
 });
 ```
 
-The test verifies that the flow still takes the recorded path and handles the recorded outcomes the same way: a refactor that reorders or drops a step raises a `TimeParadox` naming the path it diverged at, and changed error handling fails the assertion.
+The test verifies that the flow still takes the recorded path and handles the recorded outcomes the same way: a refactor that reorders or replaces a step raises a `TimeParadox` naming the path it diverged at, and changed error handling fails the assertion.
+
+One divergence is quieter. A flow that stops issuing Commands before the recording ends (a fix that skips the charge, say) mismatches nothing, so no paradox fires and the replay can end in `Success` with recorded steps left over. `replayEffect` returns those steps as `unreached` beside the result, so a test can say which ones it expects to skip, and fail if the answer changes:
+
+```js
+it('incident 8f3a fixed: a 100% promo checks out without a charge', async () => {
+    const { result, unreached } = await replayEffect(checkoutFlow(trace.initialInput), trace);
+    assert.equal(result.type, 'Success');
+    assert.deepEqual(
+        unreached.map((e) => e.command),
+        ['cmdChargeCard']
+    );
+});
+```
+
+For every other recording of the flow, `unreached` should be empty: a fix that skips a step it was not meant to skip then fails loudly instead of passing.
 
 **Nondeterminism belongs inside a Command.** A value that varies between runs (the current time, a random ID) is I/O as far as replay is concerned. Wrap it in a Command and it is recorded and replayed like any other response; a step that calls `Date.now()` directly computes a fresh value on every replay and silently diverges from the trace.
 
@@ -146,9 +161,11 @@ The test verifies that the flow still takes the recorded path and handles the re
 
 ```js
 const { result, trace } = await recordEffect(registerUserFlow, input);
-const replayed = await replayEffect(registerUserFlow(input), trace);
+const { result: replayed } = await replayEffect(registerUserFlow(input), trace);
 assert.deepEqual(replayed, result); // fails if any step computed a fresh value
 ```
+
+The comparison holds for a `Failure` as well: an error that crossed the trace is revived with the same message, name, cause, and custom properties, and compares deep-equal to the one the Command threw. The one exception is an error class of your own, which revives as a plain `Error` carrying that class's name; compare `error.name` and `error.message` there.
 
 **The trace format is yours.** `replayEffect` also takes a resolver function in place of a trace, so OpenTelemetry spans, a log pipeline, or a database table work as well as the JSON that `recorder` produces.
 
@@ -540,7 +557,7 @@ Runs a flow for real while recording, returning `{ result, trace }`. Accepts `re
 
 #### `replayEffect(effect, traceOrResolver, options?)`
 
-Replays an effect tree, feeding recorded results to Commands instead of running them.
+Replays an effect tree, feeding recorded results to Commands instead of running them. Returns `{ result, unreached }`: the flow's outcome, and the recorded entries the flow never asked for (empty when every step was reached). A flow that stops early mismatches nothing and raises no `TimeParadox`, so `unreached` is where that divergence shows. For a resolver only `{ result }` is returned, since only a trace knows what it holds.
 
 - `traceOrResolver`: a trace (or bare entries array) to replay directly, or a resolver function for traces stored in some other shape. A resolver returns `{ result }`, `{ error }`, or `undefined` if the step is unrecorded. A malformed trace rejects with a `ReplayError`.
 - `options.context`: context for `Ask`; pass the recorded context.
@@ -549,9 +566,11 @@ Replays an effect tree, feeding recorded results to Commands instead of running 
 - `options.hooks` (default `false`): whether configured `onRun` / `onBeforeCommand` may fire. Off so a replay cannot reach a telemetry backend.
 - `options.onResolved(step, outcome)`: observe each replayed step.
 
+A trace whose entries carry no `path` (written by hand, or recorded before paths existed) is matched positionally, which is exact for a sequential flow; a `Parallel` step in such a trace is refused with a `ReplayError`, since completion order cannot tell its branches apart.
+
 #### `timeTravel(flowFn, traceLog, options?)`
 
-Replays a trace and narrates each step with its recorded duration, warning when recorded steps were never reached or when the trace's `version` differs from `options.version`. Takes `options.context` to override the trace's, and `options.log` in place of `console.log`.
+Replays a trace and narrates each step with its recorded duration, naming any recorded steps that were never reached and warning when the trace's `version` differs from `options.version`. Returns the flow's outcome; for the unreached entries as data, use `replayEffect`. Takes `options.context` to override the trace's, and `options.log` in place of `console.log`.
 
 ## Limitations
 

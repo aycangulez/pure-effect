@@ -1,13 +1,13 @@
 {
     "name": "pure-effect",
-    "version": "0.11.0",
+    "version": "0.12.0",
     "description": "Records what your business logic did in production and replays it anywhere: time-travel debugging for JavaScript and TypeScript, with zero dependencies. Business logic is plain data you can test without mocks.",
     "type": "module",
     "exports": "./index.js",
     "types": "./index.d.ts",
     "scripts": {
-        "test": "mocha && tsd && tsc -p tsconfig.check.json",
-        "format": "prettier --write index.js index.d.ts examples/*.js test/all.js README.md CLAUDE.md"
+        "test": "mocha && tsd && tsc -p jsconfig.json",
+        "format": "prettier --write index.js index.d.ts examples/*.js test/all.js test/types.test-d.ts README.md CLAUDE.md"
     },
     "tsd": {
         "directory": "test"
