@@ -37,9 +37,9 @@ import { configureEffect, recorder } from '../index.js';
 /**
  * Builds the three hooks that record each run, without installing them.
  *
- * Returning a configuration rather than calling `configureEffect` is what lets recording coexist
- * with tracing: there is one slot per hook, so both concerns go into a single `configureEffect` call,
- * which merges them. A helper that installed itself would silently replace whatever was there.
+ * Returning a configuration leaves the caller in charge of where recording sits relative to tracing:
+ * passed to one `configureEffect` call together, or installed as separate layers, the two merge the
+ * same way, and the caller holds the function that removes each.
  *
  * @param {RecordingOptions} [options]
  * @returns {EffectConfiguration}
@@ -73,12 +73,14 @@ export function recordingHooks(options = {}) {
     };
 
     /**
-     * Outside a recorded run there is no store, so the Command runs untouched.
+     * Outside a recorded run there is no store, so the Command runs untouched. The fourth argument,
+     * `path`, has to be forwarded: it is what a replay matches on, and a trace without it cannot tell
+     * `Parallel` branches apart.
      * @type {StepRunner}
      */
-    const onStep = async (name, type, op) => {
+    const onStep = async (name, type, op, path) => {
         const store = scope.getStore();
-        return store ? await store.rec.onStep(name, type, op) : await op();
+        return store ? await store.rec.onStep(name, type, op, path) : await op();
     };
 
     /**
@@ -94,11 +96,13 @@ export function recordingHooks(options = {}) {
 }
 
 /**
- * Installs recording on its own. Pass `recordingHooks()` to `configureEffect` alongside anything else
- * that needs the hooks instead, since a bare call here replaces whatever was configured before.
+ * Installs recording as its own layer on top of whatever is configured, and returns the function that
+ * removes it again. Call it once per process: layers stack, so a second call records every Command
+ * twice and writes two traces per run. A setup path that can run again (a reloading dev server, a
+ * per-suite bootstrap) should hold the remover and call it before installing a fresh layer.
  *
  * @param {RecordingOptions} [options]
  */
 export function enableRecording(options) {
-    configureEffect(recordingHooks(options));
+    return configureEffect(recordingHooks(options));
 }

@@ -50,9 +50,9 @@ const statusMessage = (error) =>
 /**
  * Builds the tracing hooks without installing them.
  *
- * Returning a configuration rather than calling `configureEffect` is what lets tracing coexist with
- * recording: there is one slot per hook, so both concerns go into a single `configureEffect` call,
- * which merges them. A helper that installed itself would silently replace whatever was there.
+ * Returning a configuration leaves the caller in charge of where tracing sits relative to recording:
+ * passed to one `configureEffect` call together, or installed as separate layers, the two merge the
+ * same way, and the caller holds the function that removes each.
  *
  * @param {TelemetryOptions} [options]
  * @returns {EffectConfiguration}
@@ -110,13 +110,15 @@ export function telemetryHooks(options = {}) {
 }
 
 /**
- * Installs tracing on its own. Pass `telemetryHooks()` to `configureEffect` alongside anything else
- * that needs the hooks instead, since a bare call here replaces whatever was configured before.
+ * Installs tracing as its own layer on top of whatever is configured, and returns the function that
+ * removes it again. Call it once per process: layers stack, so a second call opens a second span per
+ * run and per Command. A setup path that can run again (a reloading dev server, a per-suite
+ * bootstrap) should hold the remover and call it before installing a fresh layer.
  *
  * @param {TelemetryOptions} [options]
  */
 export function enableTelemetry(options) {
-    configureEffect(telemetryHooks(options));
+    return configureEffect(telemetryHooks(options));
 }
 
 /**
