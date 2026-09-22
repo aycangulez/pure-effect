@@ -115,7 +115,7 @@ assert.equal(step2.cmd.name, 'cmdSaveUser');
 
 Write both kinds. They catch different things, and the step tests are the ones that catch real bugs, because they are the only place you can see the value moving from one step to the next.
 
-Say the email guard returned `Success(true)` by mistake, instead of `Success(input)`. The step test fails at once: it asked for the input back and got `true`. The flow test does not fail. `cmdFindUser` is still the first call and `cmdSaveUser` is still the second, so both assertions hold, and the flow saves `true` to the database instead of the user. That bug was in this README once, and it looked fine.
+Say the email guard returned `Success(true)` by mistake, instead of `Success(input)`. The step test fails at once: it asked for the input back and got `true`. The flow test does not fail. `cmdFindUser` is still the first call and `cmdSaveUser` is still the second, so both assertions hold, and the flow saves `true` to the database instead of the user.
 
 Two smaller things to know.
 
