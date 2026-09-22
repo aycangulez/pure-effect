@@ -221,8 +221,22 @@ const asEffect = (value, source) => {
  * @returns {Effect}
  */
 const chain = (effect, fn, initialInput) => {
+    // The outermost pipeline wins. A step can return a sub-pipeline whose nodes already carry that
+    // sub-pipeline's start, and an outer chain reaches every one of them through the wrapped `next`
+    // continuations, so overwriting here is what makes the whole tree, a Failure from any depth, and
+    // the root a hook-based recorder reads carry the input of the flow that was actually called. The
+    // previous rule, stamp only when unset, let a Retry- or Parallel-headed sub-pipeline leave its own
+    // input on the root, and a trace recorded from it rebuilt the flow from the wrong value. A Success
+    // is never stamped: nothing reads the input off a terminal value, and leaving it bare is what lets
+    // `assert.deepEqual(result, Success(v))` hold whatever shape the flow had.
     const withII = (/** @type {Effect} */ e) =>
-        initialInput !== undefined && e.initialInput === undefined ? { ...e, initialInput } : e;
+        initialInput !== undefined && e.type !== 'Success' ? { ...e, initialInput } : e;
+
+    // A continuation that returned nothing has to be caught before `effect.type` is read. Reading it off
+    // `undefined` throws a bare TypeError, and since every continuation runs inside the interpreter's try
+    // block, that TypeError became a domain Failure: the flow bug took the business-error branch and no
+    // step was named. The `default` arm below never sees it, because the switch itself is what throws.
+    if (effect == null) return asEffect(effect, 'A continuation');
 
     switch (effect.type) {
         case 'Success':
@@ -260,7 +274,14 @@ const chain = (effect, fn, initialInput) => {
 const effectPipe = (...fns) => {
     return (start) => {
         const chainWithII = (/** @type {Effect} */ eff, /** @type {(v: any) => Effect} */ fn) => chain(eff, fn, start);
-        return fns.reduce(chainWithII, /** @type {Effect} */ (Success(start)));
+        const tree = fns.reduce(chainWithII, /** @type {Effect} */ (Success(start)));
+        // One identity pass over the finished tree. `chain` re-stamps a sub-pipeline's nodes only as
+        // it wraps the continuations that lead to them, and the last step has no later step to do
+        // that wrapping, so a sub-pipeline returned by the last step would keep its own input on
+        // everything past its head. The pass wraps those continuations too, so every node reachable
+        // from here, a Failure at any depth included, carries this pipeline's `start`. `Success` is the
+        // identity step: it can never return a non-Effect, so no message is ever attributed to it.
+        return chain(tree, Success, start);
     };
 };
 
@@ -282,12 +303,7 @@ const defaultRunWrapper = async (effect, op, flowName) => await op();
 /** @type CommandInterceptor */
 const defaultCommandInterceptor = async (command, context) => {};
 
-let stepRunner = defaultStepRunner;
-let runWrapper = defaultRunWrapper;
-let commandInterceptor = defaultCommandInterceptor;
-
 const defaultRetryOptions = { attempts: 3, delay: 100, backoff: 1 };
-let retryDefaults = { ...defaultRetryOptions };
 
 /**
  * @typedef {Object} EffectConfiguration
@@ -298,63 +314,77 @@ let retryDefaults = { ...defaultRetryOptions };
  */
 
 /**
- * Configures the global behavior of the Effect runner, including the command interceptor and telemetry.
+ * A per-call configuration: an `EffectConfiguration` plus `inherit`. With `inherit: true` (the default)
+ * the call's hooks are added to the wiring `configureEffect` installed, by the merge `configureEffect`
+ * applies to several configurations: global outermost, interceptors in order, `retry` merging with the
+ * call winning. With `inherit: false` the global wiring is not consulted at all, so any slot the call
+ * leaves unset falls back to the library default. A per-call hook cannot replace a single global slot on
+ * its own; that was the previous default, and it is how a per-call recorder silently switched off an
+ * application's tracing.
  *
- * Several configurations can be passed and are merged, which is how independent concerns share the
- * one slot each hook has:
+ * @typedef {EffectConfiguration & { inherit?: boolean }} CallConfiguration
+ */
+
+/** @type {EffectConfiguration[]} */
+let layers = [];
+
+/**
+ * The installed layers merged into one configuration, empty when nothing is configured. This is the
+ * only derived form of `layers`: `runEffect` reads it and merges the call's configuration over it,
+ * and a slot no layer defines is simply absent, so the library default is chosen at the one place the
+ * hook is used rather than held in a second set of variables kept in step by hand.
+ * @type {EffectConfiguration}
+ */
+let globalConfig = {};
+
+/** Recomputes the effective wiring from the installed layers, earlier layers outermost. */
+const applyLayers = () => {
+    globalConfig = chainHooks(...layers);
+};
+
+/**
+ * Adds a configuration to the global wiring of the Effect runner: telemetry, the command interceptor,
+ * and retry defaults.
  *
- *     configureEffect(telemetryHooks(), recordingHooks({ sink }))
+ * Each call adds one layer on top of those already installed and returns a function that removes that
+ * layer, wherever it sits by then. Layers merge the way several configurations passed to one call do:
+ * `onStep` and `onRun` are wrappers, so they nest with the earliest layer outermost and the latest
+ * closest to the Command; `onBeforeCommand` interceptors all run, in the order installed; and `retry`
+ * merges with later layers winning. So these are the same:
  *
- * `onStep` and `onRun` are wrappers, so they nest with the first configuration outermost and the last
- * closest to the Command. `onBeforeCommand` interceptors all run, in the order given, and `retry`
- * merges with later configurations winning.
+ *     configureEffect(telemetryHooks(), recordingHooks({ sink }));
+ *     configureEffect(telemetryHooks()); configureEffect(recordingHooks({ sink }));
  *
- * Merging happens per call and does not accumulate across calls: a later `configureEffect` still
- * replaces the previous wiring entirely, and calling it with nothing resets every slot to its default.
+ * Calling it with no arguments at all removes every layer. A call whose arguments are all `undefined`
+ * is a conditional install that installed nothing: it adds no layer and removes none.
  *
- * Returns a function that puts back whatever was installed when this call was made, so a caller can
- * install hooks without owning the wiring forever. That is what makes this usable from a test, a
- * request-scoped experiment, or a library that wraps this one: without it, installing anything means
- * clobbering the host's telemetry permanently, since there is no way to read the current wiring.
- * Restoring undoes this call only while its wiring is still in effect. If a later `configureEffect` has
- * run since, restoring does nothing rather than discarding that newer wiring, so two callers installing
- * and releasing in interleaved order cannot clobber each other.
+ * Layers replaced the previous one-slot rule, under which a later call displaced the earlier wiring and
+ * the returned function restored a snapshot, guarded so that interleaved installs could not clobber
+ * each other. Removing a layer needs no guard: A installs, B installs, A removes, and B is still there.
+ * It also means a library can install its own hooks without erasing its host's, which under the old rule
+ * was possible only if the host passed the library's configuration into its own call.
  *
- * @param {...(EffectConfiguration | undefined)} configs - Configurations to merge, outermost first
- * @returns {() => void} Restores the wiring that was in place before this call
+ * @param {...(EffectConfiguration | undefined)} configs - Configurations merged into one layer, outermost first
+ * @returns {() => void} Removes the layer this call added; a second call does nothing
  */
 const configureEffect = (...configs) => {
-    const previousStepRunner = stepRunner;
-    const previousRunWrapper = runWrapper;
-    const previousCommandInterceptor = commandInterceptor;
-    const previousRetryDefaults = retryDefaults;
-
-    const options = chainHooks(...configs);
-    stepRunner = options.onStep ? options.onStep : defaultStepRunner;
-    runWrapper = options.onRun ? options.onRun : defaultRunWrapper;
-    commandInterceptor = options.onBeforeCommand ? options.onBeforeCommand : defaultCommandInterceptor;
-    retryDefaults = options.retry ? { ...defaultRetryOptions, ...options.retry } : defaultRetryOptions;
-
-    const installedStepRunner = stepRunner;
-    const installedRunWrapper = runWrapper;
-    const installedCommandInterceptor = commandInterceptor;
-    const installedRetryDefaults = retryDefaults;
-
+    // Only a call with no arguments at all is a reset. A call whose arguments are all absent, such as
+    // `configureEffect(flag ? hooks : undefined)`, is a conditional install that happened not to install
+    // anything, so it adds no layer and must not remove anyone else's.
+    if (configs.length === 0) {
+        layers = [];
+        applyLayers();
+        return () => {};
+    }
+    const present = configs.filter(Boolean);
+    if (present.length === 0) return () => {};
+    const layer = chainHooks(...present);
+    layers = [...layers, layer];
+    applyLayers();
     return () => {
-        // Only undo an install that is still in effect. Without this check, two callers that install
-        // and release in interleaved order silently discard each other's hooks: A installs, B installs,
-        // A restores, and B's wiring is gone though B never released it.
-        const unchanged =
-            stepRunner === installedStepRunner &&
-            runWrapper === installedRunWrapper &&
-            commandInterceptor === installedCommandInterceptor &&
-            retryDefaults === installedRetryDefaults;
-        if (!unchanged) return;
-
-        stepRunner = previousStepRunner;
-        runWrapper = previousRunWrapper;
-        commandInterceptor = previousCommandInterceptor;
-        retryDefaults = previousRetryDefaults;
+        if (!layers.includes(layer)) return;
+        layers = layers.filter((l) => l !== layer);
+        applyLayers();
     };
 };
 
@@ -501,20 +531,32 @@ const runEffect =
      * Iterates through the Effect tree, executing Commands and handling async flow.
      * Ask effects are resolved synchronously with the context object.
      *
-     * Per-call config takes precedence over global configureEffect defaults.
-     * onRun fires exactly once per runEffect call. Retry attempts run inside that
+     * Per-call config is merged over the global configureEffect wiring, or over nothing under
+     * `inherit: false`. onRun fires exactly once per runEffect call. Retry attempts run inside that
      * single span rather than spawning their own, keeping telemetry non-duplicated.
      *
      * @param {Effect} effect - The Effect tree returned by a pipeline
      * @param {any} [context] - Optional context object. Passed to Ask continuations and the Command Interceptor.
-     * @param {EffectConfiguration} [callConfig] - Per-call overrides; merged over global configureEffect defaults.
+     * @param {CallConfiguration} [callConfig] - Per-call configuration, added to the wiring `configureEffect`
+     *        installed unless `inherit: false`, which ignores that wiring for this run.
      * @returns {Promise<SuccessState | FailureState>}
      */
     async function runEffect(effect, context = {}, callConfig = {}) {
-        const localStepRunner = callConfig.onStep ? callConfig.onStep : stepRunner;
-        const localRunWrapper = callConfig.onRun ? callConfig.onRun : runWrapper;
-        const localCommandInterceptor = callConfig.onBeforeCommand ? callConfig.onBeforeCommand : commandInterceptor;
-        const localRetryDefaults = callConfig.retry ? { ...retryDefaults, ...callConfig.retry } : retryDefaults;
+        const { inherit = true, ...local } = callConfig;
+        // A value that is not a boolean, such as a string left over from an older API, must not be
+        // coerced: `'false'` inheriting everything is exactly the silent behaviour this option removes.
+        if (typeof inherit !== 'boolean') {
+            throw new TypeError(`callConfig.inherit must be true or false, got ${JSON.stringify(inherit)}.`);
+        }
+        // The call's configuration is merged over the installed wiring, or over nothing when the call
+        // inherits nothing, by the same merge `configureEffect` applies to several configurations. Most
+        // calls carry no configuration of their own, and those use the installed wiring as it is.
+        const base = inherit ? globalConfig : {};
+        const resolved = Object.keys(local).length ? chainHooks(base, local) : base;
+        const localStepRunner = resolved.onStep || defaultStepRunner;
+        const localRunWrapper = resolved.onRun || defaultRunWrapper;
+        const localCommandInterceptor = resolved.onBeforeCommand || defaultCommandInterceptor;
+        const localRetryDefaults = { ...defaultRetryOptions, ...resolved.retry };
 
         /**
          * @param {Effect} eff
@@ -657,7 +699,17 @@ const runEffect =
             throw effectTypeError(eff, 'The flow');
         }
 
-        return localRunWrapper(effect, () => execute(effect), context?.flowName || '');
+        // Every Failure leaves through here, including one a Parallel branch or a Retry fallback handed
+        // back. `chain` stamps only what passes through the continuations it wraps, and those subtrees
+        // are executed directly rather than reached through a continuation, so their Failures arrive
+        // carrying the subtree's own input or none. Restamping the outcome with the root's input is
+        // what makes "a Failure carries the input of the flow that was called" true at any depth.
+        const rootInput = effect?.initialInput;
+        const run = async () => {
+            const result = await execute(effect);
+            return result.type === 'Failure' && rootInput !== undefined ? Failure(result.error, rootInput) : result;
+        };
+        return localRunWrapper(effect, run, context?.flowName || '');
     };
 
 /**
@@ -892,6 +944,8 @@ const recorder = (options = {}) => {
 const recordEffect = async (flowFn, initialInput, options = {}) => {
     const { context = {}, version, ...recorderOptions } = options;
     const rec = recorder(recorderOptions);
+    // The recorder is added to the global wiring, so recording inside an instrumented application keeps
+    // its spans.
     const result = await runEffect(flowFn(initialInput), context, { onStep: rec.onStep });
     return {
         result,
@@ -1023,8 +1077,11 @@ const zeroRetryDelays = (eff) => {
  * @typedef {Object} ReplayOptions
  * @property {any} [context] - Context for `Ask`; pass the recorded context to reproduce a run faithfully.
  * @property {boolean} [fastRetry] - Strips Retry delays so a replay does not wait out production backoff.
- * @property {boolean} [hooks] - Lets configured `onRun` and `onBeforeCommand` fire. Off by default, so a
- *           replay cannot reach a telemetry backend or a guardrail that performs I/O.
+ * @property {boolean} [hooks] - Runs the replay inside the hooks `configureEffect` installed, with the
+ *           resolver innermost, so a configured `onStep` observes each replayed step and `onRun` and
+ *           `onBeforeCommand` fire. Off by default, which ignores the global hooks, so a replay cannot
+ *           reach a telemetry backend or a guardrail that performs I/O. Global `retry` defaults apply
+ *           either way, since a replay has to make the attempts production made.
  * @property {'throw' | 'execute'} [onMissing] - What to do when the resolver has no recording for a step.
  *           `'throw'` (default) fails the replay, which makes side effects impossible for the whole run.
  *           `'execute'` runs the real Command, giving partial replay: recorded prefix, live tail.
@@ -1096,12 +1153,14 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
         return outcome.result;
     };
 
-    /** @type {EffectConfiguration} */
-    const callConfig = { onStep };
-    if (!hooks) {
-        callConfig.onRun = async (effect, op) => await op();
-        callConfig.onBeforeCommand = async () => {};
-    }
+    // Off, a replay ignores the global hooks, so it can reach neither a telemetry backend nor a guardrail
+    // that performs I/O. On, it runs inside them with the resolver innermost, so a configured onStep
+    // observes each replayed step and the Command still never executes. The global retry defaults are
+    // kept either way: `inherit: false` would drop them with the hooks, and a Retry that production ran
+    // under a configured `attempts` would then exhaust early on replay and report a Failure production
+    // never saw. Retry shape is part of what a replay reproduces; the hooks are not.
+    /** @type {CallConfiguration} */
+    const callConfig = { onStep, inherit: hooks, retry: globalConfig.retry };
 
     const result = await runEffect(fastRetry ? zeroRetryDelays(effect) : effect, context, callConfig);
     if (fromResolver) return { result };

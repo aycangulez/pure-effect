@@ -18,6 +18,7 @@ import {
 } from '../index.js';
 import * as lib from '../index.js';
 import ts from 'typescript';
+import { readFileSync } from 'node:fs';
 import { enableTelemetry, telemetryHooks } from '../examples/opentelemetry-example.js';
 import { enableRecording, recordingHooks } from '../examples/recording-example.js';
 
@@ -458,7 +459,7 @@ const valueOf = (/** @type {any} */ result) => result.value;
 const errorOf = (/** @type {any} */ result) => result.error;
 
 describe('Recording and replay', function () {
-    beforeEach(() => configureEffect({}));
+    beforeEach(() => configureEffect());
 
     it('should record and replay the registration flow end to end', async function () {
         const input = { email: 'replay@test.com', password: 'password123' };
@@ -1306,7 +1307,7 @@ describe('Recording and replay', function () {
 });
 
 describe('configureEffect merging', function () {
-    beforeEach(() => configureEffect({}));
+    beforeEach(() => configureEffect());
 
     /** A Command whose thunk is named, so hooks can be asserted by name. */
     const work = (/** @type {any} */ value = 'ok') =>
@@ -1435,67 +1436,114 @@ describe('configureEffect merging', function () {
         assert.ok(Date.now() - started < 150, 'and the zero delay from the second config won');
     });
 
-    it('should leave slots no config defines at their defaults, and tolerate gaps', async function () {
+    it('should leave slots no layer defines at their defaults, and tolerate gaps', async function () {
         /** @type {string[]} */
         const intercepted = [];
         configureEffect({ onBeforeCommand: async (/** @type {any} */ c) => void intercepted.push(c.cmd.name) });
 
-        // Only onStep is named here, so the interceptor above must be gone rather than merged in.
+        // A second layer naming only onStep adds to the first rather than displacing it, the undefined
+        // and empty configurations are ignored, and onRun, which no layer names, stays at its default.
         configureEffect(
             { onStep: async (/** @type {any} */ n, /** @type {any} */ t, /** @type {any} */ op) => await op() },
             undefined,
             {}
         );
         assert.equal(valueOf(await runEffect(work('ok'))), 'ok');
-        assert.deepEqual(intercepted, [], 'merging is per call and does not accumulate across calls');
+        assert.deepEqual(intercepted, ['cmdWork'], 'the earlier layer still runs');
     });
 
-    it('should return a restore function that puts the previous wiring back', async function () {
+    it('should stack a second call on top of the first, and remove only that layer', async function () {
+        // Each call adds a layer. Under the old one-slot rule the second call displaced the first and the
+        // returned function restored a snapshot, which needed a guard against interleaved installs.
         /** @type {string[]} */
-        const first = [];
-        /** @type {string[]} */
-        const second = [];
+        const order = [];
         configureEffect({
             onStep: async (/** @type {any} */ n, /** @type {any} */ t, /** @type {any} */ op) => (
-                first.push(n),
+                order.push('first'),
                 await op()
             )
         });
-
-        const restore = configureEffect({
+        const remove = configureEffect({
             onStep: async (/** @type {any} */ n, /** @type {any} */ t, /** @type {any} */ op) => (
-                second.push(n),
+                order.push('second'),
                 await op()
             )
         });
         await runEffect(work('ok'));
-        assert.deepEqual(second, ['cmdWork'], 'the second wiring took over');
-        assert.deepEqual(first, [], 'and displaced the first');
+        assert.deepEqual(order, ['first', 'second'], 'both ran, the earlier layer outermost');
 
-        restore();
+        order.length = 0;
+        remove();
         await runEffect(work('ok'));
-        assert.deepEqual(first, ['cmdWork'], 'restore brought the first wiring back');
-        assert.deepEqual(second, ['cmdWork'], 'without reactivating the second');
+        assert.deepEqual(order, ['first'], 'removing the second layer left the first in place');
     });
 
-    it('should restore back to no hooks when nothing was configured before', async function () {
+    it('should stack separate calls exactly as one call with several configurations', async function () {
+        /** @type {string[]} */
+        const viaOne = [];
+        /** @type {string[]} */
+        const viaTwo = [];
+        /** @param {string[]} log @param {string} label */
+        const tag = (log, label) => ({
+            onStep: async (/** @type {any} */ n, /** @type {any} */ t, /** @type {any} */ op) => {
+                log.push(`${label}>`);
+                const r = await op();
+                log.push(`<${label}`);
+                return r;
+            },
+            onBeforeCommand: async () => {
+                log.push(`${label}!`);
+            }
+        });
+        configureEffect(tag(viaOne, 'a'), tag(viaOne, 'b'));
+        await runEffect(work('ok'));
+        configureEffect();
+        configureEffect(tag(viaTwo, 'a'));
+        configureEffect(tag(viaTwo, 'b'));
+        await runEffect(work('ok'));
+        assert.deepEqual(viaTwo, viaOne);
+        assert.deepEqual(viaOne, ['a!', 'b!', 'a>', 'b>', '<b', '<a']);
+    });
+
+    it('should make removing a layer idempotent', async function () {
         /** @type {string[]} */
         const seen = [];
-        const restore = configureEffect({
+        const removeA = configureEffect({
+            onStep: async (/** @type {any} */ n, /** @type {any} */ t, /** @type {any} */ op) => (
+                seen.push('a'),
+                await op()
+            )
+        });
+        configureEffect({
+            onStep: async (/** @type {any} */ n, /** @type {any} */ t, /** @type {any} */ op) => (
+                seen.push('b'),
+                await op()
+            )
+        });
+        removeA();
+        removeA();
+        await runEffect(work('ok'));
+        assert.deepEqual(seen, ['b'], 'a second removal took nothing else with it');
+    });
+
+    it('should remove the only layer back to no hooks', async function () {
+        /** @type {string[]} */
+        const seen = [];
+        const remove = configureEffect({
             onStep: async (/** @type {any} */ n, /** @type {any} */ t, /** @type {any} */ op) => (
                 seen.push(n),
                 await op()
             )
         });
         await runEffect(work('ok'));
-        restore();
+        remove();
         await runEffect(work('ok'));
         assert.deepEqual(seen, ['cmdWork'], 'the second run had no hooks at all');
     });
 
-    it('should restore retry defaults too', async function () {
+    it("should merge retry across layers and drop a layer's share when it is removed", async function () {
         configureEffect({ retry: { attempts: 1, delay: 0 } });
-        const restore = configureEffect({ retry: { attempts: 4, delay: 0 } });
+        const remove = configureEffect({ retry: { attempts: 4, delay: 0 } });
 
         const flaky = () => {
             let calls = 0;
@@ -1515,34 +1563,34 @@ describe('configureEffect merging', function () {
         };
 
         const generous = flaky();
-        assert.equal((await runEffect(generous.effect())).type, 'Success', 'four attempts are enough');
+        assert.equal((await runEffect(generous.effect())).type, 'Success', "the later layer's four attempts win");
 
-        restore();
+        remove();
         const stingy = flaky();
         const result = await runEffect(stingy.effect());
-        assert.equal(result.type, 'Failure', 'the restored single attempt is not');
+        assert.equal(result.type, 'Failure', "the remaining layer's single attempt is not enough");
         assert.equal(/** @type {any} */ (errorOf(result)).attempts, 1);
     });
 
-    it('should not clobber a newer wiring when restoring out of order', async function () {
+    it('should leave a newer layer in place when an older one is removed', async function () {
         /** @type {string[]} */
         const a = [];
         /** @type {string[]} */
         const b = [];
-        const restoreA = configureEffect({
+        const removeA = configureEffect({
             onStep: async (/** @type {any} */ n, /** @type {any} */ t, /** @type {any} */ op) => (a.push(n), await op())
         });
         configureEffect({
             onStep: async (/** @type {any} */ n, /** @type {any} */ t, /** @type {any} */ op) => (b.push(n), await op())
         });
 
-        restoreA();
+        removeA();
         await runEffect(work('ok'));
-        assert.deepEqual(b, ['cmdWork'], "B's wiring survived A's late restore");
-        assert.deepEqual(a, [], 'and A did not come back');
+        assert.deepEqual(b, ['cmdWork'], "B's layer survived A's removal");
+        assert.deepEqual(a, [], 'and A is gone');
     });
 
-    it('should reset every slot when called with nothing', async function () {
+    it('should remove every layer when called with nothing', async function () {
         /** @type {string[]} */
         const seen = [];
         configureEffect({
@@ -1556,11 +1604,227 @@ describe('configureEffect merging', function () {
         await runEffect(work('ok'));
         assert.deepEqual(seen, ['cmdWork'], 'the second run ran with no hooks at all');
     });
+
+    it('should install nothing and remove nothing when every argument is absent', async function () {
+        // `configureEffect(flag ? hooks : undefined)` is a conditional install, not a reset. Only a call
+        // with no arguments at all removes every layer; a call whose arguments are all absent adds no
+        // layer, leaves the host's wiring alone, and hands back a remover that has nothing to remove.
+        /** @type {string[]} */
+        const seen = [];
+        configureEffect({
+            onStep: async (/** @type {any} */ n, /** @type {any} */ t, /** @type {any} */ op) => (
+                seen.push(n),
+                await op()
+            )
+        });
+        const remove = configureEffect(undefined);
+        await runEffect(work('ok'));
+        assert.deepEqual(seen, ['cmdWork'], 'the host layer survived configureEffect(undefined)');
+        remove();
+        configureEffect(undefined, undefined);
+        await runEffect(work('ok'));
+        assert.deepEqual(seen, ['cmdWork', 'cmdWork'], 'still installed after removing the empty call');
+    });
+});
+
+describe('Per-call inherit', function () {
+    beforeEach(() => configureEffect());
+    afterEach(() => configureEffect());
+
+    /** @param {string} name */
+    const cmd = (name) =>
+        Command(
+            () => name,
+            (/** @type {any} */ r) => Success(r),
+            { name }
+        );
+
+    /** @param {string[]} log @param {string} label */
+    const tagStep = (log, label) => async (/** @type {any} */ n, /** @type {any} */ t, /** @type {any} */ op) => {
+        log.push(`${label}:before`);
+        try {
+            return await op();
+        } finally {
+            log.push(`${label}:after`);
+        }
+    };
+
+    /** @param {string[]} log */
+    const globalWiring = (log) => ({
+        onStep: tagStep(log, 'global'),
+        onRun: async (/** @type {any} */ e, /** @type {any} */ op) => (log.push('run'), await op()),
+        onBeforeCommand: async () => {
+            log.push('global-intercept');
+        }
+    });
+
+    it('should nest per-call hooks inside the global ones by default', async function () {
+        // Adding, not replacing: a per-call hook used to switch the global one off for that run, which
+        // is how recordEffect inside an instrumented application silently produced runs with no spans.
+        /** @type {string[]} */
+        const log = [];
+        configureEffect(globalWiring(log));
+        const result = await runEffect(
+            cmd('a'),
+            {},
+            {
+                onStep: tagStep(log, 'local'),
+                onBeforeCommand: async () => {
+                    log.push('local-intercept');
+                }
+            }
+        );
+        assert.equal(result.type, 'Success');
+        assert.deepEqual(log, [
+            'run',
+            'global-intercept',
+            'local-intercept',
+            'global:before',
+            'local:before',
+            'local:after',
+            'global:after'
+        ]);
+    });
+
+    it('should behave the same with inherit: true spelled out', async function () {
+        /** @type {string[]} */
+        const log = [];
+        configureEffect(globalWiring(log));
+        await runEffect(cmd('a'), {}, { inherit: true, onStep: tagStep(log, 'local') });
+        assert.deepEqual(log, [
+            'run',
+            'global-intercept',
+            'global:before',
+            'local:before',
+            'local:after',
+            'global:after'
+        ]);
+    });
+
+    it('should merge retry with the per-call value winning', async function () {
+        let calls = 0;
+        const flaky = Command(() => {
+            calls++;
+            throw new Error('down');
+        });
+        configureEffect({ retry: { attempts: 1, delay: 5000 } });
+        const result = await runEffect(Retry(flaky), {}, { retry: { delay: 0 } });
+        assert.equal(result.type, 'Failure');
+        assert.equal(calls, 2, 'attempts came from the global, the delay from the call');
+    });
+
+    it('should consult nothing global under inherit: false, falling back to library defaults', async function () {
+        /** @type {string[]} */
+        const log = [];
+        let calls = 0;
+        const flaky = Command(() => {
+            calls++;
+            throw new Error('down');
+        });
+        configureEffect({ ...globalWiring(log), retry: { attempts: 0 } });
+        const result = await runEffect(Retry(flaky, { delay: 0 }), {}, { inherit: false });
+        assert.equal(result.type, 'Failure');
+        assert.deepEqual(log, [], 'no global hook fired');
+        assert.equal(calls, 4, 'the library default of three retries applied, not the global zero');
+    });
+
+    it('should still apply per-call hooks under inherit: false', async function () {
+        /** @type {string[]} */
+        const log = [];
+        configureEffect(globalWiring(log));
+        await runEffect(cmd('a'), {}, { inherit: false, onStep: tagStep(log, 'local') });
+        assert.deepEqual(log, ['local:before', 'local:after']);
+    });
+
+    it('should reject a non-boolean rather than guessing', async function () {
+        await assert.rejects(
+            runEffect(cmd('a'), {}, /** @type {any} */ ({ inherit: 'all' })),
+            (/** @type {any} */ e) =>
+                e instanceof TypeError && /true or false/.test(e.message) && /"all"/.test(e.message)
+        );
+    });
+
+    it('should record under the global onStep with recordEffect', async function () {
+        /** @type {string[]} */
+        const log = [];
+        configureEffect({ onStep: tagStep(log, 'global') });
+        const { result, trace } = await recordEffect(() => cmd('a'), null);
+        assert.equal(result.type, 'Success');
+        assert.deepEqual(log, ['global:before', 'global:after'], 'tracing kept running');
+        assert.equal(trace.trace.length, 1, 'and the run was recorded');
+    });
+
+    it('should keep a default replay away from every global hook', async function () {
+        /** @type {string[]} */
+        const log = [];
+        let ran = 0;
+        const flow = () =>
+            Command(
+                () => ++ran,
+                (/** @type {any} */ r) => Success(r),
+                { name: 'cmdA' }
+            );
+        const { trace } = await recordEffect(flow, null);
+        configureEffect(globalWiring(log));
+        const { result } = await replayEffect(flow(), trace);
+        assert.equal(result.type, 'Success');
+        assert.deepEqual(log, []);
+        assert.equal(ran, 1, 'the recording ran it once; the replay not at all');
+    });
+
+    it('should replay under the global retry defaults even though a default replay ignores the global hooks', async function () {
+        // Production ran with attempts: 5 configured globally and succeeded on the fifth try. A replay
+        // that ignored the global wiring wholesale would retry three times, exhaust, and report a Failure
+        // production never saw, with hooks: true and hooks: false disagreeing about the same trace.
+        /** @type {string[]} */
+        const log = [];
+        let ran = 0;
+        const flow = () =>
+            Retry(
+                Command(
+                    () => {
+                        ran++;
+                        if (ran < 5) throw new Error(`flaky ${ran}`);
+                        return 'ok';
+                    },
+                    (/** @type {any} */ r) => Success(r),
+                    { name: 'cmdFlaky' }
+                )
+            );
+        configureEffect({ retry: { attempts: 5, delay: 0 } });
+        const { result, trace } = await recordEffect(flow, null);
+        assert.deepEqual(result, Success('ok'));
+        assert.equal(trace.trace.length, 5, 'production recorded five attempts');
+        configureEffect(globalWiring(log));
+        const replayed = await replayEffect(flow(), trace);
+        assert.deepEqual(replayed.result, Success('ok'), 'the replay reproduces production');
+        assert.deepEqual(replayed.unreached, []);
+        assert.deepEqual(log, [], 'the global hooks still did not fire');
+        assert.equal(ran, 5, 'the replay executed nothing');
+    });
+
+    it('should let a replay with hooks run under the global hooks without executing Commands', async function () {
+        /** @type {string[]} */
+        const log = [];
+        let ran = 0;
+        const flow = () =>
+            Command(
+                () => ++ran,
+                (/** @type {any} */ r) => Success(r),
+                { name: 'cmdA' }
+            );
+        const { trace } = await recordEffect(flow, null);
+        configureEffect(globalWiring(log));
+        const { result } = await replayEffect(flow(), trace, { hooks: true });
+        assert.equal(result.type, 'Success');
+        assert.deepEqual(log, ['run', 'global-intercept', 'global:before', 'global:after']);
+        assert.equal(ran, 1, 'the global onStep observed the replayed step, and the Command still did not run');
+    });
 });
 
 describe('examples/recording-example.js', function () {
-    beforeEach(() => configureEffect({}));
-    afterEach(() => configureEffect({}));
+    beforeEach(() => configureEffect());
+    afterEach(() => configureEffect());
 
     const failing = (/** @type {any} */ input) =>
         effectPipe(
@@ -1677,11 +1941,48 @@ describe('examples/recording-example.js', function () {
         await runEffect(failing({ id: 4 }));
         assert.deepEqual(written[0].trace[0].result, { row: '[redacted]' });
     });
+
+    it('should record paths so a Parallel flow replays from the trace it ships', async function () {
+        // A hand-rolled `onStep` wrapper that calls the inner hook with three arguments drops the fourth,
+        // `path`, and the trace it ships carries none. Such a trace replays positionally, which cannot
+        // tell Parallel branches apart, so the positional resolver refuses it. This is the hazard the
+        // hook contract in CLAUDE.md names, and the reference wiring is the first place it has to be right.
+        /** @type {any[]} */
+        const written = [];
+        const calls = { a: 0, b: 0 };
+        enableRecording({ sink: async (/** @type {any} */ t) => void written.push(t), keep: () => true });
+        const flow = (/** @type {any} */ input) =>
+            effectPipe((/** @type {any} */ x) =>
+                Parallel([
+                    Command(function cmdA() {
+                        calls.a++;
+                        return x + 1;
+                    }),
+                    Command(function cmdB() {
+                        calls.b++;
+                        return x + 2;
+                    })
+                ])
+            )(input);
+        const result = await runEffect(flow(1), { flowName: 'fanout' });
+        assert.deepEqual(result, Success([2, 3]));
+        assert.equal(written.length, 1);
+        assert.deepEqual(
+            written[0].trace.map((/** @type {any} */ e) => e.path).sort(),
+            ['0p0/0', '0p1/0'],
+            'every entry carries its path'
+        );
+        configureEffect();
+        const replayed = await replayEffect(flow(1), written[0]);
+        assert.deepEqual(replayed.result, Success([2, 3]));
+        assert.deepEqual(replayed.unreached, []);
+        assert.deepEqual(calls, { a: 1, b: 1 }, 'the replay executed nothing');
+    });
 });
 
 describe('examples/opentelemetry-example.js', function () {
-    beforeEach(() => configureEffect({}));
-    afterEach(() => configureEffect({}));
+    beforeEach(() => configureEffect());
+    afterEach(() => configureEffect());
 
     /** A tracer stub, so the example is testable without standing up an SDK. */
     const fakeTracer = () => {
@@ -1827,7 +2128,7 @@ describe('examples/opentelemetry-example.js', function () {
 });
 
 describe('Recorded step timings', function () {
-    beforeEach(() => configureEffect({}));
+    beforeEach(() => configureEffect());
 
     const slow = (/** @type {number} */ ms) =>
         Command(
@@ -1903,7 +2204,7 @@ describe('Recorded step timings', function () {
 });
 
 describe('Command identity', function () {
-    beforeEach(() => configureEffect({}));
+    beforeEach(() => configureEffect());
 
     /** Captures the name each Command is executed under. */
     const capture = () => {
@@ -2084,6 +2385,232 @@ describe('Recorded values are snapshots', function () {
     });
 });
 
+describe('initialInput stamping', function () {
+    beforeEach(() => configureEffect());
+
+    const input = { customerId: 'cu1', password: 'hunter2' };
+    /** @param {string} id */
+    const lookup = (id) =>
+        Command(
+            () => ({ id }),
+            (/** @type {any} */ r) => Success(r),
+            { name: 'cmdLookup' }
+        );
+
+    /** What a hook-based recorder stores as the trace's input: the root node's stamp. */
+    const rootStampSeenByHook = async (/** @type {any} */ tree) => {
+        /** @type {any} */
+        let seen;
+        await runEffect(tree, {}, { onRun: async (effect, op) => ((seen = effect.initialInput), await op()) });
+        return seen;
+    };
+
+    it('should stamp the flow input on a root whose first step returns a Retry-headed sub-pipeline', async function () {
+        const viaRetry = (/** @type {any} */ i) =>
+            effectPipe((/** @type {string} */ id) => Retry(lookup(id), { attempts: 0 }))(i.customerId);
+        const tree = effectPipe(viaRetry, (/** @type {any} */ r) => Success(r))(input);
+        assert.deepEqual(tree.initialInput, input, 'the flow input, not the sub-pipeline input');
+        assert.deepEqual(await rootStampSeenByHook(tree), input);
+    });
+
+    it('should stamp the flow input on a root whose first step returns a Parallel-headed sub-pipeline', async function () {
+        const viaParallel = (/** @type {any} */ i) =>
+            effectPipe((/** @type {string} */ id) => Parallel([lookup(id)]))(i.customerId);
+        const tree = effectPipe(viaParallel, (/** @type {any} */ r) => Success(r))(input);
+        assert.deepEqual(tree.initialInput, input);
+        assert.deepEqual(await rootStampSeenByHook(tree), input);
+    });
+
+    it('should give a Failure from inside a sub-pipeline the flow input', async function () {
+        const inner = (/** @type {any} */ i) => effectPipe(lookup, () => Failure('bad'))(i.customerId);
+        const result = await runEffect(effectPipe(inner, (/** @type {any} */ r) => Success(r))(input));
+        assert.deepEqual(result, Failure('bad', input));
+    });
+
+    it('should give a synchronous Failure from a nested pure step the flow input', function () {
+        const inner = (/** @type {any} */ i) =>
+            effectPipe((/** @type {string} */ id) => Failure(`no ${id}`))(i.customerId);
+        assert.deepEqual(
+            effectPipe(inner)(input),
+            Failure('no cu1', input),
+            'the README idiom holds through a sub-pipeline'
+        );
+    });
+
+    it('should let the outermost pipeline win through two levels of nesting', async function () {
+        const innermost = (/** @type {string} */ id) => effectPipe(lookup, () => Failure('deep'))(id);
+        const middle = (/** @type {any} */ i) => effectPipe(innermost)(i.customerId);
+        const tree = effectPipe(middle)(input);
+        assert.deepEqual(tree.initialInput, input);
+        const result = await runEffect(tree);
+        assert.deepEqual(result, Failure('deep', input));
+    });
+
+    it('should give a Failure escaping a Parallel branch the flow input', async function () {
+        // chain wraps continuations, not the subtrees a Parallel holds, so only the interpreter can
+        // stamp what a branch hands back.
+        const failingSub = (/** @type {any} */ i) => effectPipe(lookup, () => Failure('bad'))(i.customerId);
+        const result = await runEffect(
+            effectPipe(
+                (/** @type {any} */ i) => Parallel([failingSub(i)]),
+                (/** @type {any} */ v) => Success(v)
+            )(input)
+        );
+        assert.deepEqual(result, Failure('bad', input));
+    });
+
+    it('should give a Failure from a Retry fallback the flow input', async function () {
+        const failingSub = (/** @type {any} */ i) => effectPipe(lookup, () => Failure('bad'))(i.customerId);
+        const withFallback = (/** @type {any} */ i) =>
+            Retry(
+                Command(() => {
+                    throw new Error('down');
+                }),
+                { attempts: 0, delay: 0, onExhausted: () => failingSub(i) }
+            );
+        const result = await runEffect(effectPipe(withFallback, (/** @type {any} */ v) => Success(v))(input));
+        assert.deepEqual(result, Failure('bad', input));
+    });
+
+    it('should give a thrown Command inside a Parallel branch the flow input', async function () {
+        const boom = new Error('boom');
+        const branch = (/** @type {any} */ i) =>
+            effectPipe(() =>
+                Command(() => {
+                    throw boom;
+                })
+            )(i.customerId);
+        const result = await runEffect(
+            effectPipe(
+                (/** @type {any} */ i) => Parallel([branch(i)]),
+                (/** @type {any} */ v) => Success(v)
+            )(input)
+        );
+        assert.deepEqual(result, Failure(boom, input));
+    });
+
+    it('should leave a bare sub-pipeline stamped with its own input when it is the flow', function () {
+        // Nothing outer exists here, so the value is what this pipeline was called with.
+        const tree = effectPipe(lookup, () => Failure('bad'))('cu1');
+        assert.equal(tree.initialInput, 'cu1');
+    });
+});
+
+describe('Kleisli laws', function () {
+    // `Success` is `pure` and the internal `chain` is `bind`, so `effectPipe` is Kleisli composition.
+    // The three monad laws are pinned here in that form and observationally, through `runEffect`, because
+    // two law-equivalent trees hold different `next` closures and can never be structurally equal. Each
+    // law is checked against a step that reaches every node type, so a `chain` case that stops wrapping
+    // its continuation fails here rather than only in whichever flow happens to exercise it.
+    beforeEach(() => configureEffect());
+
+    const context = { bonus: 5 };
+    /** @type {string[]} */
+    let calls = [];
+    beforeEach(() => (calls = []));
+
+    /** @param {number} x */
+    const double = (x) =>
+        Command(async function cmdDouble() {
+            calls.push(`double:${x}`);
+            return x * 2;
+        });
+    /** @param {number} x */
+    const addBonus = (x) => Ask((/** @type {any} */ ctx) => Success(x + ctx.bonus));
+    /** @param {number} x */
+    const guarded = (x) =>
+        x > 100
+            ? Failure('too big')
+            : Parallel(
+                  [
+                      Success(x),
+                      Command(async function cmdEcho() {
+                          calls.push(`echo:${x}`);
+                          return x;
+                      })
+                  ],
+                  (/** @type {number[]} */ [a, b]) => Success(a + b)
+              );
+    /** @param {number} x */
+    const retried = (x) =>
+        Retry(
+            Command(async function cmdIncrement() {
+                calls.push(`increment:${x}`);
+                return x + 1;
+            }),
+            { attempts: 2, delay: 0 }
+        );
+    const steps = [double, addBonus, guarded, retried];
+    const inputs = [1, 10, 60];
+
+    /** Runs a flow and returns its outcome together with the I/O it performed, so equivalence covers both. */
+    const observe = async (/** @type {(x: number) => any} */ flow, /** @type {number} */ x) => {
+        calls = [];
+        const result = await runEffect(flow(x), context);
+        return { result, calls };
+    };
+
+    /** Asserts two flows are indistinguishable through the interpreter on every input. */
+    const assertEquivalent = async (
+        /** @type {(x: number) => any} */ left,
+        /** @type {(x: number) => any} */ right,
+        /** @type {string} */ law
+    ) => {
+        for (const x of inputs) {
+            assert.deepEqual(await observe(left, x), await observe(right, x), `${law} on input ${x}`);
+        }
+    };
+
+    it('should satisfy left identity: pure >=> f is f', async function () {
+        for (const f of steps)
+            await assertEquivalent(effectPipe(Success, f), effectPipe(f), `left identity for ${f.name}`);
+    });
+
+    it('should satisfy right identity: f >=> pure is f', async function () {
+        for (const f of steps)
+            await assertEquivalent(effectPipe(f, Success), effectPipe(f), `right identity for ${f.name}`);
+    });
+
+    it('should satisfy associativity: (f >=> g) >=> h is f >=> (g >=> h) across every node type', async function () {
+        const triples = [
+            [double, addBonus, guarded],
+            [addBonus, retried, guarded],
+            [retried, double, addBonus],
+            [guarded, retried, double]
+        ];
+        for (const [f, g, h] of triples) {
+            await assertEquivalent(
+                effectPipe(effectPipe(f, g), h),
+                effectPipe(f, effectPipe(g, h)),
+                `associativity for ${f.name}, ${g.name}, ${h.name}`
+            );
+        }
+    });
+
+    it('should compose through every node type to the value the steps compute by hand', async function () {
+        // The laws above are equations between two compositions, so a `bind` that dropped every
+        // continuation would still satisfy them, both sides being equally broken. This anchors them:
+        // one composition through every node type has to reach the value and perform the I/O that
+        // applying the steps one after another would.
+        const result = await observe(effectPipe(double, addBonus, retried, guarded), 10);
+        assert.deepEqual(result, {
+            result: Success(52),
+            calls: ['double:10', 'increment:25', 'echo:26']
+        });
+    });
+
+    it('should short-circuit lawfully: a Failure ignores every later step', async function () {
+        // The Either half of the structure: bind on the failed case is constant, so composing anything
+        // after a Failure changes neither the outcome nor the I/O performed.
+        const fail = () => Failure('stop');
+        await assertEquivalent(
+            effectPipe(double, fail, retried, guarded),
+            effectPipe(double, fail),
+            'failure absorption'
+        );
+    });
+});
+
 describe('Documented sharp edges', function () {
     beforeEach(() => configureEffect());
 
@@ -2197,6 +2724,46 @@ describe('Malformed flows', function () {
         const e = await errorFrom(() => runEffect(effectPipe(/** @type {any} */ (ensureEmailAvailable))({ id: 1 })));
         assert.equal(e?.name, 'EffectTypeError');
         assert.match(e.message, /returned undefined, which usually means a missing return/);
+    });
+
+    it('should reject a Command continuation that returns nothing at the end of a pipeline', async function () {
+        // The last step's continuation is reached only through effectPipe's identity pass, which routes it
+        // back through `chain`. Without a guard there, `undefined.type` threw a bare TypeError inside the
+        // interpreter's try block and the run resolved to a domain Failure carrying it, so the flow bug
+        // took the business-error branch and no step was named.
+        const e = await errorFrom(() =>
+            runEffect(
+                effectPipe((/** @type {any} */ x) =>
+                    Command(
+                        function cmdRead() {
+                            return x;
+                        },
+                        /** @type {any} */ (() => undefined)
+                    )
+                )(5)
+            )
+        );
+        assert.equal(e?.name, 'EffectTypeError');
+        assert.match(e.message, /A continuation returned undefined, which usually means a missing return/);
+    });
+
+    it('should reject a Command continuation that returns nothing in the middle of a pipeline', async function () {
+        const e = await errorFrom(() =>
+            runEffect(
+                effectPipe(
+                    (/** @type {any} */ x) =>
+                        Command(
+                            function cmdRead() {
+                                return x;
+                            },
+                            /** @type {any} */ (() => undefined)
+                        ),
+                    (/** @type {any} */ y) => Success(y)
+                )(5)
+            )
+        );
+        assert.equal(e?.name, 'EffectTypeError');
+        assert.match(e.message, /A continuation returned undefined/);
     });
 
     it('should reject a Command continuation that returns a plain value', async function () {
@@ -2442,5 +3009,112 @@ describe('Declaration parity', function () {
             .sort();
         const shipped = Object.keys(lib).sort();
         assert.deepEqual(declared, shipped);
+    });
+});
+
+describe('README examples', function () {
+    // The README is code readers copy, and for most of this project's life no test ran it. Two wrong
+    // examples shipped that way. A guard whose `next` returned `Success(true)`, so the flow saved
+    // `true` and never saw the registration data. And a walk that fed a found user to the email
+    // guard, then asserted the save step that answer makes unreachable. Both read correctly, which
+    // is the whole point: the library's argument is that reading is not verification, and the
+    // examples were the one artifact here it had never been applied to. So they are executed. Every
+    // `js` block runs as one program with the Quick Start's definitions in scope, which makes every
+    // `assert` the README prints a real assertion.
+    const markdown = readFileSync('README.md', 'utf8');
+    const blocks = [...markdown.matchAll(/```(\w*)\n([\s\S]*?)```/g)]
+        .filter((match) => match[1] === 'js')
+        .map((match) => match[2]);
+    const withoutImports = (/** @type {string} */ code) => code.replace(/^import[^;]*;\s*$/gm, '');
+    const AsyncFunction = /** @type {any} */ (Object.getPrototypeOf(async function () {}).constructor);
+
+    beforeEach(function () {
+        configureEffect();
+    });
+
+    // The Recording and API Reference sections call `configureEffect` themselves, so this suite
+    // has to clean up after the examples as well as before them.
+    afterEach(function () {
+        configureEffect();
+    });
+
+    it('should find the examples at all', function () {
+        // A regex that silently stops matching would turn every check below into a pass over
+        // nothing, which is the failure this whole suite exists to rule out.
+        assert.ok(blocks.length >= 20, `expected the README to hold examples, found ${blocks.length}`);
+    });
+
+    it('should fence only real JavaScript as js', function () {
+        blocks.forEach((block, index) => {
+            assert.doesNotThrow(
+                () => new AsyncFunction(withoutImports(block)),
+                `js block ${index + 1} does not parse; fence a value shape as text instead`
+            );
+        });
+    });
+
+    it('should import only names the library exports', function () {
+        const shipped = Object.keys(lib);
+        const imports = [...markdown.matchAll(/import\s*\{([^}]*)\}\s*from\s*'pure-effect'/g)];
+        assert.ok(imports.length > 0, 'expected the README to import from the package');
+        imports.forEach((match) => {
+            match[1]
+                .split(',')
+                .map((name) => name.trim())
+                .filter(Boolean)
+                .forEach((name) => {
+                    assert.ok(shipped.includes(name), `README imports '${name}', which the library does not export`);
+                });
+        });
+    });
+
+    it('should run every example, assertions included, without performing I/O', async function () {
+        // The first block is the Quick Start, whose definitions the later examples use. Every other
+        // block gets its own scope so two sections can name the same helper without colliding.
+        const program =
+            withoutImports(blocks[0]) +
+            '\n' +
+            blocks
+                .slice(1)
+                .map((block) => `{\n${withoutImports(block)}\n}`)
+                .join('\n');
+
+        // Everything the examples reach for that is not the library. These exist so the flows can be
+        // built and walked, not to stand in for a real driver: every assertion the README makes is
+        // about a value the library itself produced. `fetch` throws rather than resolving, so an
+        // example that starts reaching the network fails here instead of in CI.
+        const stubCommand = () =>
+            Command(function cmdStub() {
+                return Promise.resolve({});
+            });
+        const stubs = {
+            input: { email: 'test@test.com', password: 'password123' },
+            db: { findUser: async () => null, saveUser: async (/** @type {any} */ user) => user },
+            app: { post: () => {} },
+            it: () => {},
+            fetch: () => {
+                throw new Error('a README example must not perform network I/O');
+            },
+            checkoutFlow: stubCommand,
+            chargeCard: stubCommand,
+            sendReceipt: stubCommand,
+            validateOrder: stubCommand,
+            scheduleShipping: stubCommand,
+            cmdFn: () => Promise.resolve({}),
+            next: Success,
+            order: { id: 'order_1' },
+            sink: () => {},
+            telemetryHooks: () => ({}),
+            recordingHooks: () => ({})
+        };
+
+        const log = console.log;
+        console.log = () => {}; // timeTravel narrates, and that is its job rather than this suite's
+        try {
+            const run = new AsyncFunction(...Object.keys(lib), 'assert', ...Object.keys(stubs), program);
+            await run(...Object.values(lib), assert, ...Object.values(stubs));
+        } finally {
+            console.log = log;
+        }
     });
 });

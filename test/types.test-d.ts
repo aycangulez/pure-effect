@@ -9,7 +9,10 @@ import {
     effectPipe,
     runEffect,
     configureEffect,
-    replayEffect
+    recorder,
+    recordEffect,
+    replayEffect,
+    timeTravel
 } from '../index.js';
 import type {
     SuccessState,
@@ -26,6 +29,10 @@ import type {
     CommandInterceptor,
     TraceEntry,
     TraceLog,
+    TraceMeta,
+    RecorderOptions,
+    ReplayStep,
+    ReplayOutcome,
     Resolver,
     ReplayOptions,
     Replay
@@ -281,6 +288,14 @@ configureEffect({ onStep: 'not-a-function' });
 // @ts-expect-error attempts must be a number
 configureEffect({ retry: { attempts: 'three' } });
 
+// --- runEffect callConfig: `inherit` ---
+runEffect(flow({ email: 'a@b.com', password: 'secret123' }), {}, { inherit: true });
+runEffect(flow({ email: 'a@b.com', password: 'secret123' }), {}, { inherit: false, retry: { attempts: 1 } });
+// @ts-expect-error a boolean, not the old three-way string
+runEffect(flow({ email: 'a@b.com', password: 'secret123' }), {}, { inherit: 'all' });
+// @ts-expect-error `inherit` is a per-call option; the global wiring has nothing to inherit from
+configureEffect({ inherit: true });
+
 // hook types are correctly shaped
 const myStep: StepRunner = async (name, type, op) => {
     expectType<string>(name);
@@ -333,3 +348,53 @@ declare const traceOrResolver: TraceLog | TraceEntry[] | Resolver;
 replayEffect(readRow, traceLog, { strict: false });
 // @ts-expect-error unreached is returned, not observed
 replayEffect(readRow, traceLog, { onUnreached: () => {} });
+
+// --- recorder / recordEffect / timeTravel ---
+
+// recorder returns an onStep hook, the live entries, and a trace packager
+const rec = recorder({ redact: (value, name, kind) => value, maxEntries: 100, stack: true });
+expectType<StepRunner>(rec.onStep);
+expectType<TraceEntry[]>(rec.entries);
+expectType<TraceLog>(rec.toTrace());
+expectType<TraceLog>(rec.toTrace({ initialInput: 1, flowName: 'f', context: {}, version: 'v' }));
+expectAssignable<EffectConfiguration>({ onStep: rec.onStep });
+expectAssignable<TraceMeta>({ version: 'abc' });
+
+// redact sees every kind of value a trace holds, and only those kinds
+const redactor: RecorderOptions['redact'] = (value, name, kind) => {
+    expectType<unknown>(value);
+    expectType<string>(name);
+    expectType<'result' | 'error' | 'initialInput' | 'context'>(kind);
+    return value;
+};
+// @ts-expect-error 'argument' is not a kind a trace records
+const narrowRedactor: RecorderOptions['redact'] = (value, name, kind: 'argument') => value;
+
+// recordEffect returns the typed outcome beside the trace, and types its context
+(async () => {
+    const recorded = await recordEffect(typedFlow, { email: 'a@b.c', password: 'x' }, { version: 'v1' });
+    expectType<SuccessState<SavedUser> | FailureState<ValidationError | DbError>>(recorded.result);
+    expectType<TraceLog>(recorded.trace);
+    const withCtx = await recordEffect(ctxFlow, { email: 'a@b.c', password: 'x' }, { context: { db: 'conn' } });
+    expectType<SuccessState<{ email: string; password: string; conn: string }> | FailureState<unknown>>(withCtx.result);
+})();
+// @ts-expect-error context does not match the flow's Ctx
+recordEffect(ctxFlow, {}, { context: { db: 42 } });
+
+// a Resolver answers with a wrapped outcome or undefined for an unrecorded step
+const resolver: Resolver = (step) => {
+    expectType<ReplayStep>(step);
+    expectType<string>(step.name);
+    expectType<string | undefined>(step.path);
+    return step.index === 0 ? { result: 1 } : undefined;
+};
+expectAssignable<ReplayOutcome>({ error: new Error('x') });
+// @ts-expect-error a bare value is not an outcome; the wrapper is what distinguishes undefined from unrecorded
+const bareResolver: Resolver = () => 42;
+
+// timeTravel returns the bare outcome and takes the trace's own type
+expectType<Promise<SuccessState<SavedUser> | FailureState<ValidationError | DbError>>>(
+    timeTravel(typedFlow, traceLog, { log: () => {}, version: 'v1' })
+);
+// @ts-expect-error a bare entries array is replayEffect's shape, not timeTravel's
+timeTravel(typedFlow, traceLog.trace);

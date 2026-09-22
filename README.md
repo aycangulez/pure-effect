@@ -1,6 +1,6 @@
 # Pure Effect
 
-[![npm version](https://img.shields.io/npm/v/pure-effect)](https://www.npmjs.com/package/pure-effect) [![bundle size](https://img.shields.io/badge/minified%2Bgzipped-4KB-brightgreen)](https://bundlephobia.com/package/pure-effect) [![license](https://img.shields.io/npm/l/pure-effect)](https://github.com/aycangulez/pure-effect/blob/main/LICENSE)
+[![npm version](https://img.shields.io/npm/v/pure-effect)](https://www.npmjs.com/package/pure-effect) [![minified size (gzip)](https://img.shields.io/bundlejs/size/pure-effect)](https://bundlejs.com/?q=pure-effect) [![license](https://img.shields.io/npm/l/pure-effect)](https://github.com/aycangulez/pure-effect/blob/main/LICENSE)
 
 **Pure Effect** records what your business logic did in production and replays it anywhere: time-travel debugging for JavaScript and TypeScript, with zero dependencies. Business logic is plain data you can test without mocks.
 
@@ -9,7 +9,7 @@
 - Inject context without touching function signatures
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks
-- Zero dependencies, 4 KB minified and gzipped
+- Zero dependencies, about 4 KB minified and gzipped
 - Works in JavaScript and TypeScript (full generics, bundled `.d.ts`)
 
 ## Table of Contents
@@ -67,7 +67,7 @@ const saveUser = (input) => {
 // Build the flow. Validation runs now; no I/O happens until runEffect.
 const registerUserFlow = (input) => effectPipe(validateRegistration, ensureEmailAvailable, saveUser)(input);
 
-// Imperative shell: this is the only place side effects run
+// This is the only place side effects actually run
 async function registerUser(input) {
     const result = await runEffect(registerUserFlow(input));
 
@@ -81,21 +81,47 @@ async function registerUser(input) {
 
 ## Testing Without Mocks
 
-Because pipelines return plain objects, you can assert on _what the code intends to do_ without executing any of it:
+Because pipelines return plain objects, you can assert on _what the code intends to do_ without executing any of it.
+
+Validation runs as soon as you build the flow, so testing it needs nothing else:
 
 ```js
-// 1. Test validation failure synchronously
 const badInput = { email: 'bad-email', password: '123' };
 assert.deepEqual(registerUserFlow(badInput), Failure('Invalid email.', badInput));
+```
 
-// 2. Walk the pipeline to verify intent
-const step1 = registerUserFlow({ email: 'test@test.com', password: 'password123' });
+Next, test the steps. Hand a step an answer and check what it returns:
+
+```js
+const input = { email: 'test@test.com', password: 'password123' };
+
+// The email is free, so the step passes the input on.
+assert.deepEqual(ensureEmailAvailable(input).next(null), Success(input));
+
+// The email is taken, so the flow stops here.
+assert.deepEqual(ensureEmailAvailable(input).next({ id: 1 }), Failure('Email already in use.'));
+```
+
+Then test the flow: the right calls, in the right order.
+
+```js
+const step1 = registerUserFlow(input);
 assert.equal(step1.cmd.name, 'cmdFindUser');
 
-const step2 = step1.next(null); // simulate "user not found"
+const step2 = step1.next(null); // pretend no user was found
 assert.equal(step2.cmd.name, 'cmdSaveUser');
-// The full flow is verified. The database was never touched.
+// The database was never touched.
 ```
+
+Write both kinds. They catch different things, and the step tests are the ones that catch real bugs, because they are the only place you can see the value moving from one step to the next.
+
+Say the email guard returned `Success(true)` by mistake, instead of `Success(input)`. The step test fails at once: it asked for the input back and got `true`. The flow test does not fail. `cmdFindUser` is still the first call and `cmdSaveUser` is still the second, so both assertions hold, and the flow saves `true` to the database instead of the user. That bug was in this README once, and it looked fine.
+
+Two smaller things to know.
+
+A step tested on its own has no `initialInput` on its `Failure`. That is why the assertion above is `Failure('Email already in use.')` with nothing after the message, while the validation one is `Failure('Invalid email.', badInput)`. `effectPipe` adds that value while it builds a flow, so a `Failure` only carries it when it came out of a flow.
+
+Nothing can see inside a Command's function without running it. If `cmdFindUser` said `db.findUser(input.name)` instead of `input.email`, every test on this page would still pass. Keep those functions to a single call, and let an integration test cover them.
 
 ## How It Works
 
@@ -124,7 +150,7 @@ Replaying 'checkout' (3 recorded steps)
 Initial input: { "cartId": "cart_abc123", "promoCode": "FREE_YEAR_VIP" }
 Step 1: cmdFetchCart returned { "totalAmount": "120.00" }
 Step 2: cmdValidatePromo returned { "isValid": true, "discountValue": 100 }
-Step 3: cmdChargeCreditCard threw { "message": "Amount must be non-zero.", "code": "invalid_amount" }
+Step 3: cmdChargeCard threw { "message": "Amount must be non-zero.", "code": "invalid_amount" }
 Replay finished with state: Failure
 ```
 
@@ -140,7 +166,7 @@ it('prod incident 8f3a: a 100% promo produces a $0 charge', async () => {
 
 The test verifies that the flow still takes the recorded path and handles the recorded outcomes the same way: a refactor that reorders or replaces a step raises a `TimeParadox` naming the path it diverged at, and changed error handling fails the assertion.
 
-One divergence is quieter. A flow that stops issuing Commands before the recording ends (a fix that skips the charge, say) mismatches nothing, so no paradox fires and the replay can end in `Success` with recorded steps left over. `replayEffect` returns those steps as `unreached` beside the result, so a test can say which ones it expects to skip, and fail if the answer changes:
+One divergence is quieter. A flow that stops issuing Commands before the recording ends (a fix that skips the charge, say) mismatches nothing, so nothing mismatches and the replay can end in `Success` with recorded steps left over. `replayEffect` returns those steps as `unreached` beside the result, so a test can say which ones it expects to skip, and fail if the answer changes:
 
 ```js
 it('incident 8f3a fixed: a 100% promo checks out without a charge', async () => {
@@ -155,9 +181,11 @@ it('incident 8f3a fixed: a 100% promo checks out without a charge', async () => 
 
 For every other recording of the flow, `unreached` should be empty: a fix that skips a step it was not meant to skip then fails loudly instead of passing.
 
-**Nondeterminism belongs inside a Command.** A value that varies between runs (the current time, a random ID) is I/O as far as replay is concerned. Wrap it in a Command and it is recorded and replayed like any other response; a step that calls `Date.now()` directly computes a fresh value on every replay and silently diverges from the trace.
+**A trace records what each Command returned, not what it was asked.** It does not need to. Given the recorded input and the recorded results, the flow does the same thing again, so replaying to a step rebuilds the exact arguments that Command ran with, in the real code, under a debugger if you want one. Storing them as well would only double what `redact` has to cover, since arguments are usually the sensitive half of a call.
 
-**A determinism check is one round trip.** Record a flow, replay it immediately, and compare the outcomes. A step that computes a fresh nondeterministic value surfaces as a `TimeParadox` when it changes which Commands run, or as a mismatch in the final value:
+**Anything that varies between runs belongs inside a Command.** The current time or a random ID counts as I/O as far as replay is concerned. Wrap it in a Command and it is recorded and replayed like any other response; a step that calls `Date.now()` directly computes a fresh value on every replay and silently diverges from the trace.
+
+**Checking this takes one round trip.** Record a flow, replay it immediately, and compare the outcomes. A step that computes a fresh nondeterministic value surfaces as a `TimeParadox` when it changes which Commands run, or as a mismatch in the final value:
 
 ```js
 const { result, trace } = await recordEffect(registerUserFlow, input);
@@ -220,7 +248,7 @@ Recording stores the context alongside the trace, so `Ask` replays with the valu
 
 ## Retrying Transient Failures
 
-`Retry` wraps any Effect tree with retry-on-failure semantics. Like everything else in Pure Effect, the retry configuration is a plain object you can inspect and assert on without running anything.
+`Retry` runs part of a flow again when it fails. Like everything else in Pure Effect, the retry configuration is a plain object you can inspect and assert on without running anything.
 
 **Wrap the Command that fails, not the pipeline.** Every attempt re-runs the whole wrapped tree, including Commands that already succeeded:
 
@@ -232,7 +260,7 @@ Retry(effectPipe(chargeCard, sendReceipt)(order), { attempts: 3 });
 effectPipe(chargeCard, (charge) => Retry(sendReceipt(charge), { attempts: 3 }))(order);
 ```
 
-Wrapping a pipeline is safe only when every Command in it is idempotent.
+Wrapping a pipeline is safe only when every Command in it is idempotent (safe to run more than once).
 
 ```js
 import { Success, Failure, Command, Retry, runEffect } from 'pure-effect';
@@ -253,7 +281,7 @@ assert.equal(weatherFn.options.attempts, 3);
 
 When all attempts are exhausted, `runEffect` returns a structured `Failure`:
 
-```js
+```text
 { retryExhausted: true, lastError: <the last error>, attempts: 3 }
 ```
 
@@ -269,13 +297,13 @@ const fetchPrice = (sku) =>
     });
 ```
 
-Fallback steps are recorded under their own trace paths, so a replay reproduces the fallback exactly, and a fallback never starts in a `Parallel` branch that a sibling's failure has already cancelled. With `onExhausted` set, the exhaustion error never escapes, so in TypeScript the node contributes the fallback's error type to the pipeline's union instead of `RetryExhaustedError<E>`.
+Fallback steps are recorded under their own trace paths, so a replay reproduces the fallback exactly, and a fallback never starts in a `Parallel` branch that a sibling's failure has already cancelled. With `onExhausted` set, the exhaustion error never escapes, so in TypeScript the `Retry` contributes the fallback's error type to the pipeline's union instead of `RetryExhaustedError<E>`.
 
 Every attempt is a recorded step, so a replay reproduces the exact sequence of failures. It also skips the delays.
 
 ## Running Effects in Parallel
 
-`Parallel` runs multiple Effect trees concurrently and passes their results to `next` as an ordered array. The first branch to fail cancels its siblings, `next` is not called, and that branch's `Failure` is what propagates.
+`Parallel` runs several flows at the same time and passes their results to `next` as an ordered array. The first branch to fail cancels its siblings, `next` is not called, and that branch's `Failure` is what propagates.
 
 ```js
 import { Success, Command, Parallel } from 'pure-effect';
@@ -288,7 +316,7 @@ const loadProfile = (userId) =>
 
 `Ask` context flows into all parallel branches without any extra wiring.
 
-**Cancellation is cooperative, and it works at two levels.** A cancelled branch starts no further Commands. For example, a three-step branch whose first step is in flight when a sibling fails runs that step and stops. Cancelling the step already in flight needs the function to accept the `AbortSignal` it is handed and pass it to whatever performs the I/O:
+**Cancelling is a request, not a guarantee, and it works at two levels.** A cancelled branch starts no further Commands. For example, a three-step branch whose first step is in flight when a sibling fails runs that step and stops. Cancelling the step already in flight needs the function to accept the `AbortSignal` it is handed and pass it to whatever performs the I/O:
 
 ```js
 // Cancellable: the request is aborted the moment a sibling branch fails.
@@ -302,9 +330,9 @@ Outside a `Parallel` the function is called with no arguments at all, so nothing
 
 ## Composing Larger Flows
 
-`effectPipe` is a straight line, but flows rarely are. Branching and fan-in work with the existing primitives. Here is how:
+`effectPipe` is a straight line, but flows rarely are. Branching and joining work with the pieces already here. Here is how:
 
-**A step can return a sub-pipeline.** `effectPipe(...)(value)` returns an Effect like any other, so a step can branch into a whole sub-flow, and the sub-flow's `Failure` short-circuits the outer pipeline exactly like a local one:
+**A step can return a sub-pipeline.** `effectPipe(...)(value)` returns an Effect like any other, so a step can branch into a whole sub-flow, and the sub-flow's `Failure` stops the outer pipeline exactly like a local one:
 
 ```js
 const processOrder = (order) => (order.isGift ? giftFlow(order) : standardFlow(order));
@@ -312,7 +340,7 @@ const processOrder = (order) => (order.isGift ? giftFlow(order) : standardFlow(o
 const fulfillment = effectPipe(validateOrder, processOrder, scheduleShipping);
 ```
 
-**Independent fan-in: `Parallel`.** When a later step needs several values that do not depend on each other, run them concurrently and join structurally. With `next` omitted, the branch results arrive as an ordered array:
+**Joining values that do not depend on each other: `Parallel`.** When a later step needs several such values, run them at the same time and collect the results. With `next` omitted, the branch results arrive as an ordered array:
 
 ```js
 const loadCheckout = effectPipe(
@@ -321,7 +349,7 @@ const loadCheckout = effectPipe(
 );
 ```
 
-**Dependent fan-in: join locally.** When step B needs step A's result and step C needs both, carry both forward in a value shaped for the next step. A local sub-pipeline that closes over its own parameter makes the join without nested callbacks:
+**Joining values that do depend on each other: join locally.** When step B needs step A's result and step C needs both, carry both forward in a value shaped for the next step. A local sub-pipeline that closes over its own parameter makes the join without nested callbacks:
 
 ```js
 const applyLoyaltyDiscount = (orderId) =>
@@ -336,7 +364,7 @@ const applyLoyaltyDiscount = (orderId) =>
 
 ## Which Errors Are Data
 
-There is no catch combinator, and that is deliberate. A flow's outcomes divide into two kinds, and the division decides how each is written.
+There is no catch, and that is deliberate. A flow's outcomes divide into two kinds, and the division decides how each is written.
 
 **An outcome the flow handles is data.** A Command's `next` receives the result and can branch into any Effect, including a whole fallback sub-pipeline. When the I/O itself can reject, catch inside the Command's `cmd` function and return the miss as a value:
 
@@ -358,9 +386,9 @@ const fetchPrice = (sku) => {
 
 The failed live attempt is recorded as that Command's result, error included, so a replay takes the same fallback branch and an incident trace still becomes a regression test. Nothing is hidden; the miss is simply categorized as what it is, an outcome the flow was written to handle.
 
-**A `Failure` means abort.** It short-circuits everything and lands in the shell, which is the one place that decides what a dead flow means: an HTTP status, a queue retry, an alert. Reserving `Failure` for outcomes the flow cannot handle keeps its meaning brutally simple; a reader never has to scan up the tree for a handler, because there is none. A catch combinator would reintroduce exactly the non-local control flow that writing effects as data is meant to eliminate.
+**A `Failure` means abort.** It stops everything and lands in the shell, which is the one place that decides what a dead flow means: an HTTP status, a queue retry, an alert. Reserving `Failure` for outcomes the flow cannot handle keeps its meaning brutally simple; a reader never has to scan up the tree for a handler, because there is none. A catch would reintroduce exactly the non-local control flow that writing effects as data is meant to eliminate.
 
-The rule of thumb: if you would handle it, return it; if you would only report it, fail with it. The one handled outcome that cannot be modeled as data is retry exhaustion, since the failing happens inside the `Retry` node; that case has its own in-flow form, the `onExhausted` option in [Retrying Transient Failures](#retrying-transient-failures).
+The rule of thumb: if you would handle it, return it; if you would only report it, fail with it. The one handled outcome that cannot be modeled as data is retry exhaustion, since the failing happens inside `Retry`; that case has its own in-flow form, the `onExhausted` option in [Retrying Transient Failures](#retrying-transient-failures).
 
 ## TypeScript: Typed Errors and Context
 
@@ -408,7 +436,7 @@ const result = await runEffect(findProduct('abc'), { tenant: 'acme', requestId: 
 
 ## API Reference
 
-### Primitives
+### Building blocks
 
 #### `Success(value)`
 
@@ -430,7 +458,9 @@ Returns `{ type: 'Command', cmd, next, meta }`.
 
 ```js
 Command(cmdFn, next, { name: 'chargeCard' }); // 1. meta.name, independent of how cmdFn was written
-Command(function cmdChargeCard() { ... }, next); // 2. the function's own name
+Command(function cmdChargeCard() {
+    return api.charge();
+}, next); // 2. the function's own name
 Command(() => api.charge(), next); // 3. neither, so 'anonymous'
 ```
 
@@ -479,14 +509,14 @@ One shape to avoid in either language:
 
 Commands are data, so a Command that is constructed and discarded never runs, and a `Failure` it would have produced is swallowed. Return the effect itself, or have that Command's own `next` return the value the rest of the pipeline needs.
 
-### Interpreter
+### Running a flow
 
 #### `runEffect(effect, context?, callConfig?)`
 
-Traverses the effect tree, executes Commands with `async/await`, resolves `Ask` with the supplied `context`, and returns the final `Success` or `Failure`.
+Walks the flow, runs each Command with `async/await`, resolves `Ask` with the supplied `context`, and returns the final `Success` or `Failure`.
 
 - `context`: Passed to `Ask`'s next function and to `onBeforeCommand`. `context.flowName` names the workflow in telemetry.
-- `callConfig`: Per-call overrides for `onStep`, `onRun`, `onBeforeCommand`, and `retry`. Takes precedence over `configureEffect` globals.
+- `callConfig`: Per-call `onStep`, `onRun`, `onBeforeCommand`, and `retry`, added to the `configureEffect` wiring unless `inherit: false`, which ignores that wiring for the run. See [`configureEffect`](#configureeffectconfigs).
 - `onRun` fires exactly once per `runEffect` call. Retry attempts run inside that single span.
 
 A step that returns something other than an Effect is a bug in the flow, not a domain failure, so it throws an `EffectTypeError` naming the step rather than resolving to a `Failure`:
@@ -505,25 +535,57 @@ The same check catches a missing `return`, a Command's next function returning a
 - `onBeforeCommand(command, context)` fires before each Command; throw to abort.
 - `retry: { attempts?, delay?, backoff? }` global retry defaults.
 
-Several configurations can be passed and are merged, which is how independent concerns share the one slot each hook has:
+Each call adds a layer of hooks on top of those already installed and returns a function that removes that layer. Layers merge, and several configurations passed to one call are merged the same way, so the two forms below are equivalent. Everything about the merge is visible in what runs during a single `runEffect`:
 
 ```js
 configureEffect(telemetryHooks(), recordingHooks({ sink }));
+
+// or, as two layers:
+configureEffect(telemetryHooks());
+configureEffect(recordingHooks({ sink }));
 ```
 
-- `onStep` and `onRun` are wrappers, so they nest: the first configuration is outermost, the last sits closest to the Command, and a thrown Command unwinds from the last back to the first.
-- `onBeforeCommand` interceptors all run, in the order given.
-- `retry` merges, with later configurations winning.
-- Merging is per call and does not accumulate: a later `configureEffect` replaces the previous wiring, an unset slot returns to its default, and calling it with nothing resets everything.
-- Returns a function that restores whatever was installed before the call, so hooks can be installed without owning the global wiring forever. It undoes this call only while its wiring is still in effect, so a later `configureEffect` is never silently discarded:
+```
+runEffect(flow(input))
+│
+├─ telemetry.onRun                       first configuration: outermost
+│  └─ recording.onRun                    last configuration: innermost
+│     │
+│     │  for each Command:
+│     ├─ telemetry.onBeforeCommand       interceptors all run, in the order given
+│     ├─ recording.onBeforeCommand
+│     ├─ telemetry.onStep
+│     │  └─ recording.onStep             closest to the Command
+│     │     └─ cmd()
+│     │  ┌─ recording.onStep returns     a result, or a thrown error, unwinds
+│     ├─ telemetry.onStep returns        from the inside out
+│     │
+│  ┌─ recording.onRun returns
+├─ telemetry.onRun returns
+│
+retry: { ...telemetry.retry, ...recording.retry }    later configurations win
+```
+
+Removing a layer takes out exactly that layer, whatever was installed after it, so a library can add its own hooks without touching its host's and give them back when it is done. Calling `configureEffect()` with no arguments removes every layer. A call whose arguments are all `undefined`, such as a conditional `configureEffect(flag ? hooks : undefined)`, installs nothing and removes nothing.
 
 ```js
-const restore = configureEffect(telemetryHooks());
+const remove = configureEffect(telemetryHooks());
 // ... later
-restore();
+remove();
 ```
 
-**A per-call `callConfig` replaces a global hook rather than layering over it.** `runEffect(effect, context, { onStep })` uses that `onStep` _instead of_ the configured one, so a `recordEffect` call inside an instrumented application produces a run with no spans, and a `replayEffect` call produces one with no recording. This is deliberate: replay works by displacing `onStep` so the Command never executes. Pass both concerns in one `callConfig` when a single run needs both.
+**A per-call `callConfig` is added to the configured wiring, or ignores it.** By default the call's hooks merge over the configured ones by the same rules as above: wrappers nest with the configured one outside, interceptors run configured first, and `retry` combines with the call's values winning. `inherit: false` leaves the configured wiring out of the run entirely. Given a configured wiring `C` and a call `K` that supplies only `onStep` and `retry`:
+
+```
+                  inherit: true (default)        inherit: false
+
+onRun             C.onRun                        (none)
+onBeforeCommand   C.onBeforeCommand              (none)
+onStep            C.onStep( K.onStep( cmd ) )    K.onStep
+retry             { ...C.retry, ...K.retry }     { ...defaults, ...K.retry }
+```
+
+`recordEffect` inherits, so recording inside an application that already has tracing keeps its spans. `replayEffect` passes `inherit: false` unless `hooks: true`.
 
 ### Recording and replay
 
@@ -531,7 +593,7 @@ restore();
 
 Returns `{ onStep, entries, toTrace }`. Pass `onStep` to `runEffect` or `configureEffect` to record what every Command returned.
 
-Each entry is `{ command, path, result, durationMs }`, or `{ command, path, error, durationMs }` when the Command threw, so a trace also answers which step was slow. `path` is the Command's position in the Effect tree, which is what a replay matches on. Results are snapshotted on capture, so a later step that mutates a returned object cannot rewrite what the trace says an earlier step saw. Values that cannot be structurally cloned, such as an object holding a function, are stored by reference instead. Recording cannot change a run: a `redact` that throws records `'[redaction failed]'` for that step instead of failing the flow.
+Each entry is `{ command, path, result, durationMs }`, or `{ command, path, error, durationMs }` when the Command threw, so a trace also answers which step was slow. `path` is the Command's position in the flow, which is what a replay matches on. Results are snapshotted on capture, so a later step that mutates a returned object cannot rewrite what the trace says an earlier step saw. Values that cannot be structurally cloned, such as an object holding a function, are stored by reference instead. Recording cannot change a run: a `redact` that throws records `'[redaction failed]'` for that step instead of failing the flow.
 
 - `options.redact(value, name, kind)`: The single place PII is kept out of a trace. It sees every value a trace holds, with `kind` distinguishing them:
 
@@ -557,13 +619,13 @@ Runs a flow for real while recording, returning `{ result, trace }`. Accepts `re
 
 #### `replayEffect(effect, traceOrResolver, options?)`
 
-Replays an effect tree, feeding recorded results to Commands instead of running them. Returns `{ result, unreached }`: the flow's outcome, and the recorded entries the flow never asked for (empty when every step was reached). A flow that stops early mismatches nothing and raises no `TimeParadox`, so `unreached` is where that divergence shows. For a resolver only `{ result }` is returned, since only a trace knows what it holds.
+Replays a flow, feeding recorded results to Commands instead of running them. Returns `{ result, unreached }`: the flow's outcome, and the recorded entries the flow never asked for (empty when every step was reached). A flow that stops early mismatches nothing and raises no `TimeParadox`, so `unreached` is where that divergence shows. For a resolver only `{ result }` is returned, since only a trace knows what it holds.
 
 - `traceOrResolver`: a trace (or bare entries array) to replay directly, or a resolver function for traces stored in some other shape. A resolver returns `{ result }`, `{ error }`, or `undefined` if the step is unrecorded. A malformed trace rejects with a `ReplayError`.
 - `options.context`: context for `Ask`; pass the recorded context.
 - `options.onMissing`: `'throw'` (default) fails on an unrecorded step; `'execute'` runs the real Command, giving a recorded prefix with a live tail.
 - `options.fastRetry` (default `true`): strip `Retry` delays.
-- `options.hooks` (default `false`): whether configured `onRun` / `onBeforeCommand` may fire. Off so a replay cannot reach a telemetry backend.
+- `options.hooks` (default `false`): run the replay inside the global hooks, resolver innermost, so configured hooks observe it, a global recorder included. Off ignores the global hooks, so a replay cannot reach a telemetry backend or a trace sink. Global `retry` defaults apply either way, since a replay has to make the attempts production made.
 - `options.onResolved(step, outcome)`: observe each replayed step.
 
 A trace whose entries carry no `path` (written by hand, or recorded before paths existed) is matched positionally, which is exact for a sequential flow; a `Parallel` step in such a trace is refused with a `ReplayError`, since completion order cannot tell its branches apart.
@@ -574,11 +636,10 @@ Replays a trace and narrates each step with its recorded duration, naming any re
 
 ## Limitations
 
-- **`Retry` repeats the whole wrapped tree.** Commands that already succeeded run again on every attempt, so wrapping a pipeline re-executes its side effects. Wrap the single Command that fails transiently unless every Command in the tree is idempotent.
-- **`Parallel` cancellation is cooperative, so it cannot stop everything.** A cancelled branch starts no further Commands, and a function that accepts the `AbortSignal` it is passed can be cut off in flight. A function that ignores the signal cannot: it runs to completion, so a branch whose _first_ Command is a write can still write after a sibling has failed. `Parallel` also waits for every branch to settle before returning, deliberately, so no cancelled work is left running unobserved after the `Failure` is returned.
-- **A `Failure` is complete by design.** It carries the full error and the `initialInput` that `effectPipe` stamped on it, and neither is trimmed, because a test asserting on a Failure and a developer debugging one both need everything. Keeping PII out of a **trace** is `redact`'s job. Keeping it out of your **logs** is the shell's: log `result.error` rather than serializing the whole `Failure`, which for a login or registration flow holds the credentials that flow received.
+- **`Retry` repeats the whole wrapped tree.** Commands that already succeeded run again on every attempt, so wrapping a pipeline re-executes its side effects. Wrap the single Command that fails transiently unless every Command in it is safe to run more than once.
+- **Cancelling a `Parallel` branch is a request, so it cannot stop everything.** A cancelled branch starts no further Commands, and a function that accepts the `AbortSignal` it is passed can be cut off in flight. A function that ignores the signal cannot: it runs to completion, so a branch whose _first_ Command is a write can still write after a sibling has failed. `Parallel` also waits for every branch to settle before returning, deliberately, so no cancelled work is left running unobserved after the `Failure` is returned.
+- **A `Failure` is complete by design.** It carries the full error and the `initialInput` that `effectPipe` attached to it, and neither is trimmed, because a test asserting on a Failure and a developer debugging one both need everything. Keeping PII out of a **trace** is `redact`'s job. Keeping it out of your **logs** is the shell's: log `result.error` rather than serializing the whole `Failure`, which for a login or registration flow holds the credentials that flow received.
 - **Replay reproduces observed inputs, not concurrency.** A stale read replays exactly. A race between two concurrent requests does not: a trace records one flow's view. `Parallel` branches replay with the results their own branch saw, since every step is matched by its position in the tree, but the interleaving between them is not reproduced, so a flow whose branches race each other through shared state is not something a replay can settle.
-- **A trace records responses, not requests.** Command arguments live in a closure and are unreachable, so a trace shows what a call returned but not what was passed to it. This also bounds what a replay verifies: the flow's path and its handling of recorded outcomes. The upside is that arguments can never leak into a trace.
 - **Global configuration is per module instance.** `configureEffect` writes to module-level state, so two copies of the library in one process, from a dual ESM and CJS resolution, two versions in a dependency tree, or a worker thread, each carry their own wiring. Code that configures one gets nothing in the other, with no error.
 - **A Command needs an identity.** `meta.name` is stable under minification; relying on `cmd.name` instead means a mangler renames every step of every trace, so mangling has to be disabled or names preserved.
-- **`Retry` delays cannot be overridden from `callConfig`.** Per-use options are merged over call config, so a delay written at the call site always wins. `replayEffect` works around this by rewriting `Retry` nodes; other callers cannot.
+- **`Retry` delays cannot be overridden from `callConfig`.** Per-use options are merged over call config, so a delay written at the call site always wins. `replayEffect` works around this by rewriting the `Retry`s in the flow; other callers cannot.

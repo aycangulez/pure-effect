@@ -296,22 +296,26 @@ export interface EffectConfiguration {
 }
 
 /**
- * Configures the global runner. Several configurations can be passed and are merged, which is how
- * independent concerns share the one slot each hook has: `onStep` and `onRun` nest with the first
- * outermost, `onBeforeCommand` interceptors all run in order, and `retry` merges with later winning.
- * Merging does not accumulate across calls: a later call replaces the previous wiring, and calling
- * this with nothing resets every slot to its default.
- *
- * Returns a function that puts back whatever was installed when this call was made, so a caller can
- * install hooks without owning the global wiring forever. Restoring is a snapshot rather than a stack:
- * if a later call has run since, restoring reverts to the older snapshot and discards the newer one.
+ * Adds a layer to the global runner's wiring and returns a function that removes it. Layers merge:
+ * `onStep` and `onRun` nest with the earliest layer outermost, `onBeforeCommand` interceptors all run
+ * in the order installed, and `retry` merges with later layers winning. Several configurations passed
+ * to one call form one layer, which is the same as installing them in separate calls. Calling with no
+ * arguments at all removes every layer; a call whose arguments are all `undefined` adds and removes nothing.
  */
 export declare function configureEffect(...configs: (EffectConfiguration | undefined)[]): () => void;
+
+/**
+ * A per-call configuration for `runEffect`. With `inherit: true` (default) the call's hooks are added to
+ * the wiring `configureEffect` installed: where both define a hook the two nest, global outermost, and
+ * `retry` merges with the call winning. With `inherit: false` the global wiring is ignored, so unset
+ * slots fall back to the library defaults.
+ */
+export type CallConfiguration = EffectConfiguration & { inherit?: boolean };
 
 export declare function runEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     context?: Ctx,
-    callConfig?: EffectConfiguration
+    callConfig?: CallConfiguration
 ): Promise<SuccessState<T> | FailureState<E>>;
 
 export type ReplayStep = {
@@ -402,7 +406,10 @@ export interface ReplayOptions<Ctx = unknown> {
     context?: Ctx;
     /** Strip `Retry` delays so a replay does not wait out production backoff (default `true`). */
     fastRetry?: boolean;
-    /** Allow configured `onRun` / `onBeforeCommand` to fire (default `false`). */
+    /**
+     * Run the replay inside the global hooks, resolver innermost, so configured hooks observe it
+     * (default `false`, which ignores the global hooks). Global `retry` defaults apply either way.
+     */
     hooks?: boolean;
     /**
      * What to do when the Resolver has no recording for a step.
