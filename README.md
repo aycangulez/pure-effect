@@ -9,7 +9,7 @@
 - Inject context without touching function signatures
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks
-- Zero dependencies, about 4 KB minified and gzipped
+- Zero dependencies, about 4.5 KB minified and gzipped
 - Works in JavaScript and TypeScript (full generics, bundled `.d.ts`)
 
 ## Table of Contents
@@ -316,6 +316,26 @@ const loadProfile = (userId) =>
 
 `Ask` context flows into all parallel branches without any extra wiring.
 
+**For a batch, pass options instead of letting the first failure win.** The second argument is `next` or the options, whichever it looks like, so neither needs a placeholder:
+
+```js
+// At most 5 branches in flight, for a gateway that rate limits.
+Parallel(subscriptions.map(billOne), { limit: 5 });
+
+// Every branch runs to completion, and `next` receives the outcomes rather than the values.
+Parallel(subscriptions.map(billOne), { limit: 5, settled: true });
+```
+
+`settled: true` is what makes one bad record survivable. Without it a single branch's `Failure` cancels its siblings and becomes the whole `Parallel`'s result, which for a batch means one unexpected exception can stop the run with work half done. With it, every branch runs to the end and `next` receives one `Success` or `Failure` per branch, in array order, so a failed record is a value you count rather than an outcome that ends the job:
+
+```js
+Parallel(subscriptions.map(billOne), (outcomes) => Success(outcomes.map(summarize)), { limit: 5, settled: true });
+```
+
+A flow bug still escapes. An `EffectTypeError`, the error a malformed flow raises, is not a branch outcome and passes straight through a settled `Parallel`, because settled mode is for outcomes you expected to be possible, not for silencing mistakes.
+
+`limit` caps how many branches are in flight; the rest start as slots free. Results and recorded paths stay in array order either way, so limiting changes the pacing and nothing else, and a trace recorded with a limit replays exactly as one recorded without. A `limit` that is not a positive integer throws a `TypeError`.
+
 **Cancelling is a request, not a guarantee, and it works at two levels.** A cancelled branch starts no further Commands. For example, a three-step branch whose first step is in flight when a sibling fails runs that step and stops. Cancelling the step already in flight needs the function to accept the `AbortSignal` it is handed and pass it to whatever performs the I/O:
 
 ```js
@@ -479,9 +499,14 @@ Returns `{ type: 'Retry', effect, options, next }`.
 - `options.backoff`: Multiplier applied to delay on each attempt (default: `1`, flat).
 - `options.onExhausted(error)`: Runs a fallback Effect when every attempt has failed, receiving `{ retryExhausted, lastError, attempts }`. The fallback's success feeds `next`; its failure propagates unwrapped. Per-use only. See [Retrying Transient Failures](#retrying-transient-failures).
 
-#### `Parallel(effects, next?)`
+#### `Parallel(effects, next?, options?)`
 
-Returns `{ type: 'Parallel', effects, next }`. Runs all effects concurrently. `next` receives the ordered array of success values and is optional, defaulting to `(values) => Success(values)` like `Command`'s. The first branch to fail cancels its siblings and its `Failure` is returned; `next` is not called. When several branches fail in the same tick, the first by array order wins. Each branch's Commands receive an `AbortSignal` as their only argument, so I/O that accepts one is cancelled in flight; see [Running Effects in Parallel](#running-effects-in-parallel).
+Returns `{ type: 'Parallel', effects, next, options }`. Runs all effects concurrently. `next` receives the ordered array of success values and is optional, defaulting to `(values) => Success(values)` like `Command`'s. The first branch to fail cancels its siblings and its `Failure` is returned; `next` is not called. When several branches fail in the same tick, the first by array order wins. Each branch's Commands receive an `AbortSignal` as their only argument, so I/O that accepts one is cancelled in flight; see [Running Effects in Parallel](#running-effects-in-parallel).
+
+The second argument is `next` or the options, whichever it looks like, so `Parallel(effects, { limit: 5 })` needs no placeholder.
+
+- `limit`: most branches in flight at once. Results and recorded paths stay in array order, so a limit changes pacing and nothing else. Not a positive integer throws a `TypeError`.
+- `settled`: run every branch to completion and hand `next` one outcome per branch, `Success` or `Failure`, in array order. No branch cancels its siblings and the `Parallel` itself never fails on a branch's account. An `EffectTypeError` still escapes, because a malformed flow is a bug rather than a branch outcome.
 
 ### Building pipelines
 

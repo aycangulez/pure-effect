@@ -2,6 +2,17 @@
 
 All notable changes to pure-effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
+## [Unreleased]
+
+### Added
+
+- **`Parallel` takes options: `limit` and `settled`.** `Parallel(effects, { limit: 5 })` keeps at most five branches in flight, for a dependency that rate limits; results and recorded paths stay in array order, so a limit changes pacing and nothing else. `Parallel(effects, { settled: true })` runs every branch to completion and hands `next` one outcome per branch, `Success` or `Failure`, in array order, so a batch survives one bad record instead of being cancelled mid-flow by it. An `EffectTypeError` still escapes a settled `Parallel`, because a malformed flow is a bug rather than a branch outcome. The second argument is `next` or the options, whichever it looks like, so existing calls are untouched and neither form needs a placeholder.
+- The `README examples` suite runs every `js` block in `README.md` as one program with its assertions live, and checks that each block parses and imports only names the library exports.
+
+### Changed
+
+- The size in the feature list is now "about 4.5 KB", re-measured after the `Parallel` options.
+
 ## [0.13.0] - 2026-09-22
 
 ### Changed

@@ -35,10 +35,17 @@
  */
 
 /**
+ * `settled` hands branch outcomes to `next` instead of failing on the first one; `limit` caps how many
+ * branches run at once.
+ * @typedef {{ limit?: number, settled?: boolean }} ParallelOptions
+ */
+
+/**
  * @typedef {{
  *   type: 'Parallel',
  *   effects: Effect[],
  *   next: (values: any[]) => Effect,
+ *   options?: ParallelOptions,
  *   initialInput?: any
  * }} ParallelState
  */
@@ -148,16 +155,31 @@ const Retry = (effect, options = {}) => ({
  * the `AbortSignal` it is passed and hand it to whatever performs the I/O; a thunk that ignores the
  * signal runs to completion, so a branch's first Command can still write after a sibling has failed.
  *
+ * `settled: true` turns off that first-failure rule: every branch runs to completion and `next`
+ * receives the branch outcomes themselves, `Success` and `Failure` nodes in array order, so one
+ * record's failure cannot abort a batch. An `EffectTypeError` still escapes, because a malformed flow
+ * is a bug rather than a branch outcome. `limit: n` keeps at most `n` branches in flight, for a
+ * resource that rate limits; results and paths stay in array order either way.
+ *
+ * The second argument is the `next` function or the options, whichever it looks like, so
+ * `Parallel(effects, { limit: 5 })` needs no placeholder.
+ *
  * @param {Effect[]} effects - Array of Effect trees to run concurrently
- * @param {(values: any[]) => Effect} [next] - Receives array of success values in order, returns next Effect.
- *        Defaults to `(values) => Success(values)`, same as `Command`'s default.
+ * @param {((values: any[]) => Effect) | ParallelOptions} [nextOrOptions] - Receives array of success
+ *        values in order and returns the next Effect, or the options. `next` defaults to
+ *        `(values) => Success(values)`, same as `Command`'s default.
+ * @param {ParallelOptions} [maybeOptions] - Options, when `next` was given
  * @returns {ParallelState}
  */
-const Parallel = (effects, next = (/** @type {any[]} */ values) => Success(values)) => ({
-    type: 'Parallel',
-    effects,
-    next
-});
+const Parallel = (effects, nextOrOptions, maybeOptions) => {
+    const hasNext = typeof nextOrOptions === 'function';
+    return {
+        type: 'Parallel',
+        effects,
+        next: hasNext ? nextOrOptions : (/** @type {any[]} */ values) => Success(values),
+        options: (hasNext ? maybeOptions : nextOrOptions) ?? {}
+    };
+};
 
 /**
  * Describes a value for an error message, leading with the mistake it most likely is.
@@ -500,6 +522,27 @@ const parallelCancelled = () =>
     });
 
 /**
+ * Awaits every task, with at most `limit` of them in flight. Without a limit this is `Promise.all`,
+ * which is what `Parallel` did before the option existed. Workers pull by index, so a slow branch
+ * holds one slot rather than a position: results land where the caller put the effect, never where it
+ * happened to finish, which is also what keeps trace paths stable.
+ * @param {(() => Promise<void>)[]} tasks
+ * @param {number} [limit]
+ * @returns {Promise<void>}
+ */
+const runBounded = async (tasks, limit) => {
+    if (!limit || limit >= tasks.length) {
+        await Promise.all(tasks.map((task) => task()));
+        return;
+    }
+    let cursor = 0;
+    const worker = async () => {
+        for (let i = cursor++; i < tasks.length; i = cursor++) await tasks[i]();
+    };
+    await Promise.all(Array.from({ length: limit }, worker));
+};
+
+/**
  * Sleeps, but gives up early when the surrounding branch is cancelled, so a sibling's failure does not
  * have to wait out a retry backoff that is now pointless. Resolves either way: the caller's abort check
  * is what turns a cancelled wait into a Failure.
@@ -638,9 +681,16 @@ const runEffect =
                     // branches complete in, which is the whole point: two branches calling the same
                     // Command are told apart by where they are rather than by who finished first.
                     const branchPath = `${path}${step++}p`;
+                    const { limit, settled } = eff.options ?? {};
+                    if (limit !== undefined && (!Number.isInteger(limit) || limit < 1))
+                        throw new TypeError(
+                            `Parallel 'limit' must be a positive integer, received ${describeValue(limit)}.`
+                        );
                     // One scope per Parallel, linked to the enclosing one so cancellation nests.
                     // Absent AbortController (very old runtimes), `branchSignal` stays undefined and
-                    // the old run-everything-to-completion behaviour is what happens.
+                    // the old run-everything-to-completion behaviour is what happens. The scope is kept
+                    // under `settled` so an enclosing Parallel can still cancel this one; what settled
+                    // drops is a branch cancelling its own siblings.
                     const scope = typeof AbortController === 'function' ? new AbortController() : undefined;
                     const branchSignal = scope?.signal;
                     const relay = () => scope?.abort();
@@ -657,19 +707,27 @@ const runEffect =
                         // Still awaits every branch, so no cancelled work is left running unobserved
                         // after the Failure is returned. Cancelled branches settle promptly; a branch
                         // whose in-flight Command ignores the signal is the one case that does not.
-                        await Promise.all(
-                            eff.effects.map(async (e, i) => {
+                        await runBounded(
+                            eff.effects.map((e, i) => async () => {
                                 const result = await execute(e, branchSignal, `${branchPath}${i}/`);
                                 results[i] = result;
                                 // Read-then-abort is atomic here, so exactly one branch is the trigger.
-                                if (result.type === 'Failure' && !branchSignal?.aborted) {
+                                if (result.type === 'Failure' && !settled && !branchSignal?.aborted) {
                                     triggered[i] = true;
                                     scope?.abort();
                                 }
-                            })
+                            }),
+                            limit
                         );
                     } finally {
                         if (signal && scope) signal.removeEventListener('abort', relay);
+                    }
+
+                    // Settled hands the outcomes on as they are. A branch that failed is data here, so
+                    // `next` runs and the Parallel itself never fails on a branch's account.
+                    if (settled) {
+                        eff = eff.next(results);
+                        continue;
                     }
 
                     const trigger = triggered.indexOf(true);

@@ -68,10 +68,33 @@ export type RetryExhaustedError<E = unknown> = {
     attempts: number;
 };
 
-export type ParallelState<T extends readonly unknown[], R, E = unknown, Ctx = unknown> = {
+export type ParallelOptions = {
+    /** Most branches in flight at once. Results and paths stay in array order regardless. */
+    limit?: number;
+    /** Hand every branch's outcome to `next` instead of failing on the first one. */
+    settled?: boolean;
+};
+
+/** What a settled `Parallel` hands to `next`: one outcome per branch, in array order. */
+export type ParallelOutcomes<T extends readonly unknown[], E> = {
+    [K in keyof T]: SuccessState<T[K]> | FailureState<E>;
+};
+
+/**
+ * `V` is what `next` receives, which is the branch values normally and the branch outcomes under
+ * `settled`. It defaults to `T`, so every non-settled use reads as it always did.
+ */
+export type ParallelState<
+    T extends readonly unknown[],
+    R,
+    E = unknown,
+    Ctx = unknown,
+    V extends readonly unknown[] = T
+> = {
     type: 'Parallel';
     effects: { [K in keyof T]: Effect<T[K], E, Ctx> };
-    next(values: [...T]): Effect<R, E, Ctx>;
+    next(values: [...V]): Effect<R, E, Ctx>;
+    options?: ParallelOptions;
     initialInput?: unknown;
 };
 
@@ -127,15 +150,29 @@ export declare function Retry<T, E = unknown, Ctx = unknown>(
 
 /**
  * `next` is optional and defaults to `(values) => Success(values)`, same as `Command`'s default,
- * so a bare `Parallel(effects)` resolves to the ordered array of success values.
+ * so a bare `Parallel(effects)` resolves to the ordered array of success values. The second argument
+ * is `next` or the options, whichever it looks like.
  */
-export declare function Parallel<T extends readonly unknown[], E = unknown, Ctx = unknown>(effects: {
-    [K in keyof T]: Effect<T[K], E, Ctx>;
-}): ParallelState<[...T], [...T], E, Ctx>;
+export declare function Parallel<T extends readonly unknown[], E = unknown, Ctx = unknown>(
+    effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
+    options: ParallelOptions & { settled: true }
+): ParallelState<[...T], ParallelOutcomes<T, E>, E, Ctx, ParallelOutcomes<T, E>>;
 
 export declare function Parallel<T extends readonly unknown[], R, E = unknown, Ctx = unknown>(
     effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
-    next: (values: [...T]) => Effect<R, E, Ctx>
+    next: (values: ParallelOutcomes<T, E>) => Effect<R, E, Ctx>,
+    options: ParallelOptions & { settled: true }
+): ParallelState<[...T], R, E, Ctx, ParallelOutcomes<T, E>>;
+
+export declare function Parallel<T extends readonly unknown[], E = unknown, Ctx = unknown>(
+    effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
+    options?: ParallelOptions
+): ParallelState<[...T], [...T], E, Ctx>;
+
+export declare function Parallel<T extends readonly unknown[], R, E = unknown, Ctx = unknown>(
+    effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
+    next: (values: [...T]) => Effect<R, E, Ctx>,
+    options?: ParallelOptions
 ): ParallelState<[...T], R, E, Ctx>;
 
 export declare function effectPipe<A, B, E1 = unknown, Ctx = unknown>(

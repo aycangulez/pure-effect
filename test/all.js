@@ -3103,6 +3103,9 @@ describe('README examples', function () {
             cmdFn: () => Promise.resolve({}),
             next: Success,
             order: { id: 'order_1' },
+            subscriptions: [{ id: 'sub_1' }, { id: 'sub_2' }],
+            billOne: stubCommand,
+            summarize: (/** @type {any} */ outcome) => outcome.type,
             sink: () => {},
             telemetryHooks: () => ({}),
             recordingHooks: () => ({})
@@ -3116,5 +3119,211 @@ describe('README examples', function () {
         } finally {
             console.log = log;
         }
+    });
+});
+
+describe('Parallel limit and settled', function () {
+    beforeEach(function () {
+        configureEffect();
+    });
+
+    /** A Command that records when it starts and finishes, so in-flight counts can be asserted. */
+    const tracked = (/** @type {{ inFlight: number, peak: number }} */ meter, /** @type {any} */ value, ms = 5) =>
+        Command(function cmdTracked() {
+            meter.inFlight++;
+            meter.peak = Math.max(meter.peak, meter.inFlight);
+            return new Promise((resolve) =>
+                setTimeout(() => {
+                    meter.inFlight--;
+                    resolve(value);
+                }, ms)
+            );
+        });
+
+    it('should cap how many branches are in flight at once', async function () {
+        const meter = { inFlight: 0, peak: 0 };
+        const effects = Array.from({ length: 9 }, (_, i) => tracked(meter, i));
+        const result = await runEffect(Parallel(effects, { limit: 3 }));
+        assert.equal(result.type, 'Success');
+        assert.equal(meter.peak, 3);
+    });
+
+    it('should keep results in array order regardless of the limit', async function () {
+        const meter = { inFlight: 0, peak: 0 };
+        // Descending durations, so completion order is the reverse of array order.
+        const effects = [tracked(meter, 'a', 30), tracked(meter, 'b', 20), tracked(meter, 'c', 1)];
+        const result = await runEffect(Parallel(effects, { limit: 2 }));
+        assert.deepEqual(/** @type {any} */ (result).value, ['a', 'b', 'c']);
+    });
+
+    it('should keep paths tied to array position, not to completion order', async function () {
+        const meter = { inFlight: 0, peak: 0 };
+        const effects = [tracked(meter, 'a', 20), tracked(meter, 'b', 1)];
+        const { trace } = await recordEffect(() => Parallel(effects, { limit: 1 }), null);
+        assert.deepEqual(trace.trace.map((e) => e.path).sort(), ['0p0/0', '0p1/0']);
+    });
+
+    it('should not start queued branches once one has failed', async function () {
+        let started = 0;
+        const counted = (/** @type {boolean} */ fail) =>
+            Command(function cmdCounted() {
+                started++;
+                return fail ? Promise.reject(new Error('boom')) : Promise.resolve('ok');
+            });
+        const effects = [counted(true), counted(false), counted(false), counted(false)];
+        const result = await runEffect(Parallel(effects, { limit: 1 }));
+        assert.equal(result.type, 'Failure');
+        assert.equal(started, 1, 'the branches behind the failure should never have started');
+    });
+
+    it('should reject a limit that is not a positive integer', async function () {
+        await assert.rejects(() => runEffect(Parallel([Success(1)], { limit: 0 })), TypeError);
+        await assert.rejects(() => runEffect(Parallel([Success(1)], { limit: -1 })), TypeError);
+        await assert.rejects(() => runEffect(Parallel([Success(1)], { limit: /** @type {any} */ ('3') })), TypeError);
+    });
+
+    it('should hand settled branches to next as their own outcomes, in order', async function () {
+        const effects = [
+            Command(function cmdOk() {
+                return Promise.resolve('a');
+            }),
+            Command(function cmdBoom() {
+                return Promise.reject(new Error('boom'));
+            }),
+            Command(function cmdAlsoOk() {
+                return Promise.resolve('c');
+            })
+        ];
+        const result = await runEffect(Parallel(effects, { settled: true }));
+        assert.equal(result.type, 'Success');
+        assert.deepEqual(
+            /** @type {any} */ (result).value.map((/** @type {any} */ o) => o.type),
+            ['Success', 'Failure', 'Success']
+        );
+        const outcomes = /** @type {any[]} */ (result.value);
+        assert.equal(outcomes[0].value, 'a');
+        assert.equal(outcomes[1].error.message, 'boom');
+        assert.equal(outcomes[2].value, 'c');
+    });
+
+    it('should let every settled branch finish rather than cancelling siblings', async function () {
+        let finished = 0;
+        const slow = () =>
+            Command(function cmdSlow() {
+                return new Promise((resolve) => setTimeout(() => resolve(++finished), 10));
+            });
+        const effects = [
+            Command(function cmdFailsFast() {
+                return Promise.reject(new Error('boom'));
+            }),
+            slow(),
+            slow()
+        ];
+        const result = await runEffect(Parallel(effects, { settled: true }));
+        assert.equal(result.type, 'Success');
+        assert.equal(finished, 2, 'both slow branches should have run to completion');
+    });
+
+    it('should turn a thrown Command into that branch and not the whole Parallel', async function () {
+        const effects = [
+            effectPipe(
+                () =>
+                    Command(function cmdFirst() {
+                        return Promise.resolve(1);
+                    }),
+                () =>
+                    Command(function cmdThrows() {
+                        throw new TypeError('unmodelled');
+                    })
+            )(null),
+            Success('sibling')
+        ];
+        const result = await runEffect(Parallel(effects, { settled: true }));
+        assert.equal(result.type, 'Success');
+        const outcomes = /** @type {any[]} */ (result.value);
+        assert.equal(outcomes[0].type, 'Failure');
+        assert.equal(outcomes[0].error.message, 'unmodelled');
+        assert.equal(outcomes[1].value, 'sibling');
+    });
+
+    it('should still let an EffectTypeError escape a settled Parallel', async function () {
+        // A malformed flow is a bug, not a branch outcome; settled mode must not be where flow bugs
+        // go quiet.
+        const effects = [
+            effectPipe(
+                () =>
+                    Command(function cmdFine() {
+                        return Promise.resolve(1);
+                    }),
+                /** @type {any} */ (
+                    function missingReturn() {
+                        /* returns undefined */
+                    }
+                )
+            )(null),
+            Success('sibling')
+        ];
+        await assert.rejects(() => runEffect(Parallel(effects, { settled: true })), /missingReturn/);
+    });
+
+    it('should combine a limit with settled', async function () {
+        const meter = { inFlight: 0, peak: 0 };
+        const effects = [
+            tracked(meter, 'a'),
+            Command(function cmdBoom() {
+                return Promise.reject(new Error('boom'));
+            }),
+            tracked(meter, 'c'),
+            tracked(meter, 'd')
+        ];
+        const result = await runEffect(Parallel(effects, { limit: 2, settled: true }));
+        assert.deepEqual(
+            /** @type {any} */ (result).value.map((/** @type {any} */ o) => o.type),
+            ['Success', 'Failure', 'Success', 'Success']
+        );
+        assert.ok(meter.peak <= 2);
+    });
+
+    it('should accept next alongside options', async function () {
+        const effects = [Success(1), Success(2)];
+        const result = await runEffect(
+            Parallel(effects, (values) => Success(values.reduce((a, b) => a + b, 0)), { limit: 1 })
+        );
+        assert.deepEqual(result, Success(3));
+    });
+
+    it('should leave the existing two-argument forms alone', async function () {
+        assert.deepEqual(await runEffect(Parallel([Success(1), Success(2)])), Success([1, 2]));
+        assert.deepEqual(
+            await runEffect(Parallel([Success(1), Success(2)], (values) => Success(values.join('-')))),
+            Success('1-2')
+        );
+    });
+
+    it('should replay a limited settled Parallel from its trace with no I/O', async function () {
+        let calls = 0;
+        const flow = () =>
+            Parallel(
+                [
+                    Command(function cmdOne() {
+                        calls++;
+                        return Promise.resolve('one');
+                    }),
+                    Command(function cmdTwo() {
+                        calls++;
+                        return Promise.reject(new Error('two failed'));
+                    })
+                ],
+                { limit: 1, settled: true }
+            );
+        const { result, trace } = await recordEffect(flow, null);
+        const during = calls;
+        const { result: replayed, unreached } = await replayEffect(flow(), trace);
+        assert.equal(calls, during, 'replay must not execute a Command');
+        assert.deepEqual(unreached, []);
+        assert.deepEqual(
+            /** @type {any} */ (replayed).value.map((/** @type {any} */ o) => o.type),
+            /** @type {any} */ (result).value.map((/** @type {any} */ o) => o.type)
+        );
     });
 });

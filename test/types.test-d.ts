@@ -21,6 +21,7 @@ import type {
     AskState,
     RetryState,
     ParallelState,
+    ParallelOutcomes,
     RetryExhaustedError,
     Effect,
     EffectConfiguration,
@@ -243,6 +244,45 @@ const parBareResult = await runEffect(parBare);
 if (parBareResult.type === 'Success') {
     expectType<[number, string]>(parBareResult.value);
 }
+
+// Options in the second slot leave the value types alone
+const parLimited = Parallel([Success(42), Success('hello')], { limit: 2 });
+expectType<ParallelState<[number, string], [number, string]>>(parLimited);
+
+// Options alongside a next
+const parLimitedNext = Parallel([Success(42), Success('hello')], ([n, s]) => Success({ n, s }), { limit: 2 });
+expectType<ParallelState<[number, string], { n: number; s: string }>>(parLimitedNext);
+
+// Settled hands next the branch outcomes rather than the values
+const parSettled = Parallel([Success(42), Success('hello')], { settled: true });
+const parSettledResult = await runEffect(parSettled);
+if (parSettledResult.type === 'Success') {
+    expectType<[SuccessState<number> | FailureState<unknown>, SuccessState<string> | FailureState<unknown>]>(
+        parSettledResult.value
+    );
+}
+
+const parSettledNext = Parallel(
+    [Success(42), Success('hello')],
+    ([first, second]) => {
+        expectType<SuccessState<number> | FailureState<unknown>>(first);
+        expectType<SuccessState<string> | FailureState<unknown>>(second);
+        return Success(first.type === 'Success' ? first.value : 0);
+    },
+    { settled: true }
+);
+expectType<ParallelState<[number, string], number, unknown, unknown, ParallelOutcomes<[number, string], unknown>>>(
+    parSettledNext
+);
+
+// @ts-expect-error a settled next receives outcomes, so a bare value cannot be used as one
+Parallel([Success(42)], ([n]) => Success(n + 1), { settled: true });
+
+// @ts-expect-error limit is a number
+Parallel([Success(42)], { limit: 'five' });
+
+// @ts-expect-error settled is a boolean
+Parallel([Success(42)], { settled: 'yes' });
 
 // --- Ctx (context type) ---
 
