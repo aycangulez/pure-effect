@@ -143,14 +143,15 @@ const innerCmd = Command(
     (n) => Success(n)
 );
 
-// Retry with options preserves T; the error type is the exhaustion failure, not the inner error,
-// because the interpreter wraps the last inner error rather than letting it escape
+// Retry with options preserves T. The error type is both of the things a Retry can contribute: an
+// abort the wrapped tree returned, which is not retried and leaves unwrapped, and the exhaustion
+// failure that follows an I/O fault the loop could not get past.
 const retried = Retry(innerCmd, { attempts: 3 });
-expectType<RetryState<number, RetryExhaustedError<unknown>>>(retried);
+expectType<RetryState<number, unknown | RetryExhaustedError<unknown>>>(retried);
 
 // Retry without options is valid
 const retriedNoOpts = Retry(innerCmd);
-expectType<RetryState<number, RetryExhaustedError<unknown>>>(retriedNoOpts);
+expectType<RetryState<number, unknown | RetryExhaustedError<unknown>>>(retriedNoOpts);
 
 // Retry in effectPipe preserves type flow
 const retryFlow = effectPipe((input: User) =>
@@ -162,16 +163,19 @@ const retryFlow = effectPipe((input: User) =>
         { attempts: 2 }
     )
 );
-expectType<Effect<SavedUser, RetryExhaustedError<unknown>>>(retryFlow({ email: 'a@b.com', password: 'secret123' }));
+expectType<Effect<SavedUser, unknown | RetryExhaustedError<unknown>>>(
+    retryFlow({ email: 'a@b.com', password: 'secret123' })
+);
 
 // The inner error type survives inside the exhaustion failure, so lastError is typed
 const retriedTyped = Retry(Success(1) as Effect<number, 'net_down'>);
-expectType<RetryState<number, RetryExhaustedError<'net_down'>>>(retriedTyped);
+expectType<RetryState<number, 'net_down' | RetryExhaustedError<'net_down'>>>(retriedTyped);
 
 const retryResult = await runEffect(Retry(Success(1) as Effect<number, 'flaky'>, { attempts: 1 }));
 if (retryResult.type === 'Failure') {
-    expectType<RetryExhaustedError<'flaky'>>(retryResult.error);
-    expectType<'flaky'>(retryResult.error.lastError);
+    expectType<'flaky' | RetryExhaustedError<'flaky'>>(retryResult.error);
+    // An abort arrives as itself, so the union has to be narrowed before `lastError` is there.
+    if (typeof retryResult.error === 'object') expectType<'flaky'>(retryResult.error.lastError);
 }
 
 // onExhausted consumes the exhaustion, so the fallback's error type is what remains
@@ -182,11 +186,12 @@ const recovered = Retry(Success(1) as Effect<number, 'flaky'>, {
         return Success(0) as Effect<number, 'cache_miss'>;
     }
 });
-expectType<RetryState<number, 'cache_miss'>>(recovered);
+// The fallback consumes the exhaustion, and an abort still leaves as itself, so both remain.
+expectType<RetryState<number, 'flaky' | 'cache_miss'>>(recovered);
 
 const recoveredResult = await runEffect(recovered);
 if (recoveredResult.type === 'Failure') {
-    expectType<'cache_miss'>(recoveredResult.error);
+    expectType<'flaky' | 'cache_miss'>(recoveredResult.error);
 }
 
 // @ts-expect-error retry options, onExhausted included, are per-use rather than configured

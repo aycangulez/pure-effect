@@ -2533,6 +2533,122 @@ describe('Documented sharp edges', function () {
         assert.equal(charges.length, 3, 'one order, three charges: wrap the Command, not the pipeline');
     });
 
+    it('should repeat everything a retried Command next leads to, not just that Command', async function () {
+        // The sharper form of the edge above, and the one that is easy to write by accident. Wrapping a
+        // single Command looks like it satisfies "wrap the Command, not the pipeline", but a Command's
+        // `next` is part of the tree the Retry repeats, so a Retry whose `next` continues the flow wraps
+        // everything downstream. Found by building a booking saga: an exception in the last step charged
+        // the card nine times, because two enclosing retries each re-ran the whole remainder.
+        const ledger = { seats: 0, charges: 0 };
+        const saga = (/** @type {() => void} */ onCharge) =>
+            Retry(
+                Command(
+                    function cmdHoldSeat() {
+                        ledger.seats++;
+                        return Promise.resolve({ holdId: 'seat_1' });
+                    },
+                    () =>
+                        Command(function cmdCharge() {
+                            ledger.charges++;
+                            onCharge();
+                            throw new Error('gateway exploded');
+                        })
+                ),
+                { attempts: 2, delay: 0 }
+            );
+
+        const result = await runEffect(saga(() => {}));
+        assert.equal(result.type, 'Failure');
+        assert.equal(ledger.seats, 3, 'the seat is held once per attempt');
+        assert.equal(
+            ledger.charges,
+            3,
+            'and the card is charged once per attempt, though only one charge was asked for'
+        );
+
+        // The shape that does what the sentence above promises: the retried Command keeps its default
+        // pass-through `next`, and the branching happens in a later pipeline step, outside the Retry.
+        ledger.seats = 0;
+        ledger.charges = 0;
+        const fixed = effectPipe(
+            () =>
+                Retry(
+                    Command(function cmdHoldSeat() {
+                        ledger.seats++;
+                        return Promise.resolve({ holdId: 'seat_1' });
+                    }),
+                    { attempts: 2, delay: 0 }
+                ),
+            () =>
+                Command(function cmdCharge() {
+                    ledger.charges++;
+                    throw new Error('gateway exploded');
+                })
+        )(null);
+
+        const fixedResult = await runEffect(fixed);
+        assert.equal(fixedResult.type, 'Failure');
+        assert.equal(ledger.seats, 1, 'the retried tree is now the one Command');
+        assert.equal(ledger.charges, 1, 'and a later failure costs one charge, not one per attempt');
+    });
+
+    it('should not retry a rejection the Command function caught and returned', async function () {
+        // Two pieces of guidance that do not compose: catching inside the `cmd` function turns the
+        // rejection into a returned Failure, which is an abort, and aborts are not retried. Wrapping
+        // that step in Retry then buys nothing and says nothing. Found by following both at once.
+        const attempt = (/** @type {boolean} */ catchInside) => {
+            let calls = 0;
+            const get = () => {
+                calls++;
+                return Promise.reject(new Error('503'));
+            };
+            const step = catchInside
+                ? Command(
+                      function cmdFetch() {
+                          return get().then(
+                              (/** @type {any} */ value) => /** @type {any} */ ({ ok: true, value }),
+                              (/** @type {any} */ error) => /** @type {any} */ ({ ok: false, error })
+                          );
+                      },
+                      (/** @type {any} */ r) => (r.ok ? Success(r.value) : Failure({ at: 'pricing' }))
+                  )
+                : Command(function cmdFetch() {
+                      return get();
+                  });
+            return { step, calls: () => calls };
+        };
+
+        const caught = attempt(true);
+        const caughtResult = await runEffect(Retry(caught.step, { attempts: 3, delay: 0 }));
+        assert.equal(caughtResult.type, 'Failure');
+        assert.equal(caught.calls(), 1, 'a caught rejection is an abort, so the Retry never tries again');
+
+        const thrown = attempt(false);
+        const thrownResult = await runEffect(Retry(thrown.step, { attempts: 3, delay: 0 }));
+        assert.equal(thrownResult.type, 'Failure');
+        assert.equal(thrown.calls(), 4, 'letting it throw is what makes it an I/O fault the Retry acts on');
+    });
+
+    it('should hand a settled Parallel branch a Failure that still carries the input', async function () {
+        // `settled` exists so branch outcomes can be reported, and the outcomes are whole `Failure`
+        // nodes: they carry the flow's input like any other, which for a registration is the
+        // credentials. The README says to take the field rather than serialize the node.
+        const register = (/** @type {any} */ creds) =>
+            effectPipe(() =>
+                Command(function cmdSave() {
+                    throw new Error('duplicate key');
+                })
+            )(creds);
+        const result = await runEffect(
+            Parallel([register({ email: 'a@b.com', password: 'hunter2' })], { settled: true })
+        );
+        assert.equal(result.type, 'Success');
+        const [outcome] = /** @type {any} */ (result).value;
+        assert.equal(outcome.type, 'Failure');
+        assert.deepEqual(outcome.initialInput, { email: 'a@b.com', password: 'hunter2' });
+        assert.equal(outcome.error.message, 'duplicate key', 'the field a caller should report instead');
+    });
+
     it('should not stop an in-flight Command whose thunk ignores the signal', async function () {
         // Pinned deliberately: cancellation is cooperative. The sibling's write is already in flight
         // inside the branch's first Command, and a thunk that ignores its signal cannot be interrupted,
@@ -2992,6 +3108,10 @@ describe('README examples', function () {
             subscriptions: [{ id: 'sub_1' }, { id: 'sub_2' }],
             billOne: stubCommand,
             fetchPrice: stubCommand,
+            cmdHoldSeat: () => Promise.resolve({ holdId: 'seat_1' }),
+            trip: { id: 'trip_1' },
+            work: [Success(1)],
+            pricing: { get: async () => ({ amount: 1 }) },
             sku: 'sku_1',
             summarize: (/** @type {any} */ outcome) => outcome.type,
             sink: () => {},
@@ -3446,5 +3566,180 @@ describe('Replay errors are harness errors', function () {
             )(null);
         const { trace } = await recordEffect(() => step(1), null);
         await assert.rejects(() => replayEffect(flow(), trace), /missingReturn/);
+    });
+});
+
+describe('Failure provenance', function () {
+    beforeEach(function () {
+        configureEffect();
+    });
+
+    // One failure channel, three kinds of failure. A step returning `Failure` is an abort: the flow has
+    // decided, and the shell is what acts on it. A Command whose function throws is an I/O fault, which
+    // is what `Retry` exists for. A harness error is not an outcome at all. The interpreter used to
+    // flatten the first two together, so `Retry` re-ran a database lookup four times for an answer that
+    // could not change, buried the domain error under `retryExhausted`, and let `onExhausted` swallow a
+    // deliberate abort and report `Success`.
+
+    const abortingStep = (/** @type {() => void} */ tick) => () => {
+        tick();
+        return Failure('invalid input');
+    };
+
+    it('should not retry an abort from a pure step', async function () {
+        let runs = 0;
+        const result = await runEffect(Retry(effectPipe(abortingStep(() => runs++))(null), { attempts: 3, delay: 0 }));
+        assert.equal(result.type, 'Failure');
+        assert.equal(result.error, 'invalid input', 'an abort arrives unwrapped');
+        assert.equal(runs, 1);
+    });
+
+    it('should not retry an abort a Command next returned', async function () {
+        let lookups = 0;
+        const guard = () =>
+            Command(
+                function cmdLookup() {
+                    lookups++;
+                    return Promise.resolve({ id: 1 });
+                },
+                (found) => (found ? Failure('email taken') : Success('free'))
+            );
+        const result = await runEffect(Retry(effectPipe(guard)(null), { attempts: 3, delay: 0 }));
+        assert.equal(result.type, 'Failure');
+        assert.equal(result.error, 'email taken');
+        assert.equal(lookups, 1, 'the answer cannot change, so it is asked for once');
+    });
+
+    it('should still retry an I/O fault and wrap the exhaustion', async function () {
+        let calls = 0;
+        const flaky = () =>
+            Command(function cmdFlaky() {
+                calls++;
+                return Promise.reject(new Error('socket reset'));
+            });
+        const result = await runEffect(Retry(flaky(), { attempts: 3, delay: 0 }));
+        assert.equal(result.type, 'Failure');
+        assert.equal(calls, 4);
+        assert.equal(/** @type {any} */ (result).error.retryExhausted, true);
+        assert.equal(/** @type {any} */ (result).error.lastError.message, 'socket reset');
+    });
+
+    it('should keep onExhausted away from an abort', async function () {
+        let fallbacks = 0;
+        const result = await runEffect(
+            Retry(effectPipe(abortingStep(() => {}))(null), {
+                attempts: 1,
+                delay: 0,
+                onExhausted: () => {
+                    fallbacks++;
+                    return Success('swallowed');
+                }
+            })
+        );
+        assert.equal(result.type, 'Failure');
+        assert.equal(result.error, 'invalid input');
+        assert.equal(fallbacks, 0, 'an abort is not something a fallback may answer');
+    });
+
+    it('should still let onExhausted answer an I/O exhaustion', async function () {
+        const result = await runEffect(
+            Retry(
+                Command(function cmdFlaky() {
+                    return Promise.reject(new Error('socket reset'));
+                }),
+                { attempts: 1, delay: 0, onExhausted: () => Success('cached') }
+            )
+        );
+        assert.deepEqual(result, Success('cached'));
+    });
+
+    it('should treat a thrown non-Error as an I/O fault too', async function () {
+        let calls = 0;
+        const result = await runEffect(
+            Retry(
+                Command(function cmdRejects() {
+                    calls++;
+                    return Promise.reject('a string');
+                }),
+                { attempts: 2, delay: 0 }
+            )
+        );
+        assert.equal(calls, 3);
+        assert.equal(/** @type {any} */ (result).error.lastError, 'a string');
+    });
+
+    it('should carry provenance out of a Parallel branch', async function () {
+        let aborts = 0;
+        let faults = 0;
+        const abortBranch = () =>
+            Retry(Parallel([effectPipe(abortingStep(() => aborts++))(null), Success(1)]), {
+                attempts: 3,
+                delay: 0
+            });
+        const faultBranch = () =>
+            Retry(
+                Parallel([
+                    Command(function cmdThrows() {
+                        faults++;
+                        return Promise.reject(new Error('down'));
+                    }),
+                    Success(1)
+                ]),
+                { attempts: 2, delay: 0 }
+            );
+        const aborted = await runEffect(abortBranch());
+        assert.equal(/** @type {any} */ (aborted).error, 'invalid input');
+        assert.equal(aborts, 1, 'an abort inside a branch is still an abort');
+        await runEffect(faultBranch());
+        assert.equal(faults, 3, 'an I/O fault inside a branch is still a fault');
+    });
+
+    it('should treat an inner exhaustion as a fault so nested Retry still retries', async function () {
+        let calls = 0;
+        const inner = () =>
+            Retry(
+                Command(function cmdFlaky() {
+                    calls++;
+                    return Promise.reject(new Error('down'));
+                }),
+                { attempts: 1, delay: 0 }
+            );
+        await runEffect(Retry(inner(), { attempts: 1, delay: 0 }));
+        assert.equal(calls, 4, 'two attempts of the inner Retry, twice');
+    });
+
+    it('should still retry a replayed I/O fault', async function () {
+        let calls = 0;
+        const flow = () =>
+            Retry(
+                Command(function cmdFlaky() {
+                    calls++;
+                    return Promise.reject(new Error('down'));
+                }),
+                { attempts: 2, delay: 0 }
+            );
+        const { trace } = await recordEffect(flow, null);
+        const during = calls;
+        const { result } = await replayEffect(flow(), trace);
+        assert.equal(calls, during, 'replay executes nothing');
+        assert.equal(/** @type {any} */ (result).error.retryExhausted, true, 'the recorded error replays as a fault');
+    });
+
+    it('should keep the mark out of every comparison and serialization', async function () {
+        // The mark is internal and non-enumerable, so a test asserting on a Failure, a trace, and a
+        // caller reading the outcome all see exactly what they saw before it existed.
+        const thrown = await runEffect(
+            effectPipe(() =>
+                Command(function cmdThrows() {
+                    return Promise.reject(new Error('down'));
+                })
+            )('in')
+        );
+        assert.deepEqual(Object.keys(thrown), ['type', 'error', 'initialInput']);
+        assert.equal(JSON.parse(JSON.stringify(thrown)).type, 'Failure');
+        assert.deepStrictEqual(thrown, Failure(/** @type {any} */ (thrown).error, 'in'));
+
+        const aborted = await runEffect(effectPipe(() => Failure('nope'))('in'));
+        assert.deepStrictEqual(aborted, Failure('nope', 'in'));
     });
 });

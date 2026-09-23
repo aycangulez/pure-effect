@@ -50,9 +50,9 @@ export type RetryOptions = {
 };
 
 /**
- * `E` is the error the node contributes to its pipeline, which for a Retry is the exhaustion failure:
- * the interpreter never lets an inner attempt's error escape unwrapped, so the wrapped tree's own
- * error type is consumed by the retry loop rather than exposed here.
+ * `E` is the error the node contributes to its pipeline. A Retry contributes two kinds: an abort the
+ * wrapped tree returned, which is not retried and leaves unwrapped, and the exhaustion failure that
+ * follows an I/O fault the retry loop could not get past.
  */
 export type RetryState<T, E = unknown, Ctx = unknown> = {
     type: 'Retry';
@@ -129,24 +129,25 @@ export declare function Ask<T, E = unknown, Ctx = unknown>(
 /**
  * With `onExhausted`, the exhaustion failure never escapes: the fallback Effect runs instead, its
  * success feeds `next`, and its failure propagates unwrapped, so the node's declared error is the
- * fallback's own error type. `onExhausted` is a per-use option, and so is every other retry
+ * fallback's own error type alongside `E`, since an abort the wrapped tree returned reaches neither
+ * the retry loop nor the fallback and leaves as itself. `onExhausted` is a per-use option, and so is every other retry
  * option: there are no configured defaults for one to be carried by.
  */
 export declare function Retry<T, E = unknown, E2 = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     options: RetryOptions & { onExhausted: (error: RetryExhaustedError<E>) => Effect<T, E2, Ctx> }
-): RetryState<T, E2, Ctx>;
+): RetryState<T, E | E2, Ctx>;
 
 /**
- * Without `onExhausted`, the declared error type is `RetryExhaustedError<E>`, because that is what
- * a Retry's Failure actually carries: on exhaustion the interpreter returns
- * `Failure({ retryExhausted: true, lastError, attempts })` rather than the inner error itself,
- * so `result.error.lastError` is where the wrapped tree's `E` survives.
+ * Without `onExhausted`, an I/O fault the retry loop cannot get past arrives as
+ * `Failure({ retryExhausted: true, lastError, attempts })` rather than the inner error itself, so
+ * `result.error.lastError` is where that `E` survives. An abort the wrapped tree returned is not
+ * retried and is not wrapped, so `E` also reaches the pipeline as itself.
  */
 export declare function Retry<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     options?: RetryOptions
-): RetryState<T, RetryExhaustedError<E>, Ctx>;
+): RetryState<T, E | RetryExhaustedError<E>, Ctx>;
 
 /**
  * `next` is optional and defaults to `(values) => Success(values)`, same as `Command`'s default,

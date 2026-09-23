@@ -11,6 +11,7 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 
 ### Changed
 
+- **`Retry` reacts to an I/O fault, not to an abort.** A `Failure` a step returned now propagates immediately, unretried and unwrapped, and `onExhausted` never sees it; only a Command whose function threw is retried. Previously both were retried, so a guard returning `Failure('email already in use')` cost four database round trips for an answer that could not change and arrived wrapped in `{ retryExhausted, lastError, attempts }`, and `onExhausted` could answer a deliberate abort and report `Success`. The rule this settles: you can recover from an error your I/O produced, and you cannot catch an abort. A thrown value is an I/O fault by definition, which is what the README already asked for when it said a domain outcome is returned rather than thrown.
 - **`Retry`'s `attempts` must be a positive integer.** `0` now throws a `TypeError` naming the alternatives rather than meaning run once, because a `Retry` that does not retry is not a `Retry`. It was also the one spelling that turned `onExhausted` into a plain catch at no cost. To handle an outcome without retrying, branch on it as data in the Command's `next`, or isolate a failing branch with `Parallel`'s `settled`.
 
 ### Fixed

@@ -217,6 +217,23 @@ const harnessError = Symbol('pure-effect.harnessError');
 const asHarnessError = (error) => Object.defineProperty(error, harnessError, { value: true });
 
 /**
+ * Marks a `Failure` as an I/O fault: the Command's function threw rather than the flow deciding to
+ * stop. One failure channel carries both, and without the distinction `Retry` could not tell "the
+ * socket died, try again" from "this email is already taken", so it re-ran a lookup four times for an
+ * answer that could not change, buried the domain error under `retryExhausted`, and let `onExhausted`
+ * answer a deliberate abort. A `Failure` a step returned carries no mark and is an abort, which is the
+ * right default for one written by hand or rebuilt by a caller. Non-enumerable, so it never reaches a
+ * comparison, a trace, or a caller reading the outcome.
+ */
+const ioFault = Symbol('pure-effect.ioFault');
+
+/**
+ * @param {FailureState} failure
+ * @returns {FailureState}
+ */
+const asIoFault = (failure) => Object.defineProperty(failure, ioFault, { value: true });
+
+/**
  * Checks that a value is an Effect, and explains the mistake when it is not.
  *
  * `EffectTypeError` is a bug in the flow rather than a domain failure, so it is thrown instead of
@@ -692,13 +709,17 @@ const runEffect =
                             succeeded = true;
                             break;
                         }
+                        // An abort is the flow deciding, not the I/O failing, so there is nothing to
+                        // try again and nothing for a fallback to answer. It leaves unwrapped: the
+                        // exhaustion shape would be a claim about retrying that never happened.
+                        if (!(/** @type {any} */ (result)[ioFault])) return result;
                         lastError = result.error;
                     }
 
                     if (!succeeded) {
                         const exhausted = { retryExhausted: true, lastError, attempts };
                         const { onExhausted } = opts;
-                        if (typeof onExhausted !== 'function') return Failure(exhausted, eff.initialInput);
+                        if (typeof onExhausted !== 'function') return asIoFault(Failure(exhausted, eff.initialInput));
                         // A cancelled branch must not start its fallback, for the same reason it starts
                         // no further Commands: recovery must not resurrect work a sibling's failure ended.
                         if (signal?.aborted) return Failure(parallelCancelled(), eff.initialInput);
@@ -790,7 +811,7 @@ const runEffect =
                 } catch (e) {
                     // A malformed flow is a bug, not a domain failure, so it must not masquerade as one.
                     if (e && /** @type {any} */ (e)[harnessError]) throw e;
-                    return Failure(e, initialInput);
+                    return asIoFault(Failure(e, initialInput));
                 }
             }
             if (eff && (eff.type === 'Success' || eff.type === 'Failure')) return eff;
