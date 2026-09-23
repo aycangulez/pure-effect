@@ -3297,3 +3297,154 @@ describe('Retry attempts and the removed global retry', function () {
         });
     });
 });
+
+describe('Replay errors are harness errors', function () {
+    beforeEach(function () {
+        configureEffect();
+    });
+
+    // A trace that cannot answer a step, or that disagrees with the flow, is a problem with the replay
+    // rather than an outcome the flow produced. It used to become a domain `Failure` while the flow was
+    // still running, so `Retry`'s `onExhausted` caught it and a settled `Parallel` folded it into its
+    // outcomes: a truncated trace then replayed as `Success` with every branch carrying the ReplayError
+    // as though production had returned it. It is rethrown inside the flow now and becomes a `Failure`
+    // only at `replayEffect`'s own boundary, which is the shape this function has always returned.
+    const step = (/** @type {number} */ n) =>
+        Command(function cmdStep() {
+            return Promise.resolve(n);
+        });
+
+    /** Records a flow, then drops every entry, so the replay can answer nothing. */
+    const emptiedTrace = async (/** @type {() => any} */ flow) => {
+        const { trace } = await recordEffect(flow, null);
+        trace.trace = [];
+        return trace;
+    };
+
+    const nameOf = (/** @type {any} */ result) => result.error?.name;
+
+    it('should report a missing entry in a plain flow', async function () {
+        const flow = () =>
+            effectPipe(
+                () => step(1),
+                () => step(2)
+            )(null);
+        const { result } = await replayEffect(flow(), await emptiedTrace(flow));
+        assert.equal(result.type, 'Failure');
+        assert.equal(nameOf(result), 'ReplayError');
+    });
+
+    it('should report a missing entry in a plain Parallel', async function () {
+        const flow = () => Parallel([step(1), step(2)]);
+        const { result } = await replayEffect(flow(), await emptiedTrace(flow));
+        assert.equal(result.type, 'Failure');
+        assert.equal(nameOf(result), 'ReplayError');
+    });
+
+    it('should not let onExhausted swallow a missing entry', async function () {
+        const flow = () => Retry(step(1), { attempts: 1, delay: 0, onExhausted: () => Success(99) });
+        const { result } = await replayEffect(flow(), await emptiedTrace(flow));
+        assert.equal(result.type, 'Failure', 'a fallback that never ran in production must not be reported');
+        assert.equal(nameOf(result), 'ReplayError');
+    });
+
+    it('should not let a settled Parallel fold a missing entry into its outcomes', async function () {
+        const flow = () => Parallel([step(1), step(2)], { settled: true });
+        const { result } = await replayEffect(flow(), await emptiedTrace(flow));
+        assert.equal(result.type, 'Failure', 'branches must not look as though production failed them');
+        assert.equal(nameOf(result), 'ReplayError');
+    });
+
+    const moving = (/** @type {boolean} */ moved) =>
+        moved
+            ? Command(function cmdMoved() {
+                  return Promise.resolve(1);
+              })
+            : Command(function cmdOriginal() {
+                  return Promise.resolve(1);
+              });
+
+    it('should not let a settled Parallel fold a TimeParadox', async function () {
+        const flow = (/** @type {boolean} */ moved) => Parallel([moving(moved), step(2)], { settled: true });
+        const { trace } = await recordEffect(() => flow(false), null);
+        const { result } = await replayEffect(flow(true), trace);
+        assert.equal(result.type, 'Failure');
+        assert.equal(nameOf(result), 'TimeParadox');
+    });
+
+    it('should not let onExhausted swallow a TimeParadox', async function () {
+        const flow = (/** @type {boolean} */ moved) =>
+            Retry(moving(moved), { attempts: 1, delay: 0, onExhausted: () => Success(99) });
+        const { trace } = await recordEffect(() => flow(false), null);
+        const { result } = await replayEffect(flow(true), trace);
+        assert.equal(result.type, 'Failure');
+        assert.equal(nameOf(result), 'TimeParadox');
+    });
+
+    it('should still execute a missing step under onMissing: execute', async function () {
+        let ran = 0;
+        const flow = () =>
+            Parallel(
+                [
+                    Command(function cmdCounted() {
+                        ran++;
+                        return Promise.resolve('live');
+                    })
+                ],
+                { settled: true }
+            );
+        const { result } = await replayEffect(flow(), () => undefined, { onMissing: 'execute' });
+        assert.equal(result.type, 'Success');
+        assert.equal(ran, 1, 'the replay was told to run the real Command');
+    });
+
+    it('should still fold a real branch failure in a settled Parallel', async function () {
+        // The fix must not reach past harness errors into the outcomes settled exists to collect.
+        const flow = () =>
+            Parallel(
+                [
+                    step(1),
+                    Command(function cmdBoom() {
+                        return Promise.reject(new Error('boom'));
+                    })
+                ],
+                { settled: true }
+            );
+        const { trace } = await recordEffect(flow, null);
+        const { result } = await replayEffect(flow(), trace);
+        assert.equal(result.type, 'Success');
+        assert.deepEqual(
+            /** @type {any} */ (result).value.map((/** @type {any} */ o) => o.type),
+            ['Success', 'Failure']
+        );
+    });
+
+    it('should still let onExhausted catch a real failure on replay', async function () {
+        const flow = () =>
+            Retry(
+                Command(function cmdBoom() {
+                    return Promise.reject(new Error('boom'));
+                }),
+                { attempts: 1, delay: 0, onExhausted: () => Success('fallback') }
+            );
+        const { trace } = await recordEffect(flow, null);
+        const { result } = await replayEffect(flow(), trace);
+        assert.deepEqual(result, Success('fallback'));
+    });
+
+    it('should still let an EffectTypeError escape a replay', async function () {
+        // A malformed flow is a bug in the flow, not a problem with the trace, so it keeps propagating
+        // rather than coming back as a Failure a caller might read as a business outcome.
+        const flow = () =>
+            effectPipe(
+                () => step(1),
+                /** @type {any} */ (
+                    function missingReturn() {
+                        /* returns undefined */
+                    }
+                )
+            )(null);
+        const { trace } = await recordEffect(() => step(1), null);
+        await assert.rejects(() => replayEffect(flow(), trace), /missingReturn/);
+    });
+});

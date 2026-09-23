@@ -201,6 +201,22 @@ const describeValue = (value) =>
               : `the ${typeof value} ${JSON.stringify(value)}`;
 
 /**
+ * Marks an error as the harness failing rather than the flow. The interpreter rethrows anything
+ * carrying it instead of folding it into a `Failure`, which keeps it out of reach of everything that
+ * legitimately handles a domain failure: a Command's `next`, `Retry`'s `onExhausted`, and the outcomes
+ * a settled `Parallel` collects. A malformed flow and a trace that cannot answer a step are both this
+ * kind of error, and a new one gets the mark rather than a new name for the interpreter to know about.
+ * Non-enumerable, so it cannot show up in a serialized error or upset a `deepEqual` on an outcome.
+ */
+const harnessError = Symbol('pure-effect.harnessError');
+
+/**
+ * @param {Error} error
+ * @returns {Error}
+ */
+const asHarnessError = (error) => Object.defineProperty(error, harnessError, { value: true });
+
+/**
  * Checks that a value is an Effect, and explains the mistake when it is not.
  *
  * `EffectTypeError` is a bug in the flow rather than a domain failure, so it is thrown instead of
@@ -211,12 +227,14 @@ const describeValue = (value) =>
  * @returns {Error}
  */
 const effectTypeError = (value, source) =>
-    Object.assign(
-        new Error(
-            `${source} returned ${describeValue(value)}. Return Success, Failure, Command, Ask, Retry, or Parallel: ` +
-                'a plain value has to be wrapped, as in Success(value).'
-        ),
-        { name: 'EffectTypeError' }
+    asHarnessError(
+        Object.assign(
+            new Error(
+                `${source} returned ${describeValue(value)}. Return Success, Failure, Command, Ask, Retry, or Parallel: ` +
+                    'a plain value has to be wrapped, as in Success(value).'
+            ),
+            { name: 'EffectTypeError' }
+        )
     );
 
 /**
@@ -771,7 +789,7 @@ const runEffect =
                     eff = eff.next(result);
                 } catch (e) {
                     // A malformed flow is a bug, not a domain failure, so it must not masquerade as one.
-                    if (e instanceof Error && e.name === 'EffectTypeError') throw e;
+                    if (e && /** @type {any} */ (e)[harnessError]) throw e;
                     return Failure(e, initialInput);
                 }
             }
@@ -837,7 +855,29 @@ const runEffect =
  * @param {Object} [props] - Extra fields such as `name`, `index`, `expected`, `actual`
  * @returns {Error}
  */
-const replayError = (message, props = {}) => Object.assign(new Error(message), { name: 'ReplayError' }, props);
+
+/**
+ * A replay fault: the trace cannot answer the flow, or disagrees with it. It is a harness error while
+ * the flow runs, so nothing inside the flow can swallow it, and `replayEffect` turns it back into a
+ * `Failure` at its own boundary, where there is no longer anything to swallow it and a caller can
+ * inspect it. An `EffectTypeError` carries no replay mark and keeps propagating, since a malformed
+ * flow is a bug in the flow rather than a problem with the trace.
+ */
+const replayFault = Symbol('pure-effect.replayFault');
+
+/**
+ * @param {string} message
+ * @param {Object} [props] - Extra fields such as `name`, `index`, `expected`, `actual`
+ * @returns {Error}
+ */
+const replayError = (message, props = {}) =>
+    Object.defineProperty(
+        asHarnessError(Object.assign(new Error(message), { name: 'ReplayError' }, props)),
+        replayFault,
+        {
+            value: true
+        }
+    );
 
 /**
  * Signals that the flow being replayed asked for a different Command than the trace
@@ -1240,7 +1280,18 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     /** @type {CallConfiguration} */
     const callConfig = { onStep, inherit: hooks };
 
-    const result = await runEffect(fastRetry ? zeroRetryDelays(effect) : effect, context, callConfig);
+    // The interpreter rethrows a replay fault rather than folding it into a `Failure`, so that neither
+    // `onExhausted` nor a settled `Parallel` can absorb one: a truncated trace used to replay as a
+    // `Success` whose branches each carried the ReplayError as though production had returned it. It
+    // becomes a `Failure` here instead, which is the shape this function has always returned and the
+    // one place where nothing downstream can catch it.
+    let result;
+    try {
+        result = await runEffect(fastRetry ? zeroRetryDelays(effect) : effect, context, callConfig);
+    } catch (e) {
+        if (!(e && /** @type {any} */ (e)[replayFault])) throw e;
+        result = Failure(e, effect.initialInput);
+    }
     if (fromResolver) return { result };
     // `fromTrace` has already validated the shape, so the entries are here in one form or the other.
     const entries = Array.isArray(traceOrResolver) ? traceOrResolver : traceOrResolver.trace;
