@@ -11,7 +11,11 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 
 ### Changed
 
-- The size in the feature list is now "about 4.5 KB", re-measured after the `Parallel` options.
+- **`Retry`'s `attempts` must be a positive integer.** `0` now throws a `TypeError` naming the alternatives rather than meaning run once, because a `Retry` that does not retry is not a `Retry`. It was also the one spelling that turned `onExhausted` into a plain catch at no cost. To handle an outcome without retrying, branch on it as data in the Command's `next`, or isolate a failing branch with `Parallel`'s `settled`.
+
+### Removed
+
+- **Global `retry` defaults.** `configureEffect({ retry })` and a per-call `runEffect(..., { retry })` both throw a `TypeError` now: retry options are per-use, passed to `Retry(effect, options)`. How often a dependency misbehaves is a property of that dependency rather than of the process, and a shared `const flakyNetwork = { attempts: 3, backoff: 2 }` handed to each `Retry` covers the repeated case explicitly. The Limitations entry about a `callConfig` delay always losing to a per-use one goes with it, since there is no longer a second place for a delay to come from.
 
 ## [0.13.0] - 2026-09-22
 

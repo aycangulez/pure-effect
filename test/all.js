@@ -202,25 +202,6 @@ describe('Core', function () {
         assert.ok(elapsed >= 55, `Expected ≥ 55 ms elapsed, got ${elapsed} ms`);
     });
 
-    it('should merge per-use Retry options with call-level defaults', async function () {
-        // Call-level: attempts 1 (would exhaust on 2nd try)
-        // Per-use: attempts 3 (overrides call-level, so it should succeed on the 3rd try)
-        let calls = 0;
-        const effect = Retry(
-            Command(
-                function flakyCmd() {
-                    if (++calls < 3) throw new Error('x');
-                    return 'ok';
-                },
-                (r) => Success(r)
-            ),
-            { attempts: 3 }
-        );
-        const result = await runEffect(effect, {}, { retry: { attempts: 1, delay: 0, backoff: 1 } });
-        assert.equal(result.type, 'Success');
-        assert.equal(calls, 3);
-    });
-
     it('should work at any step inside effectPipe', async function () {
         const flow = effectPipe(
             (input) =>
@@ -361,7 +342,7 @@ describe('Retry onExhausted', function () {
             Command(function cmdPrimary() {
                 return Promise.reject('primary down');
             }),
-            { attempts: 0, delay: 0, onExhausted: () => Failure('cache empty') }
+            { attempts: 1, delay: 0, onExhausted: () => Failure('cache empty') }
         );
         const result = /** @type {any} */ (await runEffect(flow));
         assert.equal(result.type, 'Failure');
@@ -376,7 +357,7 @@ describe('Retry onExhausted', function () {
                 throw new Error('slow branch failed');
             }),
             {
-                attempts: 0,
+                attempts: 1,
                 delay: 0,
                 onExhausted: () => {
                     fallbackRuns++;
@@ -432,7 +413,7 @@ describe('Retry onExhausted', function () {
                     return Promise.reject('nope');
                 }),
                 {
-                    attempts: 0,
+                    attempts: 1,
                     delay: 0,
                     onExhausted: () =>
                         Retry(
@@ -1415,27 +1396,6 @@ describe('configureEffect merging', function () {
         assert.deepEqual(calls, ['a:cmdWork', 'b:cmdWork']);
     });
 
-    it('should merge retry defaults with later configs winning', async function () {
-        // attempts from the first, delay from the second: a slow default would make this test crawl.
-        configureEffect({ retry: { attempts: 5, delay: 200 } }, { retry: { delay: 0 } });
-        let calls = 0;
-        const started = Date.now();
-        const result = await runEffect(
-            Retry(
-                Command(
-                    function cmdFlaky() {
-                        if (++calls < 5) throw new Error('transient');
-                        return 'ok';
-                    },
-                    (/** @type {any} */ v) => Success(v)
-                )
-            )
-        );
-        assert.equal(result.type, 'Success', 'the higher attempts count from the first config applied');
-        assert.equal(calls, 5);
-        assert.ok(Date.now() - started < 150, 'and the zero delay from the second config won');
-    });
-
     it('should leave slots no layer defines at their defaults, and tolerate gaps', async function () {
         /** @type {string[]} */
         const intercepted = [];
@@ -1539,37 +1499,6 @@ describe('configureEffect merging', function () {
         remove();
         await runEffect(work('ok'));
         assert.deepEqual(seen, ['cmdWork'], 'the second run had no hooks at all');
-    });
-
-    it("should merge retry across layers and drop a layer's share when it is removed", async function () {
-        configureEffect({ retry: { attempts: 1, delay: 0 } });
-        const remove = configureEffect({ retry: { attempts: 4, delay: 0 } });
-
-        const flaky = () => {
-            let calls = 0;
-            return {
-                count: () => calls,
-                effect: () =>
-                    Retry(
-                        Command(
-                            function cmdFlaky() {
-                                if (++calls < 3) throw new Error('transient');
-                                return 'ok';
-                            },
-                            (/** @type {any} */ v) => Success(v)
-                        )
-                    )
-            };
-        };
-
-        const generous = flaky();
-        assert.equal((await runEffect(generous.effect())).type, 'Success', "the later layer's four attempts win");
-
-        remove();
-        const stingy = flaky();
-        const result = await runEffect(stingy.effect());
-        assert.equal(result.type, 'Failure', "the remaining layer's single attempt is not enough");
-        assert.equal(/** @type {any} */ (errorOf(result)).attempts, 1);
     });
 
     it('should leave a newer layer in place when an older one is removed', async function () {
@@ -1701,18 +1630,6 @@ describe('Per-call inherit', function () {
         ]);
     });
 
-    it('should merge retry with the per-call value winning', async function () {
-        let calls = 0;
-        const flaky = Command(() => {
-            calls++;
-            throw new Error('down');
-        });
-        configureEffect({ retry: { attempts: 1, delay: 5000 } });
-        const result = await runEffect(Retry(flaky), {}, { retry: { delay: 0 } });
-        assert.equal(result.type, 'Failure');
-        assert.equal(calls, 2, 'attempts came from the global, the delay from the call');
-    });
-
     it('should consult nothing global under inherit: false, falling back to library defaults', async function () {
         /** @type {string[]} */
         const log = [];
@@ -1721,11 +1638,11 @@ describe('Per-call inherit', function () {
             calls++;
             throw new Error('down');
         });
-        configureEffect({ ...globalWiring(log), retry: { attempts: 0 } });
+        configureEffect(globalWiring(log));
         const result = await runEffect(Retry(flaky, { delay: 0 }), {}, { inherit: false });
         assert.equal(result.type, 'Failure');
         assert.deepEqual(log, [], 'no global hook fired');
-        assert.equal(calls, 4, 'the library default of three retries applied, not the global zero');
+        assert.equal(calls, 4, 'the library retry defaults applied, as they do under any inherit');
     });
 
     it('should still apply per-call hooks under inherit: false', async function () {
@@ -1770,37 +1687,6 @@ describe('Per-call inherit', function () {
         assert.equal(result.type, 'Success');
         assert.deepEqual(log, []);
         assert.equal(ran, 1, 'the recording ran it once; the replay not at all');
-    });
-
-    it('should replay under the global retry defaults even though a default replay ignores the global hooks', async function () {
-        // Production ran with attempts: 5 configured globally and succeeded on the fifth try. A replay
-        // that ignored the global wiring wholesale would retry three times, exhaust, and report a Failure
-        // production never saw, with hooks: true and hooks: false disagreeing about the same trace.
-        /** @type {string[]} */
-        const log = [];
-        let ran = 0;
-        const flow = () =>
-            Retry(
-                Command(
-                    () => {
-                        ran++;
-                        if (ran < 5) throw new Error(`flaky ${ran}`);
-                        return 'ok';
-                    },
-                    (/** @type {any} */ r) => Success(r),
-                    { name: 'cmdFlaky' }
-                )
-            );
-        configureEffect({ retry: { attempts: 5, delay: 0 } });
-        const { result, trace } = await recordEffect(flow, null);
-        assert.deepEqual(result, Success('ok'));
-        assert.equal(trace.trace.length, 5, 'production recorded five attempts');
-        configureEffect(globalWiring(log));
-        const replayed = await replayEffect(flow(), trace);
-        assert.deepEqual(replayed.result, Success('ok'), 'the replay reproduces production');
-        assert.deepEqual(replayed.unreached, []);
-        assert.deepEqual(log, [], 'the global hooks still did not fire');
-        assert.equal(ran, 5, 'the replay executed nothing');
     });
 
     it('should let a replay with hooks run under the global hooks without executing Commands', async function () {
@@ -2407,7 +2293,7 @@ describe('initialInput stamping', function () {
 
     it('should stamp the flow input on a root whose first step returns a Retry-headed sub-pipeline', async function () {
         const viaRetry = (/** @type {any} */ i) =>
-            effectPipe((/** @type {string} */ id) => Retry(lookup(id), { attempts: 0 }))(i.customerId);
+            effectPipe((/** @type {string} */ id) => Retry(lookup(id), { attempts: 1, delay: 0 }))(i.customerId);
         const tree = effectPipe(viaRetry, (/** @type {any} */ r) => Success(r))(input);
         assert.deepEqual(tree.initialInput, input, 'the flow input, not the sub-pipeline input');
         assert.deepEqual(await rootStampSeenByHook(tree), input);
@@ -2466,7 +2352,7 @@ describe('initialInput stamping', function () {
                 Command(() => {
                     throw new Error('down');
                 }),
-                { attempts: 0, delay: 0, onExhausted: () => failingSub(i) }
+                { attempts: 1, delay: 0, onExhausted: () => failingSub(i) }
             );
         const result = await runEffect(effectPipe(withFallback, (/** @type {any} */ v) => Success(v))(input));
         assert.deepEqual(result, Failure('bad', input));
@@ -3105,6 +2991,8 @@ describe('README examples', function () {
             order: { id: 'order_1' },
             subscriptions: [{ id: 'sub_1' }, { id: 'sub_2' }],
             billOne: stubCommand,
+            fetchPrice: stubCommand,
+            sku: 'sku_1',
             summarize: (/** @type {any} */ outcome) => outcome.type,
             sink: () => {},
             telemetryHooks: () => ({}),
@@ -3325,5 +3213,87 @@ describe('Parallel limit and settled', function () {
             /** @type {any} */ (replayed).value.map((/** @type {any} */ o) => o.type),
             /** @type {any} */ (result).value.map((/** @type {any} */ o) => o.type)
         );
+    });
+});
+
+describe('Retry attempts and the removed global retry', function () {
+    beforeEach(function () {
+        configureEffect();
+    });
+
+    const failing = () =>
+        Command(function cmdAlwaysFails() {
+            return Promise.reject(new Error('down'));
+        });
+
+    it('should reject attempts that are not a positive integer', async function () {
+        // A Retry that does not retry is not a Retry. `attempts: 0` was also the one spelling that
+        // turned `onExhausted` into a plain catch at no cost, which is not what the option is for.
+        await assert.rejects(() => runEffect(Retry(failing(), { attempts: 0 })), TypeError);
+        await assert.rejects(() => runEffect(Retry(failing(), { attempts: -1 })), TypeError);
+        await assert.rejects(() => runEffect(Retry(failing(), { attempts: 1.5 })), TypeError);
+        await assert.rejects(() => runEffect(Retry(failing(), { attempts: /** @type {any} */ ('3') })), TypeError);
+    });
+
+    it('should name the alternatives when it rejects attempts', async function () {
+        await assert.rejects(() => runEffect(Retry(failing(), { attempts: 0 })), /settled|data/);
+    });
+
+    it('should still accept the smallest real retry', async function () {
+        let calls = 0;
+        const flaky = () =>
+            Command(function cmdFlaky() {
+                calls++;
+                return calls === 1 ? Promise.reject(new Error('down')) : Promise.resolve('ok');
+            });
+        const result = await runEffect(Retry(flaky(), { attempts: 1, delay: 1 }));
+        assert.deepEqual(result, Success('ok'));
+        assert.equal(calls, 2);
+    });
+
+    it('should apply the library retry defaults when a Retry names none', async function () {
+        let calls = 0;
+        const counted = () =>
+            Command(function cmdCounted() {
+                calls++;
+                return Promise.reject(new Error('down'));
+            });
+        const result = await runEffect(Retry(counted(), { delay: 1 }));
+        assert.equal(result.type, 'Failure');
+        assert.equal(calls, 4, 'the default is three retries after the first try');
+    });
+
+    it('should refuse a retry key in configureEffect', function () {
+        assert.throws(() => configureEffect(/** @type {any} */ ({ retry: { attempts: 5 } })), TypeError);
+        assert.throws(() => configureEffect(/** @type {any} */ ({ retry: { attempts: 5 } })), /per-use|Retry\(/);
+    });
+
+    it('should refuse a retry key in a per-call config', async function () {
+        await assert.rejects(
+            () => runEffect(Success(1), undefined, /** @type {any} */ ({ retry: { attempts: 5 } })),
+            TypeError
+        );
+    });
+
+    it('should leave no installed layer behind when configureEffect refuses', function () {
+        let calls = 0;
+        assert.throws(() =>
+            configureEffect(
+                /** @type {any} */ ({
+                    onStep: async (/** @type {any} */ n, /** @type {any} */ t, /** @type {any} */ op) => {
+                        calls++;
+                        return op();
+                    },
+                    retry: {}
+                })
+            )
+        );
+        return runEffect(
+            Command(function cmdOne() {
+                return Promise.resolve(1);
+            })
+        ).then(() => {
+            assert.equal(calls, 0, 'a refused configuration must not install its hooks');
+        });
     });
 });

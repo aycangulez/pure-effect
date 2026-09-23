@@ -189,8 +189,7 @@ if (recoveredResult.type === 'Failure') {
     expectType<'cache_miss'>(recoveredResult.error);
 }
 
-// onExhausted is per-use only: global retry defaults cannot carry a fallback
-// @ts-expect-error onExhausted is not a global retry default
+// @ts-expect-error retry options, onExhausted included, are per-use rather than configured
 configureEffect({ retry: { attempts: 2, onExhausted: () => Success(1) } });
 
 // RetryExhaustedError shape is usable for narrowing exhaustion failures
@@ -314,23 +313,24 @@ runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { wrong: 'thing'
 configureEffect({
     onStep: async (_name, _type, op) => op(),
     onRun: async (_effect, op, _flowName) => op(),
-    onBeforeCommand: async (_cmd, _ctx) => {},
-    retry: { attempts: 3, delay: 100, backoff: 2 }
+    onBeforeCommand: async (_cmd, _ctx) => {}
 });
 
 // accepts partial configuration
-configureEffect({ retry: { attempts: 5 } });
+configureEffect({ onRun: async (_effect, op) => op() });
 configureEffect({});
 
 // rejects invalid shapes
 // @ts-expect-error onStep must be a function
 configureEffect({ onStep: 'not-a-function' });
-// @ts-expect-error attempts must be a number
-configureEffect({ retry: { attempts: 'three' } });
+// @ts-expect-error retry options are per-use, never configured
+configureEffect({ retry: { attempts: 3 } });
 
 // --- runEffect callConfig: `inherit` ---
 runEffect(flow({ email: 'a@b.com', password: 'secret123' }), {}, { inherit: true });
-runEffect(flow({ email: 'a@b.com', password: 'secret123' }), {}, { inherit: false, retry: { attempts: 1 } });
+runEffect(flow({ email: 'a@b.com', password: 'secret123' }), {}, { inherit: false });
+// @ts-expect-error retry options are per-use, never per-call
+runEffect(flow({ email: 'a@b.com', password: 'secret123' }), {}, { retry: { attempts: 1 } });
 // @ts-expect-error a boolean, not the old three-way string
 runEffect(flow({ email: 'a@b.com', password: 'secret123' }), {}, { inherit: 'all' });
 // @ts-expect-error `inherit` is a per-call option; the global wiring has nothing to inherit from

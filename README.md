@@ -9,7 +9,7 @@
 - Inject context without touching function signatures
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks
-- Zero dependencies, about 4.5 KB minified and gzipped
+- Zero dependencies, about 4.7 KB minified and gzipped
 - Works in JavaScript and TypeScript (full generics, bundled `.d.ts`)
 
 ## Table of Contents
@@ -248,7 +248,14 @@ Recording stores the context alongside the trace, so `Ask` replays with the valu
 
 ## Retrying Transient Failures
 
-`Retry` runs part of a flow again when it fails. Like everything else in Pure Effect, the retry configuration is a plain object you can inspect and assert on without running anything.
+`Retry` runs part of a flow again when it fails. Its options are per-use, passed at the call site, because how often a dependency misbehaves is a property of that dependency rather than of your process. A shared object covers the repeated case:
+
+```js
+const flakyNetwork = { attempts: 3, delay: 200, backoff: 2 };
+Retry(fetchPrice(sku), flakyNetwork);
+```
+
+Like everything else in Pure Effect, the retry configuration is a plain object you can inspect and assert on without running anything.
 
 **Wrap the Command that fails, not the pipeline.** Every attempt re-runs the whole wrapped tree, including Commands that already succeeded:
 
@@ -494,7 +501,7 @@ Returns `{ type: 'Ask', next }`. Passes the `context` from `runEffect` into `nex
 
 Returns `{ type: 'Retry', effect, options, next }`.
 
-- `options.attempts`: Max retries, not counting the first try (default: `3`).
+- `options.attempts`: Max retries, not counting the first try (default: `3`). A positive integer; anything else, `0` included, throws a `TypeError`. A `Retry` that does not retry is not a `Retry`: to handle an outcome without retrying, branch on it as data in the Command's `next`, or isolate a failing branch with `Parallel`'s `settled`.
 - `options.delay`: Ms before the first retry (default: `100`).
 - `options.backoff`: Multiplier applied to delay on each attempt (default: `1`, flat).
 - `options.onExhausted(error)`: Runs a fallback Effect when every attempt has failed, receiving `{ retryExhausted, lastError, attempts }`. The fallback's success feeds `next`; its failure propagates unwrapped. Per-use only. See [Retrying Transient Failures](#retrying-transient-failures).
@@ -541,7 +548,7 @@ Commands are data, so a Command that is constructed and discarded never runs, an
 Walks the flow, runs each Command with `async/await`, resolves `Ask` with the supplied `context`, and returns the final `Success` or `Failure`.
 
 - `context`: Passed to `Ask`'s next function and to `onBeforeCommand`. `context.flowName` names the workflow in telemetry.
-- `callConfig`: Per-call `onStep`, `onRun`, `onBeforeCommand`, and `retry`, added to the `configureEffect` wiring unless `inherit: false`, which ignores that wiring for the run. See [`configureEffect`](#configureeffectconfigs).
+- `callConfig`: Per-call `onStep`, `onRun`, and `onBeforeCommand`, added to the `configureEffect` wiring unless `inherit: false`, which ignores that wiring for the run. A `retry` key throws a `TypeError`: retry options are per-use, passed to `Retry`. See [`configureEffect`](#configureeffectconfigs).
 - `onRun` fires exactly once per `runEffect` call. Retry attempts run inside that single span.
 
 A step that returns something other than an Effect is a bug in the flow, not a domain failure, so it throws an `EffectTypeError` naming the step rather than resolving to a `Failure`:
@@ -558,7 +565,8 @@ The same check catches a missing `return`, a Command's next function returning a
 - `onRun(effect, pipeline, flowName)` wraps the entire workflow; must `await pipeline()`.
 - `onStep(name, type, op)` wraps each Command; must `await op()` and return its result. Returning a value _without_ calling `op()` is how replay works.
 - `onBeforeCommand(command, context)` fires before each Command; throw to abort.
-- `retry: { attempts?, delay?, backoff? }` global retry defaults.
+
+Hooks are all it configures. Retry options are per-use, passed to `Retry(effect, options)`, and a `retry` key here throws a `TypeError`.
 
 Each call adds a layer of hooks on top of those already installed and returns a function that removes that layer. Layers merge, and several configurations passed to one call are merged the same way, so the two forms below are equivalent. Everything about the merge is visible in what runs during a single `runEffect`:
 
@@ -599,7 +607,7 @@ const remove = configureEffect(telemetryHooks());
 remove();
 ```
 
-**A per-call `callConfig` is added to the configured wiring, or ignores it.** By default the call's hooks merge over the configured ones by the same rules as above: wrappers nest with the configured one outside, interceptors run configured first, and `retry` combines with the call's values winning. `inherit: false` leaves the configured wiring out of the run entirely. Given a configured wiring `C` and a call `K` that supplies only `onStep` and `retry`:
+**A per-call `callConfig` is added to the configured wiring, or ignores it.** By default the call's hooks merge over the configured ones by the same rules as above: wrappers nest with the configured one outside and interceptors run configured first. `inherit: false` leaves the configured wiring out of the run entirely. Given a configured wiring `C` and a call `K` that supplies only `onStep`:
 
 ```
                   inherit: true (default)        inherit: false
@@ -607,7 +615,6 @@ remove();
 onRun             C.onRun                        (none)
 onBeforeCommand   C.onBeforeCommand              (none)
 onStep            C.onStep( K.onStep( cmd ) )    K.onStep
-retry             { ...C.retry, ...K.retry }     { ...defaults, ...K.retry }
 ```
 
 `recordEffect` inherits, so recording inside an application that already has tracing keeps its spans. `replayEffect` passes `inherit: false` unless `hooks: true`.
@@ -667,4 +674,3 @@ Replays a trace and narrates each step with its recorded duration, naming any re
 - **Replay reproduces observed inputs, not concurrency.** A stale read replays exactly. A race between two concurrent requests does not: a trace records one flow's view. `Parallel` branches replay with the results their own branch saw, since every step is matched by its position in the tree, but the interleaving between them is not reproduced, so a flow whose branches race each other through shared state is not something a replay can settle.
 - **Global configuration is per module instance.** `configureEffect` writes to module-level state, so two copies of the library in one process, from a dual ESM and CJS resolution, two versions in a dependency tree, or a worker thread, each carry their own wiring. Code that configures one gets nothing in the other, with no error.
 - **A Command needs an identity.** `meta.name` is stable under minification; relying on `cmd.name` instead means a mangler renames every step of every trace, so mangling has to be disabled or names preserved.
-- **`Retry` delays cannot be overridden from `callConfig`.** Per-use options are merged over call config, so a delay written at the call site always wins. `replayEffect` works around this by rewriting the `Retry`s in the flow; other callers cannot.

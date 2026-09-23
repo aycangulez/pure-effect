@@ -128,7 +128,8 @@ const Ask = (next) => ({ type: 'Ask', next });
  * every Command in it is idempotent.
  *
  * @param {Effect} effect - The inner Effect tree to retry
- * @param {Object} [options] - Per-use retry options; merged over global defaults at runtime
+ * @param {Object} [options] - Retry options, merged over the library defaults at runtime; there are no
+ *        configured defaults, since how a dependency misbehaves is a property of that dependency
  * @param {number} [options.attempts] - Max retries (not counting first try)
  * @param {number} [options.delay] - Ms before first retry
  * @param {number} [options.backoff] - Multiplier applied to delay on each subsequent retry
@@ -328,18 +329,31 @@ const defaultCommandInterceptor = async (command, context) => {};
 const defaultRetryOptions = { attempts: 3, delay: 100, backoff: 1 };
 
 /**
+ * Retry options were once a process-wide default that a per-use `Retry` merged over. They describe how
+ * one dependency misbehaves rather than a property of the process, so they are per-use only now, and a
+ * leftover `retry` key throws instead of being ignored: silently falling back to the library defaults
+ * is how a configured `attempts: 5` quietly becomes 3. Remove this guard at 1.0.
+ * @param {any} config
+ * @param {string} source
+ */
+const rejectRetryKey = (config, source) => {
+    if (config && typeof config === 'object' && 'retry' in config)
+        throw new TypeError(
+            `${source} no longer takes 'retry'. Retry options are per-use: pass them to Retry(effect, options).`
+        );
+};
+
+/**
  * @typedef {Object} EffectConfiguration
  * @property {StepRunner} [onStep] - Fires every time a Command is executed. It wraps the `cmd` call.
  * @property {RunWrapper} [onRun] - Fires once per runEffect call. It wraps the entire workflow execution.
  * @property {CommandInterceptor} [onBeforeCommand] - Intercepts a Command and any context passed to runEffect before execution.
- * @property {{ attempts?: number, delay?: number, backoff?: number }} [retry] - Global Retry defaults; merged under per-use options.
  */
 
 /**
  * A per-call configuration: an `EffectConfiguration` plus `inherit`. With `inherit: true` (the default)
  * the call's hooks are added to the wiring `configureEffect` installed, by the merge `configureEffect`
- * applies to several configurations: global outermost, interceptors in order, `retry` merging with the
- * call winning. With `inherit: false` the global wiring is not consulted at all, so any slot the call
+ * applies to several configurations: global outermost, interceptors in order. With `inherit: false` the global wiring is not consulted at all, so any slot the call
  * leaves unset falls back to the library default. A per-call hook cannot replace a single global slot on
  * its own; that was the previous default, and it is how a per-call recorder silently switched off an
  * application's tracing.
@@ -365,14 +379,14 @@ const applyLayers = () => {
 };
 
 /**
- * Adds a configuration to the global wiring of the Effect runner: telemetry, the command interceptor,
- * and retry defaults.
+ * Adds a configuration to the global wiring of the Effect runner: telemetry and the command
+ * interceptor. Retry options are not part of it; they are per-use, passed to `Retry(effect, options)`.
  *
  * Each call adds one layer on top of those already installed and returns a function that removes that
  * layer, wherever it sits by then. Layers merge the way several configurations passed to one call do:
  * `onStep` and `onRun` are wrappers, so they nest with the earliest layer outermost and the latest
- * closest to the Command; `onBeforeCommand` interceptors all run, in the order installed; and `retry`
- * merges with later layers winning. So these are the same:
+ * closest to the Command; and `onBeforeCommand` interceptors all run, in the order installed. So these
+ * are the same:
  *
  *     configureEffect(telemetryHooks(), recordingHooks({ sink }));
  *     configureEffect(telemetryHooks()); configureEffect(recordingHooks({ sink }));
@@ -399,6 +413,8 @@ const configureEffect = (...configs) => {
         return () => {};
     }
     const present = configs.filter(Boolean);
+    // Checked before anything is installed, so a refused call leaves the wiring exactly as it found it.
+    present.forEach((config) => rejectRetryKey(config, 'configureEffect'));
     if (present.length === 0) return () => {};
     const layer = chainHooks(...present);
     layers = [...layers, layer];
@@ -468,9 +484,8 @@ const observeSteps = (handler) => async (name, type, op, path) => {
  * `onStep` and `onRun` are wrappers around an `op`, so they nest. The first config given is
  * the outermost wrapper and the last sits closest to the Command, which also means a thrown
  * Command unwinds from the last config back to the first. `onBeforeCommand` is an observer,
- * so every interceptor runs in the order given. `retry` is plain data and merges with later
- * configs winning. A hook no config defines is left unset, so `configureEffect` keeps its
- * default for that slot.
+ * so every interceptor runs in the order given. Nothing else merges, since every slot is a hook. A hook
+ * no config defines is left unset, so the caller of the merged wiring keeps its default for that slot.
  *
  * @param {...(EffectConfiguration | undefined)} configs - Configurations to merge, outermost first
  * @returns {EffectConfiguration}
@@ -487,7 +502,6 @@ const chainHooks = (...configs) => {
     const steps = /** @type {StepRunner[]} */ (present('onStep'));
     const runs = /** @type {RunWrapper[]} */ (present('onRun'));
     const interceptors = /** @type {CommandInterceptor[]} */ (present('onBeforeCommand'));
-    const retries = present('retry');
 
     if (steps.length) {
         merged.onStep = steps.reduceRight(
@@ -504,7 +518,6 @@ const chainHooks = (...configs) => {
             for (const intercept of interceptors) await intercept(command, context);
         };
     }
-    if (retries.length) merged.retry = Object.assign({}, ...retries);
     return merged;
 };
 
@@ -585,6 +598,7 @@ const runEffect =
      * @returns {Promise<SuccessState | FailureState>}
      */
     async function runEffect(effect, context = {}, callConfig = {}) {
+        rejectRetryKey(callConfig, "runEffect's callConfig");
         const { inherit = true, ...local } = callConfig;
         // A value that is not a boolean, such as a string left over from an older API, must not be
         // coerced: `'false'` inheriting everything is exactly the silent behaviour this option removes.
@@ -599,7 +613,6 @@ const runEffect =
         const localStepRunner = resolved.onStep || defaultStepRunner;
         const localRunWrapper = resolved.onRun || defaultRunWrapper;
         const localCommandInterceptor = resolved.onBeforeCommand || defaultCommandInterceptor;
-        const localRetryDefaults = { ...defaultRetryOptions, ...resolved.retry };
 
         /**
          * @param {Effect} eff
@@ -627,8 +640,17 @@ const runEffect =
                     continue;
                 }
                 if (eff.type === 'Retry') {
-                    const opts = { ...localRetryDefaults, ...eff.options };
+                    const opts = { ...defaultRetryOptions, ...eff.options };
                     const { attempts } = opts;
+                    // A Retry that does not retry is not a Retry, and `attempts: 0` was also the one
+                    // spelling that made `onExhausted` a plain catch for free. Both readings are wrong,
+                    // so the value is refused rather than coerced.
+                    if (!Number.isInteger(attempts) || attempts < 1)
+                        throw new TypeError(
+                            `Retry 'attempts' must be a positive integer, received ${describeValue(attempts)}. ` +
+                                `To handle an outcome without retrying, branch on it as data in the Command's ` +
+                                `next, or isolate a failing branch with Parallel's settled option.`
+                        );
                     let lastError;
                     let succeeded = false;
                     // Each attempt gets its own prefix, so the Commands of attempt 2 cannot be mistaken
@@ -1090,10 +1112,9 @@ const fromTrace = (traceLog, options = {}) => {
 /**
  * Rewrites `Retry` nodes to zero delay, lazily, through their `next` continuations.
  *
- * Needed because the interpreter merges per-use options over call config
- * (`{ ...localRetryDefaults, ...eff.options }`), so a `callConfig.retry` cannot
- * override a delay written at the call site. Without this, replaying a flow that
- * retried in production waits out the production backoff.
+ * Needed because a delay is written at the call site and nothing outside the node
+ * can override it: retry options are per-use only. Without this, replaying a flow
+ * that retried in production waits out the production backoff.
  *
  * @param {any} eff - Any Effect node
  * @returns {any} The same tree with Retry delays removed
@@ -1138,8 +1159,8 @@ const zeroRetryDelays = (eff) => {
  * @property {boolean} [hooks] - Runs the replay inside the hooks `configureEffect` installed, with the
  *           resolver innermost, so a configured `onStep` observes each replayed step and `onRun` and
  *           `onBeforeCommand` fire. Off by default, which ignores the global hooks, so a replay cannot
- *           reach a telemetry backend or a guardrail that performs I/O. Global `retry` defaults apply
- *           either way, since a replay has to make the attempts production made.
+ *           reach a telemetry backend or a guardrail that performs I/O. Retry options travel with the
+ *           node either way, so a replay makes the attempts production made.
  * @property {'throw' | 'execute'} [onMissing] - What to do when the resolver has no recording for a step.
  *           `'throw'` (default) fails the replay, which makes side effects impossible for the whole run.
  *           `'execute'` runs the real Command, giving partial replay: recorded prefix, live tail.
@@ -1213,12 +1234,11 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
 
     // Off, a replay ignores the global hooks, so it can reach neither a telemetry backend nor a guardrail
     // that performs I/O. On, it runs inside them with the resolver innermost, so a configured onStep
-    // observes each replayed step and the Command still never executes. The global retry defaults are
-    // kept either way: `inherit: false` would drop them with the hooks, and a Retry that production ran
-    // under a configured `attempts` would then exhaust early on replay and report a Failure production
-    // never saw. Retry shape is part of what a replay reproduces; the hooks are not.
+    // observes each replayed step and the Command still never executes. Retry shape needs nothing from
+    // the wiring either way, since retry options live on the node: a replay makes the attempts production
+    // made whichever way this is set.
     /** @type {CallConfiguration} */
-    const callConfig = { onStep, inherit: hooks, retry: globalConfig.retry };
+    const callConfig = { onStep, inherit: hooks };
 
     const result = await runEffect(fastRetry ? zeroRetryDelays(effect) : effect, context, callConfig);
     if (fromResolver) return { result };

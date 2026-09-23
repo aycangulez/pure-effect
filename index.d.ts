@@ -129,8 +129,8 @@ export declare function Ask<T, E = unknown, Ctx = unknown>(
 /**
  * With `onExhausted`, the exhaustion failure never escapes: the fallback Effect runs instead, its
  * success feeds `next`, and its failure propagates unwrapped, so the node's declared error is the
- * fallback's own error type. `onExhausted` is a per-use option only; the global `retry` defaults in
- * `EffectConfiguration` deliberately cannot carry one.
+ * fallback's own error type. `onExhausted` is a per-use option, and so is every other retry
+ * option: there are no configured defaults for one to be carried by.
  */
 export declare function Retry<T, E = unknown, E2 = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
@@ -329,23 +329,24 @@ export interface EffectConfiguration {
     onStep?: StepRunner;
     onRun?: RunWrapper;
     onBeforeCommand?: CommandInterceptor;
-    retry?: RetryOptions;
 }
 
 /**
  * Adds a layer to the global runner's wiring and returns a function that removes it. Layers merge:
  * `onStep` and `onRun` nest with the earliest layer outermost, `onBeforeCommand` interceptors all run
- * in the order installed, and `retry` merges with later layers winning. Several configurations passed
+ * in the order installed. Several configurations passed
  * to one call form one layer, which is the same as installing them in separate calls. Calling with no
  * arguments at all removes every layer; a call whose arguments are all `undefined` adds and removes nothing.
+ *
+ * A `retry` key throws a `TypeError`: retry options are per-use, passed to `Retry(effect, options)`.
  */
 export declare function configureEffect(...configs: (EffectConfiguration | undefined)[]): () => void;
 
 /**
  * A per-call configuration for `runEffect`. With `inherit: true` (default) the call's hooks are added to
- * the wiring `configureEffect` installed: where both define a hook the two nest, global outermost, and
- * `retry` merges with the call winning. With `inherit: false` the global wiring is ignored, so unset
- * slots fall back to the library defaults.
+ * the wiring `configureEffect` installed: where both define a hook the two nest, global outermost. With
+ * `inherit: false` the global wiring is ignored, so an unset hook falls back to the library default.
+ * A `retry` key throws a `TypeError`, as it does for `configureEffect`.
  */
 export type CallConfiguration = EffectConfiguration & { inherit?: boolean };
 
@@ -445,7 +446,8 @@ export interface ReplayOptions<Ctx = unknown> {
     fastRetry?: boolean;
     /**
      * Run the replay inside the global hooks, resolver innermost, so configured hooks observe it
-     * (default `false`, which ignores the global hooks). Global `retry` defaults apply either way.
+     * (default `false`, which ignores the global hooks). Retry options are per-use, so a replay reads the
+     * same ones the recorded run did.
      */
     hooks?: boolean;
     /**
