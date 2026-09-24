@@ -9,7 +9,7 @@
 - Inject context without touching function signatures
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks
-- Zero dependencies, about 4.9 KB minified and gzipped
+- Zero dependencies, about 5 KB minified and gzipped
 - Works in JavaScript and TypeScript (full generics, bundled `.d.ts`)
 
 ## Table of Contents
@@ -195,7 +195,7 @@ const { result: replayed } = await replayEffect(registerUserFlow(input), trace);
 assert.deepEqual(replayed, result); // fails if any step computed a fresh value
 ```
 
-This also works for a `Failure`: an error read back from a trace keeps its message, name, cause, and custom properties, and is deep-equal to the one the Command threw. The exception is a custom error class, which comes back as a plain `Error` with that class's name; compare `error.name` and `error.message` instead.
+This also works for a `Failure`: an error read back from a trace keeps its message, name, cause, custom properties, and an `AggregateError`'s list of errors, and is deep-equal to the one the Command threw. The exception is a custom error class, which comes back as a plain `Error` with that class's name; compare `error.name` and `error.message` instead.
 
 **You choose the trace format.** `replayEffect` also accepts a resolver function instead of a trace, so you can replay from OpenTelemetry spans, a log pipeline, or a database table, not only from the JSON that `recorder` produces.
 

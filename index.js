@@ -984,6 +984,14 @@ const serializeError = (e, withStack) => {
     if (withStack) out.stack = e.stack;
     // `cause` is non-enumerable too, and it can itself be an Error, so it is carried recursively.
     if ('cause' in e) out.cause = serializeError(e.cause, withStack);
+    // So is an AggregateError's `errors`, and that is where the detail lives: Node's refused connection to
+    // localhost has an empty message and one entry per address it tried. It is kept under its own key so
+    // that revival can tell it from an enumerable `errors`, which a validation error carries as data and
+    // the loop below copies as it is.
+    const errors = /** @type {any} */ (e).errors;
+    if (Array.isArray(errors) && !Object.prototype.propertyIsEnumerable.call(e, 'errors')) {
+        out.__errors = errors.map((x) => serializeError(x, withStack));
+    }
     for (const k of Object.keys(e)) out[k] = /** @type {any} */ (e)[k];
     return out;
 };
@@ -1007,7 +1015,9 @@ const reviveError = (v) => {
     for (const [k, val] of Object.entries(v)) {
         if (k === '__error' || k === 'name' || k === 'message') continue;
         if (k === 'cause') Object.defineProperty(e, 'cause', { ...hidden, value: reviveError(val) });
-        else /** @type {any} */ (e)[k] = val;
+        else if (k === '__errors' && Array.isArray(val)) {
+            Object.defineProperty(e, 'errors', { ...hidden, value: val.map(reviveError) });
+        } else /** @type {any} */ (e)[k] = val;
     }
     return e;
 };

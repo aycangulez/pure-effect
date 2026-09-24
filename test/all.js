@@ -908,6 +908,52 @@ describe('Recording and replay', function () {
         assert.equal(error.cause.cause, 'ECONNRESET', 'a non-Error cause must pass through unchanged');
     });
 
+    it('should carry the errors of an AggregateError through a trace and back', async function () {
+        // What Node rejects with when nothing listens on localhost: an empty message, and one entry per
+        // address it tried. `errors` is non-enumerable, like `cause`, so JSON alone would drop it.
+        const refused = (/** @type {string} */ address) =>
+            Object.assign(new Error(`connect ECONNREFUSED ${address}:5432`), { code: 'ECONNREFUSED', address });
+        const flow = (/** @type {any} */ input) =>
+            Command(function cmdConnectDb() {
+                return Promise.reject(
+                    Object.assign(new AggregateError([refused('::1'), refused('127.0.0.1'), 'timeout'], ''), {
+                        code: 'ECONNREFUSED'
+                    })
+                );
+            });
+
+        const { result, trace } = await recordEffect(flow, { id: 'agg' });
+        const stored = JSON.parse(JSON.stringify(trace));
+        const { result: replayed } = await replayEffect(flow(stored.initialInput), stored);
+        const error = /** @type {any} */ (errorOf(replayed));
+        assert.equal(error.name, 'AggregateError');
+        assert.equal(error.errors.length, 3);
+        assert.ok(error.errors[0] instanceof Error, 'each entry is revived as an error');
+        assert.equal(error.errors[1].message, 'connect ECONNREFUSED 127.0.0.1:5432');
+        assert.equal(error.errors[1].code, 'ECONNREFUSED');
+        assert.equal(error.errors[2], 'timeout', 'a non-Error entry passes through unchanged');
+        assert.deepEqual(Object.keys(error), ['code'], 'errors stays non-enumerable, as on a native AggregateError');
+        // Not deep-equal to the original: like any error class, it revives as a plain Error with its name.
+        assert.deepEqual(error.errors, /** @type {any} */ (result).error.errors);
+    });
+
+    it('should leave an enumerable errors property as it is', async function () {
+        // A validation library's error carries its own `errors`, visible like any custom property.
+        const flow = (/** @type {any} */ input) =>
+            Command(function cmdSave() {
+                return Promise.reject(
+                    Object.assign(new Error('validation failed'), { errors: { email: 'is invalid' } })
+                );
+            });
+        const { result, trace } = await recordEffect(flow, { id: 'val' });
+        const stored = JSON.parse(JSON.stringify(trace));
+        const { result: replayed } = await replayEffect(flow(stored.initialInput), stored);
+        const error = /** @type {any} */ (errorOf(replayed));
+        assert.deepEqual(error.errors, { email: 'is invalid' });
+        assert.deepEqual(Object.keys(error), ['errors'], 'still an own enumerable key');
+        assert.deepEqual(replayed, result);
+    });
+
     it('should revive an error that compares deep-equal to the one the Command threw', async function () {
         // The README's determinism check is `assert.deepEqual(replayed, result)`, so it has to hold for a
         // Failure too. `name` and `cause` are non-enumerable on a native Error; a revived error that carried
