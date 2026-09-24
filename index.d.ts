@@ -312,11 +312,26 @@ export declare function effectPipe<
 ): (start: A) => Effect<J, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8, Ctx>;
 
 /**
- * Wraps one Command execution. `path` is the Command's position in the Effect tree rather than its
+ * Wraps one Command execution, or one `Parallel` (`type` `'Parallel'`, `name` `'Parallel'`), whose `op`
+ * runs its branches and returns its decision. A hook must call `op` for a `Parallel`; returning without
+ * calling it is legitimate only for a Command, which is how replay works. Only a replay passes `op` an
+ * argument, the recorded decision. `path` is the step's position in the Effect tree rather than its
  * position in completion order, so it is the same in a replay as in the recorded run even when
  * `Parallel` branches finish in a different order. Hooks that take three parameters are unaffected.
  */
-export type StepRunner = (name: string, type: string, op: () => Promise<unknown>, path?: string) => Promise<unknown>;
+export type StepRunner = (
+    name: string,
+    type: string,
+    op: (decision?: ParallelDecision) => Promise<unknown>,
+    path?: string
+) => Promise<unknown>;
+
+/**
+ * Which branch, if any, cancelled a `Parallel`: what a `Parallel`'s step returns and what its trace entry
+ * records, so a replay reproduces the decision rather than recomputing it from timing. `branch: null`
+ * means an enclosing `Parallel` cancelled it.
+ */
+export type ParallelDecision = { cancelled: false } | { cancelled: true; branch: number | null };
 
 export type RunWrapper = (
     effect: Effect<unknown>,
@@ -363,9 +378,13 @@ export type ReplayStep = {
      * whose branches finish in whatever order they finish in. Prefer `path`.
      */
     index: number;
-    /** `cmd.name`, or 'anonymous'. */
+    /** `meta.name`, `cmd.name`, or 'anonymous'; 'Parallel' for a `Parallel`'s step. */
     name: string;
-    /** Always 'Command' today; reserved. */
+    /**
+     * 'Command', or 'Parallel' for the step a `Parallel` records its decision under. A Resolver that
+     * answers a 'Parallel' step with `{ result: ParallelDecision }` has it reproduced; anything else
+     * replays that `Parallel` under timing. A 'Parallel' step does not advance `index`.
+     */
     type: string;
     /**
      * The Command's position in the Effect tree, stable across runs: steps are numbered within a
@@ -384,6 +403,10 @@ export type ReplayOutcome = { result: unknown } | { error: unknown };
 
 export type Resolver = (step: ReplayStep) => ReplayOutcome | undefined;
 
+/**
+ * A recorded step: a Command's result or error, or a `Parallel`'s decision, whose `command` is
+ * 'Parallel', whose `path` ends in the `Parallel`'s `p` marker, and whose `result` is a `ParallelDecision`.
+ */
 export type TraceEntry = {
     command: string;
     /**

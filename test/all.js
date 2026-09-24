@@ -624,12 +624,12 @@ describe('Recording and replay', function () {
         const { result, trace } = await recordEffect(flow, 'u1');
         assert.deepEqual(
             trace.trace.map((e) => e.command),
-            ['cmdFast', 'cmdSlow'],
-            'recording order follows completion, not the effects array'
+            ['cmdFast', 'cmdSlow', 'Parallel'],
+            'recording order follows completion, not the effects array, and the decision follows its branches'
         );
         assert.deepEqual(
             trace.trace.map((e) => e.path),
-            ['0p1/0', '0p0/0'],
+            ['0p1/0', '0p0/0', '0p'],
             'each entry is labelled by its branch, so completion order does not matter'
         );
 
@@ -1901,8 +1901,8 @@ describe('examples/recording-example.js', function () {
         assert.equal(written.length, 1);
         assert.deepEqual(
             written[0].trace.map((/** @type {any} */ e) => e.path).sort(),
-            ['0p0/0', '0p1/0'],
-            'every entry carries its path'
+            ['0p', '0p0/0', '0p1/0'],
+            'every entry carries its path, the Parallel decision included'
         );
         configureEffect();
         const replayed = await replayEffect(flow(1), written[0]);
@@ -2011,6 +2011,26 @@ describe('examples/opentelemetry-example.js', function () {
             ['checkout', 'cmdWork']
         );
         assert.equal(spans[1].attributes['effect.type'], 'Command');
+    });
+
+    it('should open a span per Parallel, around the Command spans of its branches', async function () {
+        const { tracer, spans } = fakeTracer();
+        configureEffect(telemetryHooks({ tracer }));
+        const load = (/** @type {string} */ name) =>
+            Command(
+                () => name,
+                (/** @type {any} */ v) => Success(v),
+                { name }
+            );
+        const result = await runEffect(Parallel([load('cmdUser'), load('cmdCart')]), { flowName: 'checkout' });
+        assert.deepEqual(result, Success(['cmdUser', 'cmdCart']));
+        assert.deepEqual(
+            spans.map((/** @type {any} */ s) => s.name),
+            ['checkout', 'Parallel', 'cmdUser', 'cmdCart'],
+            'the Parallel span opens before its branches do'
+        );
+        assert.equal(spans[1].attributes['effect.type'], 'Parallel');
+        assert.ok(spans.every((/** @type {any} */ s) => s.ended));
     });
 
     it('should mark a Failure on the root span and record a thrown Command', async function () {
@@ -3308,7 +3328,7 @@ describe('Parallel limit and settled', function () {
         const meter = { inFlight: 0, peak: 0 };
         const effects = [tracked(meter, 'a', 20), tracked(meter, 'b', 1)];
         const { trace } = await recordEffect(() => Parallel(effects, { limit: 1 }), null);
-        assert.deepEqual(trace.trace.map((e) => e.path).sort(), ['0p0/0', '0p1/0']);
+        assert.deepEqual(trace.trace.map((e) => e.path).sort(), ['0p', '0p0/0', '0p1/0']);
     });
 
     it('should not start queued branches once one has failed', async function () {
@@ -3473,6 +3493,216 @@ describe('Parallel limit and settled', function () {
             /** @type {any} */ (replayed).value.map((/** @type {any} */ o) => o.type),
             /** @type {any} */ (result).value.map((/** @type {any} */ o) => o.type)
         );
+    });
+});
+
+describe('Replaying a cancelled Parallel', function () {
+    beforeEach(() => configureEffect());
+
+    // Which branch cancels a Parallel is decided by timing, and a replay runs at its own pace. The
+    // decision used to go unrecorded, so a replay could let a cancelled branch's AbortError win, or let
+    // a branch run past the point production stopped it and ask for a step that was never recorded.
+    // Each Parallel now records its decision, and a replay reproduces it rather than recomputing it.
+
+    /** Waits, and rejects with an AbortError when the signal fires, as fetch does. */
+    const sleep = (/** @type {number} */ ms, /** @type {AbortSignal | undefined} */ signal) =>
+        new Promise((resolve, reject) => {
+            const timer = setTimeout(resolve, ms);
+            signal?.addEventListener(
+                'abort',
+                () => {
+                    clearTimeout(timer);
+                    reject(new DOMException('This operation was aborted', 'AbortError'));
+                },
+                { once: true }
+            );
+        });
+
+    /** Counts live executions, so each test can assert that a replay performed none. */
+    const io = { calls: 0 };
+    /** @param {string} name @param {(signal: AbortSignal | undefined) => any} fn */
+    const step = (name, fn) =>
+        Command(
+            async (/** @type {AbortSignal | undefined} */ signal) => {
+                io.calls++;
+                return fn(signal);
+            },
+            undefined,
+            { name }
+        );
+
+    const declined = () => Object.assign(new Error('Your card was declined.'), { code: 'card_declined' });
+    // Looks the customer up, then the charge is declined: the cancelling branch takes two steps.
+    const chargeBranch = () =>
+        effectPipe(
+            () => step('findCustomer', (s) => sleep(5, s).then(() => ({ id: 'cu_1' }))),
+            () =>
+                step('charge', async (s) => {
+                    await sleep(5, s);
+                    throw declined();
+                })
+        )(null);
+    // One slow step that accepts the signal, so it is cancelled with an AbortError.
+    const reserveBranch = (/** @type {string} */ name = 'reserveStock') =>
+        step(name, async (s) => {
+            await sleep(200, s);
+            return { reserved: true };
+        });
+
+    /** Records a run, then replays it from memory and from JSON, asserting neither replay did I/O. */
+    const recordAndReplay = async (/** @type {(input: any) => any} */ flow, /** @type {any} */ input = null) => {
+        const { result, trace } = await recordEffect(flow, input);
+        const before = io.calls;
+        const memory = await replayEffect(flow(input), trace);
+        const json = await replayEffect(flow(input), JSON.parse(JSON.stringify(trace)));
+        assert.equal(io.calls, before, 'a replay executes nothing');
+        return { result, trace, replays: [memory, json] };
+    };
+
+    /** @param {any} replay */
+    const assertDeclined = (replay) => {
+        assert.equal(replay.result.type, 'Failure');
+        assert.equal(replay.result.error.code, 'card_declined', 'the failure that cancelled the others');
+        assert.deepEqual(replay.unreached, [], 'every recorded step was replayed');
+    };
+
+    it('should replay the failure that cancelled the others, not the cancelled branch', async function () {
+        const { result, replays } = await recordAndReplay(() => Parallel([chargeBranch(), reserveBranch()]));
+        assert.equal(/** @type {any} */ (result).error.code, 'card_declined', 'production');
+        replays.forEach(assertDeclined);
+    });
+
+    it('should replay it when the cancelling branch comes later in the array', async function () {
+        const { result, replays } = await recordAndReplay(() => Parallel([reserveBranch(), chargeBranch()]));
+        assert.equal(/** @type {any} */ (result).error.code, 'card_declined', 'production');
+        replays.forEach(assertDeclined);
+    });
+
+    it('should record each Parallel decision at the Parallel path', async function () {
+        const { trace } = await recordEffect(() => Parallel([chargeBranch(), reserveBranch()]), null);
+        const decision = trace.trace.find((e) => e.path === '0p');
+        assert.deepEqual(
+            { command: decision?.command, result: decision?.result },
+            { command: 'Parallel', result: { cancelled: true, branch: 0 } }
+        );
+        const { trace: calm } = await recordEffect(() => Parallel([step('a', () => 1), step('b', () => 2)]), null);
+        assert.deepEqual(calm.trace.find((e) => e.path === '0p')?.result, { cancelled: false });
+    });
+
+    it('should stop a branch where production stopped it during a retry backoff', async function () {
+        // The backoff was cut short by the cancellation, so the second attempt was never recorded.
+        const retried = Retry(
+            step('flakyLookup', () => {
+                throw new Error('ECONNRESET');
+            }),
+            { attempts: 2, delay: 50 }
+        );
+        const { replays } = await recordAndReplay(() => Parallel([chargeBranch(), retried]));
+        replays.forEach(assertDeclined);
+    });
+
+    it('should stop a branch whose in-flight step ignored the signal and finished late', async function () {
+        const ignoresSignal = effectPipe(
+            () => step('slowIgnoresSignal', () => new Promise((r) => setTimeout(() => r('late'), 30))),
+            () => step('afterSlow', () => 'never reached in production')
+        )(null);
+        const { replays } = await recordAndReplay(() => Parallel([chargeBranch(), ignoresSignal]));
+        replays.forEach(assertDeclined);
+    });
+
+    it('should replay a nested Parallel cancelled by its enclosing one', async function () {
+        const flow = () => Parallel([chargeBranch(), Parallel([reserveBranch('reserveA'), reserveBranch('reserveB')])]);
+        const { trace, replays } = await recordAndReplay(flow);
+        assert.deepEqual(trace.trace.find((e) => e.path === '0p1/0p')?.result, { cancelled: true, branch: null });
+        replays.forEach(assertDeclined);
+    });
+
+    it('should stop queued branches that production never started under limit', async function () {
+        const flow = () =>
+            Parallel([chargeBranch(), reserveBranch('r1'), reserveBranch('r2'), reserveBranch('r3')], { limit: 2 });
+        const { replays } = await recordAndReplay(flow);
+        replays.forEach(assertDeclined);
+    });
+
+    it('should not start a Retry fallback that production never started', async function () {
+        let attempts = 0;
+        const withFallback = Retry(
+            step('fetchLivePrice', async (s) => {
+                if (attempts++ === 0) throw new Error('ECONNRESET');
+                await sleep(200, s);
+                return { amount: 1 };
+            }),
+            { attempts: 1, delay: 1, onExhausted: () => step('fetchCachedPrice', () => ({ amount: 0 })) }
+        );
+        const { replays } = await recordAndReplay(() => Parallel([chargeBranch(), withFallback]));
+        replays.forEach(assertDeclined);
+    });
+
+    it('should raise a TimeParadox when the recorded cancelling branch no longer fails', async function () {
+        let skipCharge = false;
+        const branch = () =>
+            effectPipe(
+                () => step('findCustomer', (s) => sleep(5, s).then(() => ({ id: 'cu_1' }))),
+                () =>
+                    skipCharge
+                        ? Success('charge skipped')
+                        : step('charge', async (s) => {
+                              await sleep(5, s);
+                              throw declined();
+                          })
+            )(null);
+        const flow = () => Parallel([branch(), reserveBranch()]);
+        const { trace } = await recordEffect(flow, null);
+        skipCharge = true;
+        const { result } = await replayEffect(flow(), trace);
+        assert.equal(result.type, 'Failure');
+        assert.equal(/** @type {any} */ (result).error.name, 'TimeParadox');
+        assert.match(/** @type {any} */ (result).error.message, /'0p'.*branch 0/);
+    });
+
+    it('should replay a trace without Parallel decisions as before', async function () {
+        const flow = () => Parallel([step('a', () => 1), step('b', () => 2)]);
+        const { trace } = await recordEffect(flow, null);
+        const legacy = { ...trace, trace: trace.trace.filter((e) => e.command !== 'Parallel') };
+        const { result, unreached } = await replayEffect(flow(), legacy);
+        assert.deepEqual(result, Success([1, 2]));
+        assert.deepEqual(unreached, []);
+    });
+
+    it('should reject when a hook returns without calling op for a Parallel', async function () {
+        configureEffect({
+            onStep: async (name, type, op) => (type === 'Parallel' ? 'skipped' : op())
+        });
+        await assert.rejects(runEffect(Parallel([Success(1)])), (e) => e instanceof TypeError && /op/.test(e.message));
+    });
+
+    it('should let a Resolver supply the decision, and ignore one that is not a decision', async function () {
+        const flow = () => Parallel([chargeBranch(), reserveBranch()]);
+        const { trace } = await recordEffect(flow, null);
+        const byPath = new Map(trace.trace.map((e) => [e.path, e]));
+        /** @type {number[]} */
+        const commandIndexes = [];
+        const fromStore = (/** @type {any} */ s) => {
+            if (s.type !== 'Parallel') commandIndexes.push(s.index);
+            const e = /** @type {any} */ (byPath.get(s.path));
+            if (!e) return undefined;
+            return 'error' in e ? { error: e.error } : { result: e.result };
+        };
+        const { result } = await replayEffect(flow(), fromStore);
+        assert.equal(/** @type {any} */ (result).error.message, 'Your card was declined.');
+        assert.deepEqual(commandIndexes, [0, 1, 2], 'a Parallel step does not advance step.index');
+
+        const notADecision = (/** @type {any} */ s) => ({ result: s.type === 'Parallel' ? 'no decision' : s.name });
+        const { result: plain } = await replayEffect(Parallel([step('a', () => 1), step('b', () => 2)]), notADecision);
+        assert.deepEqual(plain, Success(['a', 'b']));
+    });
+
+    it('should not redact a Parallel decision', async function () {
+        const { trace } = await recordEffect(() => Parallel([step('a', () => 1)]), null, {
+            redact: () => '[redacted]'
+        });
+        assert.deepEqual(trace.trace.find((e) => e.command === 'Parallel')?.result, { cancelled: false });
+        assert.equal(trace.trace.find((e) => e.command === 'a')?.result, '[redacted]');
     });
 });
 

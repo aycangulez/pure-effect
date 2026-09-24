@@ -22,6 +22,7 @@ import type {
     RetryState,
     ParallelState,
     ParallelOutcomes,
+    ParallelDecision,
     RetryExhaustedError,
     Effect,
     EffectConfiguration,
@@ -434,6 +435,17 @@ const resolver: Resolver = (step) => {
     return step.index === 0 ? { result: 1 } : undefined;
 };
 expectAssignable<ReplayOutcome>({ error: new Error('x') });
+
+// a Parallel's step records its decision, and a Resolver can supply one from another storage format
+expectAssignable<ParallelDecision>({ cancelled: false });
+expectAssignable<ParallelDecision>({ cancelled: true, branch: 0 });
+expectAssignable<ParallelDecision>({ cancelled: true, branch: null });
+// @ts-expect-error a cancelled decision names the branch that cancelled it, or null for an enclosing Parallel
+const unnamedBranch: ParallelDecision = { cancelled: true };
+const decisionResolver: Resolver = (step) =>
+    step.type === 'Parallel' ? { result: { cancelled: true, branch: 0 } } : undefined;
+// op takes an argument only when a replay passes it the recorded decision
+const passesDecision: StepRunner = async (name, type, op) => (type === 'Parallel' ? op({ cancelled: false }) : op());
 // @ts-expect-error a bare value is not an outcome; the wrapper is what distinguishes undefined from unrecorded
 const bareResolver: Resolver = () => 42;
 

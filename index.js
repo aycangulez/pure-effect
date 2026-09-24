@@ -354,10 +354,12 @@ const effectPipe = (...fns) => {
 };
 
 /**
- * Wraps one Command execution. `path` identifies the Command's position in the Effect tree rather than
- * its position in completion order, so it is the same in a replay as it was in the recorded run even
- * when `Parallel` branches finish in a different order. Hooks written before `path` existed take three
- * parameters and are unaffected.
+ * Wraps one Command execution, or one Parallel: `type` is 'Parallel', and `op` runs the branches and
+ * returns the Parallel's decision, so a hook must call it. Only a replay passes `op` an argument, the
+ * recorded decision. `path` identifies the step's position in the Effect tree rather than its position
+ * in completion order, so it is the same in a replay as it was in the recorded run even when `Parallel`
+ * branches finish in a different order. Hooks written before `path` existed take three parameters and
+ * are unaffected.
  * @typedef {(name: string, type: string, op: function, path?: string) => Promise<any>} StepRunner
  */
 /** @type StepRunner */
@@ -474,7 +476,7 @@ const configureEffect = (...configs) => {
 /**
  * @typedef {Object} StepStart
  * @property {string} name - The Command's identity: `meta.name`, else `cmd.name`, else 'anonymous'.
- * @property {string} type - Always 'Command' today.
+ * @property {string} type - 'Command', or 'Parallel' for a Parallel's decision.
  * @property {string} [path] - The Command's position in the Effect tree.
  */
 
@@ -578,6 +580,46 @@ const parallelCancelled = () =>
     Object.assign(new Error('Parallel branch cancelled.'), {
         name: 'ParallelCancelled'
     });
+
+/**
+ * Which branch, if any, cancelled a Parallel. `branch: null` means an enclosing Parallel cancelled it.
+ * It is recorded as the Parallel's own step, since it is decided by timing and a replay cannot recompute it.
+ * @typedef {{ cancelled: false } | { cancelled: true, branch: number | null }} ParallelDecision
+ */
+
+/**
+ * Reads a recorded decision, or `undefined` for anything that is not one, so a Resolver written for
+ * Commands, or a trace from before decisions were recorded, replays a Parallel under timing as before.
+ * @param {any} value
+ * @param {number} branches - How many branches the Parallel has, so a stale branch index is refused too
+ * @returns {ParallelDecision | undefined}
+ */
+const asDecision = (value, branches) => {
+    if (!value || typeof value !== 'object') return undefined;
+    if (value.cancelled === false) return { cancelled: false };
+    if (value.cancelled !== true) return undefined;
+    const { branch } = value;
+    if (branch === null) return { cancelled: true, branch: null };
+    return Number.isInteger(branch) && branch >= 0 && branch < branches ? { cancelled: true, branch } : undefined;
+};
+
+/**
+ * Marks the point where a replay reached a step that production never ran, in a branch a Parallel had
+ * cancelled. The interpreter stops the branch there, as production did, rather than treating the gap
+ * as a divergence. Only `fromTrace` raises it, and only where a recorded decision explains the gap.
+ */
+const replayCut = Symbol('pure-effect.replayCut');
+
+/**
+ * @param {string} path
+ * @returns {Error}
+ */
+const replayCutError = (path) =>
+    Object.defineProperty(
+        asHarnessError(new Error(`Replay stopped a cancelled Parallel branch at path '${path}'.`)),
+        replayCut,
+        { value: true }
+    );
 
 /**
  * Awaits every task, with at most `limit` of them in flight. Without a limit this is `Promise.all`,
@@ -759,58 +801,119 @@ const runEffect =
                         throw new TypeError(
                             `Parallel 'limit' must be a positive integer, received ${describeValue(limit)}.`
                         );
-                    // One scope per Parallel, linked to the enclosing one so cancellation nests.
-                    // Absent AbortController (very old runtimes), `branchSignal` stays undefined and
-                    // the old run-everything-to-completion behaviour is what happens. The scope is kept
-                    // under `settled` so an enclosing Parallel can still cancel this one; what settled
-                    // drops is a branch cancelling its own siblings.
-                    const scope = typeof AbortController === 'function' ? new AbortController() : undefined;
-                    const branchSignal = scope?.signal;
-                    const relay = () => scope?.abort();
-                    if (signal && scope) {
-                        if (signal.aborted) scope.abort();
-                        else signal.addEventListener('abort', relay, { once: true });
-                    }
+                    // Captured while `eff` is still narrowed to a Parallel node, since `op` below runs later.
+                    const effects = eff.effects;
+                    const parallelInput = eff.initialInput;
 
                     /** @type {(SuccessState | FailureState | IoFaultState)[]} */
-                    const results = new Array(eff.effects.length);
-                    // Which branch failed on its own account rather than because it was cancelled.
-                    const triggered = new Array(eff.effects.length).fill(false);
-                    // A branch that throws (a bug in its code, or a harness error) cancels its siblings
-                    // like a failing one, under `settled` too, since the run is rejecting either way. The
-                    // error is held rather than rethrown at once: rejecting `runBounded` early used to
-                    // leave the siblings running unobserved, and under `limit` it stopped that worker.
-                    /** @type {{ error: unknown }[]} */
-                    const thrown = new Array(eff.effects.length);
+                    let results = [];
+                    // Cast rather than annotated: `runBranches` reassigns it, which the checker cannot see from
+                    // here, and an annotated literal would be narrowed to `{ cancelled: false }` for good.
+                    let decision = /** @type {ParallelDecision} */ ({ cancelled: false });
+                    let ran = false;
+
+                    /**
+                     * Runs the branches and returns the decision: which branch, if any, cancelled the others.
+                     * That decision comes from timing, so it is handed to `onStep` as this Parallel's step
+                     * and recorded like a Command's result. A replay passes the recorded decision back in,
+                     * and a cancelled one is reproduced rather than recomputed: nothing aborts, each branch
+                     * runs its recorded steps and is stopped where its recording stops, and the recorded
+                     * branch's failure is the result. Replaying the abort at replay speed is what let a
+                     * cancelled branch's AbortError win, or let a branch run past where production stopped it.
+                     * @param {any} [recorded]
+                     * @returns {Promise<ParallelDecision>}
+                     */
+                    const runBranches = async (recorded) => {
+                        ran = true;
+                        const forced = asDecision(recorded, effects.length);
+                        const reproducing = forced !== undefined && forced.cancelled;
+                        // One scope per Parallel, linked to the enclosing one so cancellation nests.
+                        // Absent AbortController (very old runtimes), `branchSignal` stays undefined and
+                        // the old run-everything-to-completion behaviour is what happens. The scope is kept
+                        // under `settled` so an enclosing Parallel can still cancel this one; what settled
+                        // drops is a branch cancelling its own siblings.
+                        const scope = typeof AbortController === 'function' ? new AbortController() : undefined;
+                        const branchSignal = scope?.signal;
+                        const relay = () => scope?.abort();
+                        if (signal && scope) {
+                            if (signal.aborted) scope.abort();
+                            else signal.addEventListener('abort', relay, { once: true });
+                        }
+
+                        results = new Array(effects.length);
+                        // Which branch failed on its own account rather than because it was cancelled.
+                        const triggered = new Array(effects.length).fill(false);
+                        // A branch that throws (a bug in its code, or a harness error) cancels its siblings
+                        // like a failing one, under `settled` too, since the run is rejecting either way. The
+                        // error is held rather than rethrown at once: rejecting `runBounded` early used to
+                        // leave the siblings running unobserved, and under `limit` it stopped that worker.
+                        /** @type {{ error: unknown }[]} */
+                        const thrown = new Array(effects.length);
+                        try {
+                            // Still awaits every branch, so no cancelled work is left running unobserved
+                            // after the Failure is returned. Cancelled branches settle promptly; a branch
+                            // whose in-flight Command ignores the signal is the one case that does not.
+                            await runBounded(
+                                effects.map((e, i) => async () => {
+                                    let result;
+                                    try {
+                                        result = await execute(e, branchSignal, `${branchPath}${i}/`);
+                                    } catch (error) {
+                                        thrown[i] = { error };
+                                        scope?.abort();
+                                        return;
+                                    }
+                                    results[i] = result;
+                                    // Read-then-abort is atomic here, so exactly one branch is the trigger.
+                                    const cancels = !settled && !reproducing && !branchSignal?.aborted;
+                                    if (result.type !== 'Success' && cancels) {
+                                        triggered[i] = true;
+                                        scope?.abort();
+                                    }
+                                }),
+                                limit
+                            );
+                        } finally {
+                            if (signal && scope) signal.removeEventListener('abort', relay);
+                        }
+                        // The first by array order, matching how a Failure is chosen when several land at once.
+                        const firstThrown = thrown.find(Boolean);
+                        if (firstThrown) throw firstThrown.error;
+
+                        if (forced !== undefined && forced.cancelled) {
+                            if (forced.branch !== null && results[forced.branch].type === 'Success') {
+                                throw replayError(
+                                    `Time paradox at path '${branchPath}': the recorded run was cancelled by ` +
+                                        `branch ${forced.branch}, which did not fail in this replay.`,
+                                    { name: 'TimeParadox', path: branchPath, branch: forced.branch }
+                                );
+                            }
+                            decision = forced;
+                            return decision;
+                        }
+                        const trigger = triggered.indexOf(true);
+                        decision =
+                            trigger >= 0
+                                ? { cancelled: true, branch: trigger }
+                                : branchSignal?.aborted
+                                  ? { cancelled: true, branch: null }
+                                  : { cancelled: false };
+                        return decision;
+                    };
+
                     try {
-                        // Still awaits every branch, so no cancelled work is left running unobserved
-                        // after the Failure is returned. Cancelled branches settle promptly; a branch
-                        // whose in-flight Command ignores the signal is the one case that does not.
-                        await runBounded(
-                            eff.effects.map((e, i) => async () => {
-                                let result;
-                                try {
-                                    result = await execute(e, branchSignal, `${branchPath}${i}/`);
-                                } catch (error) {
-                                    thrown[i] = { error };
-                                    scope?.abort();
-                                    return;
-                                }
-                                results[i] = result;
-                                // Read-then-abort is atomic here, so exactly one branch is the trigger.
-                                if (result.type !== 'Success' && !settled && !branchSignal?.aborted) {
-                                    triggered[i] = true;
-                                    scope?.abort();
-                                }
-                            }),
-                            limit
-                        );
-                    } finally {
-                        if (signal && scope) signal.removeEventListener('abort', relay);
+                        await localStepRunner('Parallel', 'Parallel', runBranches, branchPath);
+                    } catch (e) {
+                        // A replay found this Parallel inside a branch production had already stopped.
+                        if (e && /** @type {any} */ (e)[replayCut]) return Failure(parallelCancelled(), parallelInput);
+                        throw e;
                     }
-                    // The first by array order, matching how a Failure is chosen when several land at once.
-                    const firstThrown = thrown.find(Boolean);
-                    if (firstThrown) throw firstThrown.error;
+                    if (!ran) {
+                        throw new TypeError(
+                            `An onStep hook returned without calling op for the Parallel at path '${branchPath}'. ` +
+                                'A hook has to call op for a Parallel, because op runs its branches.'
+                        );
+                    }
 
                     // Settled hands the outcomes on as plain Success and Failure nodes. A branch that
                     // failed is data here, so `next` runs and the Parallel itself never fails on a
@@ -820,8 +923,10 @@ const runEffect =
                         continue;
                     }
 
-                    const trigger = triggered.indexOf(true);
-                    const failure = trigger >= 0 ? results[trigger] : results.find((r) => r.type !== 'Success');
+                    const failure =
+                        decision.cancelled && decision.branch !== null
+                            ? results[decision.branch]
+                            : results.find((r) => r.type !== 'Success');
                     if (failure) return failure;
                     eff = eff.next(results.map((r) => /** @type {SuccessState} */ (r).value));
                     continue;
@@ -865,6 +970,9 @@ const runEffect =
                 try {
                     result = await localStepRunner(cmdName, 'Command', op, cmdPath);
                 } catch (e) {
+                    // A replay reached a step production never ran, in a branch a Parallel had cancelled:
+                    // this is where production stopped the branch, so the replay stops it here too.
+                    if (e && /** @type {any} */ (e)[replayCut]) return Failure(parallelCancelled(), initialInput);
                     if (e && /** @type {any} */ (e)[harnessError]) throw e;
                     // The function returned and a hook threw afterwards: a bug in the hook, rejected like a
                     // throw from `next`. A hook that throws without calling `op` is still a fault, since that
@@ -899,7 +1007,9 @@ const runEffect =
 /**
  * The step a replay is asking about. `path` is the Command's position in the Effect tree and is stable
  * across runs; `index` is its position in this run's completion order, which is not stable for a flow
- * containing `Parallel`. Prefer `path` when writing a Resolver.
+ * containing `Parallel`. Prefer `path` when writing a Resolver. A step whose `type` is 'Parallel' asks
+ * for a Parallel's recorded decision; it does not advance `index`, and anything but a decision replays
+ * that Parallel under timing.
  * @typedef {{ index: number, name: string, type: string, path?: string }} ReplayStep
  */
 
@@ -914,7 +1024,9 @@ const runEffect =
 /** @typedef {(step: ReplayStep) => ReplayOutcome | undefined} Resolver */
 
 /**
- * A recorded step. `durationMs` is how long the Command took in production, rounded to microseconds,
+ * A recorded step: a Command's result or error, or a Parallel's decision, recorded as `command`
+ * 'Parallel' at the Parallel's own path with the decision as its `result`.
+ * `durationMs` is how long the step took in production, rounded to microseconds,
  * which is the one question a trace could not answer before: which step was slow.
  * `path` locates the Command in the Effect tree, which is what a replay matches on: it does not move
  * when `Parallel` branches finish in a different order than they did in production.
@@ -1110,8 +1222,12 @@ const recorder = (options = {}) => {
 
     // Built on `observeSteps` so the hook contract lives in one place: `op` always runs, its result is
     // always returned, and its error always propagates.
-    const onStep = observeSteps(({ name, path }) => (end) => {
+    const onStep = observeSteps(({ name, type, path }) => (end) => {
         const durationMs = Math.round(end.durationMs * 1000) / 1000;
+        // A Parallel's result is its decision, which holds no user data and has to survive intact for a
+        // replay to reproduce it, so `redact` is not asked about it.
+        const recorded = (/** @type {any} */ result) =>
+            type === 'Parallel' ? result : safeRedact(result, name, 'result');
         push(
             'error' in end
                 ? {
@@ -1120,7 +1236,7 @@ const recorder = (options = {}) => {
                       error: snapshot(safeRedact(serializeError(end.error, stack), name, 'error')),
                       durationMs
                   }
-                : { command: name, path, result: snapshot(safeRedact(end.result, name, 'result')), durationMs }
+                : { command: name, path, result: snapshot(recorded(end.result)), durationMs }
         );
     });
 
@@ -1177,6 +1293,16 @@ const entryToOutcome = (entry) =>
     'error' in entry ? { error: reviveError(snapshot(entry.error)) } : { result: snapshot(entry.result) };
 
 /**
+ * Whether an entry is a Parallel's recorded decision rather than a Command's result. A Parallel's path
+ * ends in its `p` marker and a Command's in its step number, so a Command that happens to be named
+ * 'Parallel' is never mistaken for one.
+ * @param {TraceEntry} entry
+ * @returns {boolean}
+ */
+const isDecisionEntry = (entry) =>
+    entry.command === 'Parallel' && typeof entry.path === 'string' && entry.path.endsWith('p');
+
+/**
  * Builds a Resolver for the reference trace format. Internal: `replayEffect` calls this
  * when handed a trace instead of a Resolver, and is the only caller. Callers with traces
  * in some other shape write a Resolver instead, which is the extension point.
@@ -1214,9 +1340,29 @@ const fromTrace = (traceLog, options = {}) => {
         if (byPath.size !== entries.length) {
             throw replayError('Trace has duplicate step paths.');
         }
+        /** Recorded Parallel decisions that cancelled branches, by the Parallel's path. */
+        const cancellations = entries.filter(isDecisionEntry).filter((e) => e.result?.cancelled === true);
+        // A missing step is where production stopped a branch when it lies in a branch a recorded decision
+        // cancelled: any branch but the cancelling one, or every branch of a Parallel cancelled from outside.
+        const stoppedInProduction = (/** @type {string | undefined} */ stepPath) =>
+            typeof stepPath === 'string' &&
+            cancellations.some((e) => {
+                const at = /** @type {string} */ (e.path);
+                const branch = stepPath.startsWith(at) ? /^(\d+)\//.exec(stepPath.slice(at.length)) : null;
+                return branch !== null && (e.result.branch === null || Number(branch[1]) !== e.result.branch);
+            });
         return (step) => {
             const entry = byPath.get(step.path);
+            if (step.type === 'Parallel') {
+                // A decision rather than I/O. With none recorded, the Parallel replays under timing, as
+                // it did before decisions were recorded.
+                if (entry && entry.command !== 'Parallel') throw timeParadox(step, entry.command);
+                if (entry) return resolveEntry(entry);
+                if (stoppedInProduction(step.path)) throw replayCutError(/** @type {string} */ (step.path));
+                return undefined;
+            }
             if (!entry) {
+                if (stoppedInProduction(step.path)) throw replayCutError(/** @type {string} */ (step.path));
                 throw replayError(`Trace has no step at path '${step.path}' for '${step.name}'.`, {
                     command: step.name,
                     path: step.path
@@ -1228,6 +1374,8 @@ const fromTrace = (traceLog, options = {}) => {
     }
 
     return (step) => {
+        // A trace with no paths predates recorded decisions, so a Parallel replays under timing.
+        if (step.type === 'Parallel') return undefined;
         // Positional matching pairs steps by completion order, which is exactly what makes Parallel
         // branches indistinguishable. Refusing is better than a result that is right only when the
         // replay happens to finish in production's order.
@@ -1350,6 +1498,12 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
 
     /** @type {StepRunner} */
     const onStep = async (name, type, op, path) => {
+        if (type === 'Parallel') {
+            // A Parallel's step carries its recorded decision into `op`, which runs the branches under it.
+            // It is not a Command: `index` still counts Commands, and `onResolved` still sees only them.
+            const outcome = resolve({ index, name, type, path });
+            return await op(outcome && 'result' in outcome ? outcome.result : undefined);
+        }
         const step = { index: index++, name, type, path };
         const outcome = resolve(step);
         if (onResolved) onResolved(step, outcome);
@@ -1420,8 +1574,11 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
     if (version && traceVersion && version !== traceVersion) {
         log(`Warning: trace was recorded at ${traceVersion}, replaying against ${version}.`);
     }
-    const stepsText = trace.length === 0 || trace.length > 1 ? 'steps' : 'step';
-    log(`Replaying '${flowName || 'flow'}' (${trace.length} recorded ${stepsText})`);
+    // Parallel decisions are recorded alongside the Commands but are not narrated as steps, so the header
+    // counts Commands and its step numbers match the lines below.
+    const commandCount = trace.filter((e) => !isDecisionEntry(e)).length;
+    const stepsText = commandCount === 1 ? 'step' : 'steps';
+    log(`Replaying '${flowName || 'flow'}' (${commandCount} recorded ${stepsText})`);
     log(`Initial input: ${format(initialInput)}`);
 
     // Narration goes through `onResolved` rather than a wrapped Resolver: observing each
