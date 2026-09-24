@@ -32,6 +32,8 @@ import { configureEffect, recorder } from '../index.js';
  * @property {(result: SuccessState<any> | FailureState<any>) => boolean} [keep] - Decides which runs
  *           reach the sink. Defaults to failures only. Return `true` always to keep everything, or
  *           sample successes with a probability check.
+ * @property {(error: unknown, flowName?: string) => void} [onSinkError] - Receives an error thrown by `keep`
+ *           or `sink`, which would otherwise have replaced the run's outcome. Defaults to `console.error`.
  */
 
 /**
@@ -50,7 +52,8 @@ export function recordingHooks(options = {}) {
         redact,
         maxEntries = 500,
         stack,
-        keep = (result) => result.type === 'Failure'
+        keep = (result) => result.type === 'Failure',
+        onSinkError = (error, flowName) => console.error(`Recording failed for '${flowName || 'flow'}':`, error)
     } = options;
     /** @type {AsyncLocalStorage<RecordingStore>} */
     const scope = new AsyncLocalStorage();
@@ -67,7 +70,18 @@ export function recordingHooks(options = {}) {
         const store = { rec, flowName, initialInput: /** @type {any} */ (effect).initialInput, context: undefined };
         return scope.run(store, async () => {
             const result = await pipeline();
-            if (keep(result)) await sink(rec.toTrace(store));
+            // Recording must never decide a run's outcome, the rule the telemetry example keeps as well. `keep`
+            // and `sink` are the application's code, and a sink that serializes the trace throws on a circular
+            // value such as an HTTP client's error, so a failure is reported rather than returned.
+            try {
+                if (keep(result)) await sink(rec.toTrace(store));
+            } catch (error) {
+                try {
+                    onSinkError(error, store.flowName);
+                } catch {
+                    // A reporter that throws does not get to change the run either.
+                }
+            }
             return result;
         });
     };

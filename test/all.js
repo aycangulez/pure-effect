@@ -1993,6 +1993,56 @@ describe('examples/recording-example.js', function () {
         assert.deepEqual(written[0].initialInput, { id: 1 });
     });
 
+    it('should not let a failing sink change the outcome, and report the failure', async function () {
+        // The README's sink calls JSON.stringify, which throws on a circular value such as an HTTP client's
+        // error. The sink was awaited inside onRun, so that throw replaced the run's own outcome.
+        /** @type {any[]} */
+        const reported = [];
+        const circular = () => {
+            throw new TypeError('Converting circular structure to JSON');
+        };
+        const remove = enableRecording({
+            sink: circular,
+            onSinkError: (/** @type {any} */ error, /** @type {any} */ flowName) =>
+                void reported.push([error.message, flowName])
+        });
+        const result = await runEffect(failing({ id: 1 }), { flowName: 'checkout' });
+        assert.equal(/** @type {any} */ (result).error.message, 'write failed', 'the run keeps its own outcome');
+        assert.deepEqual(reported, [['Converting circular structure to JSON', 'checkout']]);
+        remove();
+
+        // Reporting is the caller's code too, so a reporter that throws changes nothing either.
+        enableRecording({
+            sink: circular,
+            onSinkError: () => {
+                throw new Error('reporter failed');
+            }
+        });
+        const again = await runEffect(failing({ id: 1 }), { flowName: 'checkout' });
+        assert.equal(/** @type {any} */ (again).error.message, 'write failed');
+    });
+
+    it('should report a failing keep or sink to console.error by default', async function () {
+        const errorLog = console.error;
+        /** @type {any[][]} */
+        const logged = [];
+        console.error = (/** @type {any[]} */ ...args) => void logged.push(args);
+        try {
+            enableRecording({
+                keep: () => {
+                    throw new Error('keep failed');
+                }
+            });
+            const result = await runEffect(failing({ id: 1 }), { flowName: 'checkout' });
+            assert.equal(result.type, 'Failure');
+            assert.equal(logged.length, 1);
+            assert.match(String(logged[0][0]), /Recording failed for 'checkout'/);
+            assert.equal(logged[0][1].message, 'keep failed');
+        } finally {
+            console.error = errorLog;
+        }
+    });
+
     it('should keep successful runs out of the sink by default', async function () {
         /** @type {any[]} */
         const written = [];
@@ -4691,22 +4741,35 @@ describe('Where a throw comes from', function () {
         assert.equal(/** @type {any} */ (result).error.lastError.message, 'cmdFlaky failed');
     });
 
-    it('should hand a hook the value of a synchronous Command without a promise', async function () {
-        /** @type {any[]} */
-        const seen = [];
+    it('should hand a hook a promise from op, even for a synchronous Command', async function () {
+        // The declared type and the README's "must await op()" both say op returns a promise. It used to hand
+        // back a synchronous function's value as it was, so a hook written as op().then(...) compiled and then
+        // rejected every run with a synchronous Command, such as the Date.now() the README says to wrap.
         configureEffect({
-            onStep: async (name, type, op) => {
-                const value = op();
-                seen.push(value);
-                return value;
-            }
+            onStep: (name, type, op) => op().then((/** @type {any} */ value) => value)
         });
         const result = await runEffect(
-            Command(function cmdSync() {
+            Command(function cmdNow() {
                 return 42;
             })
         );
         assert.deepEqual(result, Success(42));
-        assert.deepEqual(seen, [42], 'op() returns the value itself for a synchronous function');
+
+        let calls = 0;
+        const thrown = await runEffect(
+            Retry(
+                Command(function cmdSyncThrow() {
+                    calls++;
+                    throw new Error('sync');
+                }),
+                { attempts: 1, delay: 0 }
+            )
+        );
+        assert.equal(
+            /** @type {any} */ (thrown).error.retryExhausted,
+            true,
+            'a synchronous throw is still an I/O fault'
+        );
+        assert.equal(calls, 2);
     });
 });

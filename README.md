@@ -225,7 +225,7 @@ configureEffect(
 );
 ```
 
-By default, successful runs are held in memory and then discarded. `redact` runs before anything enters the trace, including the stored `initialInput` and `context`. `maxEntries` caps the length of a trace and reports the overflow as `dropped`. The sink can write a trace to S3 or a database column as JSON, as long as your Commands return plain data.
+By default, successful runs are held in memory and then discarded. If `keep` or the sink throws, for example because `JSON.stringify` meets a value it cannot serialize, the run keeps its own outcome and the error goes to `onSinkError`, which defaults to `console.error`. `redact` runs before anything enters the trace, including the stored `initialInput` and `context`. `maxEntries` caps the length of a trace and reports the overflow as `dropped`. The sink can write a trace to S3 or a database column as JSON, as long as your Commands return plain data.
 
 **A trace keeps data, not objects.** A result is copied when it is recorded, and copied again each time a replay hands it to the flow, so neither a later step nor a replay can change what the trace says. The copy keeps values but not classes: a money object or a database entity comes back as a plain object without its methods, and a `Buffer` as a plain byte array. An error returned inside a result keeps its message but loses properties such as `code`. Writing the trace as JSON loses more: a `Date` becomes a string, a `Map` becomes `{}`, an error inside a result becomes `{}`, and a `BigInt` makes the sink throw.
 
@@ -641,7 +641,7 @@ The same check catches a missing `return`, a Command's next function returning a
 #### `configureEffect(...configs)`
 
 - `onRun(effect, pipeline, flowName)` wraps the entire workflow; must `await pipeline()`.
-- `onStep(name, type, op)` wraps each Command; must `await op()` and return its result. Returning a value _without_ calling `op()` is how replay works. A throw after `op()` succeeded is a bug in the hook: the run rejects, and `Retry` does not run the Command again. A throw without calling `op()` counts as the Command failing.
+- `onStep(name, type, op)` wraps each Command; must `await op()` and return its result. `op()` returns a promise, even for a synchronous Command. Returning a value _without_ calling `op()` is how replay works. A throw after `op()` succeeded is a bug in the hook: the run rejects, and `Retry` does not run the Command again. A throw without calling `op()` counts as the Command failing.
 - `onStep` also wraps each `Parallel`, with `name` and `type` both `'Parallel'`. Its `op()` runs the branches, so a hook must call it; a hook that returns without calling it makes the run reject with a `TypeError`. Telemetry gets one span per `Parallel`, with the spans of its branches' Commands inside it.
 - `onBeforeCommand(command, context)` fires before each Command; throw to abort. The run returns a `Failure` carrying the thrown error, and `Retry` does not retry it.
 

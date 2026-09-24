@@ -954,20 +954,15 @@ const runEffect =
                 // returned is a bug, and retrying it would repeat work that is already done.
                 let succeeded = false;
                 // The signal reaches the function only inside a Parallel, so a function written to take a
-                // parameter is not handed an argument it never expected anywhere else. A synchronous
-                // function's value comes back as it is rather than in a promise, so a hook calling `op()`
-                // sees what it always saw.
-                const op = () => {
+                // parameter is not handed an argument it never expected anywhere else. `op` always returns a
+                // promise, as the declared type and the README's "must await op()" say, and a synchronous
+                // throw arrives as a rejection. It used to hand back a synchronous function's value as it was,
+                // so a hook written as `op().then(...)` compiled and then rejected every such run.
+                const op = async () => {
                     succeeded = false;
-                    const value = signal ? cmd(signal) : cmd();
-                    if (!value || typeof value.then !== 'function') {
-                        succeeded = true;
-                        return value;
-                    }
-                    return value.then((/** @type {any} */ v) => {
-                        succeeded = true;
-                        return v;
-                    });
+                    const value = await (signal ? cmd(signal) : cmd());
+                    succeeded = true;
+                    return value;
                 };
                 // Three separate regions, because a throw means something different in each. An
                 // interceptor that throws is vetoing the Command, which is the flow being stopped rather
