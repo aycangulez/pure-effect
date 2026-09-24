@@ -1054,6 +1054,51 @@ describe('Recording and replay', function () {
         assert.deepEqual(calls, { read: 0, write: 1 }, 'only the unrecorded step performed I/O');
     });
 
+    it('should give a trace a recorded prefix and a live tail under onMissing: execute', async function () {
+        // The option used to work only with a Resolver: a trace answered a missing step with a
+        // ReplayError of its own before onMissing was consulted, so the README's live tail never ran.
+        const recorded = makeFlow();
+        const { trace } = await recordEffect(recorded.flow, { id: 'FROM_TRACE' });
+        const prefix = { ...trace, trace: trace.trace.slice(0, 1) }; // what a recorder with maxEntries: 1 keeps
+
+        const { flow, calls } = makeFlow();
+        const { result: replayed } = await replayEffect(flow({ id: 'FROM_TRACE' }), prefix, { onMissing: 'execute' });
+        assert.deepEqual(replayed, Success({ written: 'FROM_TRACE' }));
+        assert.deepEqual(calls, { read: 0, write: 1 }, 'only the step the trace does not hold performed I/O');
+    });
+
+    it('should refuse a step a trace does not hold by default, and name the option', async function () {
+        const recorded = makeFlow();
+        const { trace } = await recordEffect(recorded.flow, { id: 'x' });
+        const { flow, calls } = makeFlow();
+        const { result: replayed } = await replayEffect(flow({ id: 'x' }), {
+            ...trace,
+            trace: trace.trace.slice(0, 1)
+        });
+        const error = /** @type {Error} */ (errorOf(replayed));
+        assert.equal(error.name, 'ReplayError');
+        assert.match(error.message, /Trace has no step at path '1' for 'cmdWrite'/);
+        assert.match(error.message, /onMissing: 'execute'/, 'the message says how to allow it');
+        assert.deepEqual(calls, { read: 0, write: 0 });
+    });
+
+    it('should give a trace without paths a live tail under onMissing: execute', async function () {
+        const { flow, calls } = makeFlow();
+        const legacy = { trace: [{ command: 'cmdRead', result: { row: 'FROM_TRACE' } }] };
+        const { result: replayed } = await replayEffect(flow({ id: 'x' }), legacy, { onMissing: 'execute' });
+        assert.deepEqual(replayed, Success({ written: 'FROM_TRACE' }));
+        assert.deepEqual(calls, { read: 0, write: 1 });
+    });
+
+    it('should still raise a TimeParadox under onMissing: execute', async function () {
+        // Only a missing step may run live. A step recorded under another name is a divergence.
+        const { flow, calls } = makeFlow();
+        const diverged = { trace: [{ command: 'cmdSomethingElse', path: '0', result: {} }] };
+        const { result: replayed } = await replayEffect(flow({ id: 'x' }), diverged, { onMissing: 'execute' });
+        assert.equal(/** @type {Error} */ (errorOf(replayed)).name, 'TimeParadox');
+        assert.deepEqual(calls, { read: 0, write: 0 });
+    });
+
     it('should not let a throwing redact fail the run or corrupt the trace', async function () {
         const rec = recorder({
             redact: () => {
@@ -3703,6 +3748,18 @@ describe('Replaying a cancelled Parallel', function () {
         });
         assert.deepEqual(trace.trace.find((e) => e.command === 'Parallel')?.result, { cancelled: false });
         assert.equal(trace.trace.find((e) => e.command === 'a')?.result, '[redacted]');
+    });
+
+    it('should stop a cancelled branch rather than run it live under onMissing: execute', async function () {
+        // The queued branches never started in production, so their first steps are missing. A decision
+        // explains the gap, and running them live would do I/O production never did.
+        const flow = () =>
+            Parallel([chargeBranch(), reserveBranch('r1'), reserveBranch('r2'), reserveBranch('r3')], { limit: 2 });
+        const { trace } = await recordEffect(flow, null);
+        const before = io.calls;
+        const replay = await replayEffect(flow(), trace, { onMissing: 'execute' });
+        assert.equal(io.calls, before, 'a step production never ran is not run live either');
+        assertDeclined(replay);
     });
 });
 

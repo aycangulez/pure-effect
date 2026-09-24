@@ -1317,11 +1317,16 @@ const isDecisionEntry = (entry) =>
  * flow asks for. That is exact for sequential flows and cannot tell `Parallel` branches apart, which
  * is what paths were added to fix.
  *
+ * A step the trace does not hold resolves to `undefined`, "not recorded", exactly as it does from a
+ * Resolver, so `replayEffect` applies `onMissing` to both. This used to throw a `ReplayError` here,
+ * which meant `onMissing: 'execute'` had no effect on a trace. `missing` describes such a step, so the
+ * error `replayEffect` raises under `'throw'` still says what the trace lacks.
+ *
  * @param {TraceLog | TraceEntry[]} traceLog - A reference-format trace, or a bare array of entries
  * @param {Object} [options]
  * @param {(entry: TraceEntry) => void} [options.onEntry] - Observes each entry as it is handed to a step,
  *        which is how `replayEffect` learns which recorded entries the flow never asked for.
- * @returns {Resolver}
+ * @returns {{ resolve: Resolver, missing: (step: ReplayStep) => string }}
  */
 const fromTrace = (traceLog, options = {}) => {
     const { onEntry } = options;
@@ -1351,7 +1356,8 @@ const fromTrace = (traceLog, options = {}) => {
                 const branch = stepPath.startsWith(at) ? /^(\d+)\//.exec(stepPath.slice(at.length)) : null;
                 return branch !== null && (e.result.branch === null || Number(branch[1]) !== e.result.branch);
             });
-        return (step) => {
+        /** @type {Resolver} */
+        const resolve = (step) => {
             const entry = byPath.get(step.path);
             if (step.type === 'Parallel') {
                 // A decision rather than I/O. With none recorded, the Parallel replays under timing, as
@@ -1362,18 +1368,20 @@ const fromTrace = (traceLog, options = {}) => {
                 return undefined;
             }
             if (!entry) {
+                // Production never ran this step, so it is not run live under `onMissing` either.
                 if (stoppedInProduction(step.path)) throw replayCutError(/** @type {string} */ (step.path));
-                throw replayError(`Trace has no step at path '${step.path}' for '${step.name}'.`, {
-                    command: step.name,
-                    path: step.path
-                });
+                return undefined;
             }
             if (entry.command !== step.name) throw timeParadox(step, entry.command);
             return resolveEntry(entry);
         };
+        const missing = (/** @type {ReplayStep} */ step) =>
+            `Trace has no step at path '${step.path}' for '${step.name}'`;
+        return { resolve, missing };
     }
 
-    return (step) => {
+    /** @type {Resolver} */
+    const resolve = (step) => {
         // A trace with no paths predates recorded decisions, so a Parallel replays under timing.
         if (step.type === 'Parallel') return undefined;
         // Positional matching pairs steps by completion order, which is exactly what makes Parallel
@@ -1386,10 +1394,12 @@ const fromTrace = (traceLog, options = {}) => {
             );
         }
         const entry = entries[step.index];
-        if (!entry) throw replayError(`Trace exhausted: no entry #${step.index} for '${step.name}'.`);
+        if (!entry) return undefined;
         if (entry.command !== step.name) throw timeParadox(step, entry.command);
         return resolveEntry(entry);
     };
+    const missing = (/** @type {ReplayStep} */ step) => `Trace exhausted: no entry #${step.index} for '${step.name}'`;
+    return { resolve, missing };
 };
 
 /**
@@ -1491,8 +1501,8 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     const fromResolver = typeof traceOrResolver === 'function';
     /** @type {Set<TraceEntry>} */
     const reached = new Set();
-    const resolve = fromResolver
-        ? traceOrResolver
+    const { resolve, missing } = fromResolver
+        ? { resolve: traceOrResolver, missing: undefined }
         : fromTrace(traceOrResolver, { onEntry: (entry) => void reached.add(entry) });
     let index = 0;
 
@@ -1509,10 +1519,11 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
         if (onResolved) onResolved(step, outcome);
         if (outcome === undefined) {
             if (onMissing !== 'execute') {
+                const what = missing ? missing(step) : `No recorded outcome for '${name}' at step ${step.index}`;
                 throw replayError(
-                    `No recorded outcome for '${name}' at step ${step.index}; refusing to run the real Command. ` +
+                    `${what}; refusing to run the real Command. ` +
                         `Pass onMissing: 'execute' to allow live I/O for unrecorded steps.`,
-                    { command: name, index: step.index }
+                    { command: name, index: step.index, path }
                 );
             }
             return await op();
@@ -1594,7 +1605,7 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
     const replay = await replayEffect(flowFn(initialInput), traceLog, {
         context: context !== undefined ? context : traceLog.context || {},
         onResolved: (step, outcome) => {
-            // Resolving from a trace either answers or throws, so this is never undefined.
+            // A step the trace does not hold is refused or run live by `replayEffect`, not narrated here.
             if (outcome === undefined) return;
             log(
                 'error' in outcome
