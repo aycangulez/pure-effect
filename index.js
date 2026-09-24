@@ -266,17 +266,12 @@ const asEffect = (value, source) => {
 
 /**
  * Connects an Effect to the next function in the pipeline.
- * Handles the branching logic for Success, Failure, Command, Ask, and Retry.
+ * Handles the branching logic for Success, Failure, Command, Ask, Retry, and Parallel.
  *
  * @param {Effect} effect - The current Effect object
  * @param {(value: any) => Effect} fn - The next function to run if the current effect is a Success
+ * @param {any} [initialInput] - The pipeline's starting value, stamped on every node but a Success
  * @returns {Effect} The composed Effect
- */
-/**
- * @param {Effect} effect
- * @param {(value: any) => Effect} fn
- * @param {any} [initialInput]
- * @returns {Effect}
  */
 const chain = (effect, fn, initialInput) => {
     // The outermost pipeline wins. A step can return a sub-pipeline whose nodes already carry that
@@ -291,9 +286,9 @@ const chain = (effect, fn, initialInput) => {
         initialInput !== undefined && e.type !== 'Success' ? { ...e, initialInput } : e;
 
     // A continuation that returned nothing has to be caught before `effect.type` is read. Reading it off
-    // `undefined` throws a bare TypeError, and since every continuation runs inside the interpreter's try
-    // block, that TypeError became a domain Failure: the flow bug took the business-error branch and no
-    // step was named. The `default` arm below never sees it, because the switch itself is what throws.
+    // `undefined` throws a bare TypeError that names no step, and the run would reject with that. This
+    // guard turns it into an EffectTypeError that says what went wrong. The `default` arm below never sees
+    // it, because the switch itself is what throws.
     if (effect == null) return asEffect(effect, 'A continuation');
 
     switch (effect.type) {
@@ -463,7 +458,7 @@ const configureEffect = (...configs) => {
 
 /**
  * @typedef {Object} StepStart
- * @property {string} name - `cmd.name`, or 'anonymous'.
+ * @property {string} name - The Command's identity: `meta.name`, else `cmd.name`, else 'anonymous'.
  * @property {string} type - Always 'Command' today.
  * @property {string} [path] - The Command's position in the Effect tree.
  */
@@ -764,13 +759,26 @@ const runEffect =
                     const results = new Array(eff.effects.length);
                     // Which branch failed on its own account rather than because it was cancelled.
                     const triggered = new Array(eff.effects.length).fill(false);
+                    // A branch that throws (a bug in its code, or a harness error) cancels its siblings
+                    // like a failing one, under `settled` too, since the run is rejecting either way. The
+                    // error is held rather than rethrown at once: rejecting `runBounded` early used to
+                    // leave the siblings running unobserved, and under `limit` it stopped that worker.
+                    /** @type {{ error: unknown }[]} */
+                    const thrown = new Array(eff.effects.length);
                     try {
                         // Still awaits every branch, so no cancelled work is left running unobserved
                         // after the Failure is returned. Cancelled branches settle promptly; a branch
                         // whose in-flight Command ignores the signal is the one case that does not.
                         await runBounded(
                             eff.effects.map((e, i) => async () => {
-                                const result = await execute(e, branchSignal, `${branchPath}${i}/`);
+                                let result;
+                                try {
+                                    result = await execute(e, branchSignal, `${branchPath}${i}/`);
+                                } catch (error) {
+                                    thrown[i] = { error };
+                                    scope?.abort();
+                                    return;
+                                }
                                 results[i] = result;
                                 // Read-then-abort is atomic here, so exactly one branch is the trigger.
                                 if (result.type === 'Failure' && !settled && !branchSignal?.aborted) {
@@ -783,6 +791,9 @@ const runEffect =
                     } finally {
                         if (signal && scope) signal.removeEventListener('abort', relay);
                     }
+                    // The first by array order, matching how a Failure is chosen when several land at once.
+                    const firstThrown = thrown.find(Boolean);
+                    if (firstThrown) throw firstThrown.error;
 
                     // Settled hands the outcomes on as they are. A branch that failed is data here, so
                     // `next` runs and the Parallel itself never fails on a branch's account.
@@ -804,15 +815,29 @@ const runEffect =
                 // The signal reaches the thunk only inside a Parallel, so a thunk written to take a
                 // parameter is not handed an argument it never expected anywhere else.
                 const op = signal ? () => cmd(signal) : cmd;
+                // Three separate regions, because a throw means something different in each. An
+                // interceptor that throws is vetoing the Command, which is the flow being stopped rather
+                // than the I/O failing, so it is an abort and `Retry` passes it on. Only a throw from the
+                // Command's function is an I/O fault. A malformed flow is a bug, not a domain failure,
+                // so in either catch it must not masquerade as one.
                 try {
                     await localCommandInterceptor(eff, context);
-                    const result = await localStepRunner(cmdName, 'Command', op, cmdPath);
-                    eff = eff.next(result);
                 } catch (e) {
-                    // A malformed flow is a bug, not a domain failure, so it must not masquerade as one.
+                    if (e && /** @type {any} */ (e)[harnessError]) throw e;
+                    return Failure(e, initialInput);
+                }
+                let result;
+                try {
+                    result = await localStepRunner(cmdName, 'Command', op, cmdPath);
+                } catch (e) {
                     if (e && /** @type {any} */ (e)[harnessError]) throw e;
                     return asIoFault(Failure(e, initialInput));
                 }
+                // Outside both catches: `next`, and every pure step it reaches up to the next Command, is
+                // code rather than I/O, so a throw there is a bug and rejects the run like a throw from
+                // any other continuation. Inside the catch it was an I/O fault, and `Retry` re-ran a
+                // Command that had succeeded because a TypeError followed it.
+                eff = eff.next(result);
             }
             if (eff && (eff.type === 'Success' || eff.type === 'Failure')) return eff;
             throw effectTypeError(eff, 'The flow');
@@ -870,14 +895,6 @@ const runEffect =
  */
 
 /**
- * Creates a replay error. Thrown from a resolver, it is caught by the interpreter
- * and returned as a Failure, exactly like a rejected Command.
- * @param {string} message - Human-readable reason
- * @param {Object} [props] - Extra fields such as `name`, `index`, `expected`, `actual`
- * @returns {Error}
- */
-
-/**
  * A replay fault: the trace cannot answer the flow, or disagrees with it. It is a harness error while
  * the flow runs, so nothing inside the flow can swallow it, and `replayEffect` turns it back into a
  * `Failure` at its own boundary, where there is no longer anything to swallow it and a caller can
@@ -887,7 +904,9 @@ const runEffect =
 const replayFault = Symbol('pure-effect.replayFault');
 
 /**
- * @param {string} message
+ * Creates a replay error. Thrown from a resolver, it is rethrown by the interpreter rather than folded
+ * into a Failure, and `replayEffect` turns it into one at its own boundary.
+ * @param {string} message - Human-readable reason
  * @param {Object} [props] - Extra fields such as `name`, `index`, `expected`, `actual`
  * @returns {Error}
  */
@@ -1039,7 +1058,7 @@ const recorder = (options = {}) => {
     const redactField = (/** @type {any} */ value, /** @type {string} */ kind) =>
         value === undefined ? undefined : snapshot(safeRedact(value, kind, kind));
 
-    // Built on `observe` so the hook contract lives in one place: `op` always runs, its result is
+    // Built on `observeSteps` so the hook contract lives in one place: `op` always runs, its result is
     // always returned, and its error always propagates.
     const onStep = observeSteps(({ name, path }) => (end) => {
         const durationMs = Math.round(end.durationMs * 1000) / 1000;
@@ -1245,7 +1264,7 @@ const zeroRetryDelays = (eff) => {
  * Replays an Effect tree, feeding recorded results to Commands instead of running them.
  *
  * No side effect can occur by default. The interpreter's only execution point is
- * `await localStepRunner(cmdName, 'Command', eff.cmd)`, which hands the Command thunk
+ * `await localStepRunner(cmdName, 'Command', op, cmdPath)`, which hands the Command thunk
  * to `onStep` as `op` rather than calling it. The `onStep` installed here never invokes
  * `op` unless `onMissing: 'execute'` is set, so `eff.cmd` is never applied and the I/O
  * it describes does not happen.

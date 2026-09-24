@@ -298,7 +298,7 @@ Retry(
 );
 ```
 
-If a later step throws, the `Retry` runs again, which repeats the seat hold and the charge. With two of these nested, a failure in the last step of a booking charges the card nine times.
+If a later Command's function throws, the `Retry` runs again, which repeats the seat hold and the charge. With two of these nested, a failure in the last step of a booking charges the card nine times.
 
 Instead, leave the retried Command with its default `next` and continue in a later pipeline step, outside the `Retry`:
 
@@ -373,7 +373,7 @@ Parallel(work, (outcomes) => Success(outcomes.map((o) => (o.type === 'Success' ?
 
 Logging the outcomes as they are would include the flow's input, which for a registration or login contains credentials.
 
-Bugs in the flow are not collected. An `EffectTypeError`, thrown for a malformed flow, still escapes a settled `Parallel`.
+Bugs in the flow are not collected. An `EffectTypeError`, thrown for a malformed flow, and an error thrown by a `next` function or a pure step both still escape a settled `Parallel`, after the other branches are cancelled.
 
 `limit` caps how many branches run at once; the rest start as others finish. Results and recorded paths stay in array order, so a limit changes only the pacing, and a trace recorded with a limit replays the same without one. A `limit` that is not a positive integer throws a `TypeError`.
 
@@ -475,11 +475,11 @@ Retry(
 
 | what happened | what it is | what `Retry` does | what `onExhausted` sees |
 | --- | --- | --- | --- |
-| a step returned `Failure(...)` | an abort | nothing; it propagates at once, unwrapped | nothing |
+| a step returned `Failure(...)`, or an `onBeforeCommand` hook threw | an abort | nothing; it propagates at once, unwrapped | nothing |
 | a Command's function threw | an I/O fault | retries it | the exhaustion, once the attempts are gone |
-| the flow itself is malformed | a bug | nothing; it is thrown, not returned | nothing |
+| a `next` function or a pure step threw, or the flow is malformed | a bug | nothing; it is thrown, not returned | nothing |
 
-In short, **you can recover from an error your I/O produced, but you cannot catch a `Failure` a step returned.** Only the code that called `runEffect` acts on it. For the same reason, do not throw business errors: a throw tells `Retry` that the I/O broke, and `Retry` will try again.
+In short, **you can recover from an error your I/O produced, but you cannot catch a `Failure` a step returned.** Only the code that called `runEffect` acts on it. For the same reason, do not throw business errors from a Command's function: a throw there tells `Retry` that the I/O broke, and `Retry` will try again. A throw anywhere else in the flow is treated as a bug: `runEffect` rejects with the thrown error instead of returning a `Failure`.
 
 ## TypeScript: Typed Errors and Context
 
@@ -622,13 +622,13 @@ Step 'validateRegistration' returned a plain object. Return Success, Failure, Co
 Retry, or Parallel: a plain value has to be wrapped, as in Success(value).
 ```
 
-The same check catches a missing `return`, a Command's next function returning a plain value, and `runEffect(flow)` where `runEffect(flow(input))` was meant. A Command that throws is still a `Failure`.
+The same check catches a missing `return`, a Command's next function returning a plain value, and `runEffect(flow)` where `runEffect(flow(input))` was meant. A Command whose function throws is still a `Failure`. A throw from a `next` function or a pure step is also a bug, and `runEffect` rejects with the error as thrown.
 
 #### `configureEffect(...configs)`
 
 - `onRun(effect, pipeline, flowName)` wraps the entire workflow; must `await pipeline()`.
 - `onStep(name, type, op)` wraps each Command; must `await op()` and return its result. Returning a value _without_ calling `op()` is how replay works.
-- `onBeforeCommand(command, context)` fires before each Command; throw to abort.
+- `onBeforeCommand(command, context)` fires before each Command; throw to abort. The run returns a `Failure` carrying the thrown error, and `Retry` does not retry it.
 
 It only configures hooks. Retry options are passed to `Retry(effect, options)`, and a `retry` key here throws a `TypeError`.
 

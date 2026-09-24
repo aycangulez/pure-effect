@@ -2,21 +2,23 @@
 
 All notable changes to pure-effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
-## [Unreleased]
+## [0.14.0] - 2026-09-xx
 
 ### Added
 
 - **`Parallel` takes options: `limit` and `settled`.** `Parallel(effects, { limit: 5 })` keeps at most five branches in flight, for a dependency that rate limits; results and recorded paths stay in array order, so a limit changes pacing and nothing else. `Parallel(effects, { settled: true })` runs every branch to completion and hands `next` one outcome per branch, `Success` or `Failure`, in array order, so a batch survives one bad record instead of being cancelled mid-flow by it. An `EffectTypeError` still escapes a settled `Parallel`, because a malformed flow is a bug rather than a branch outcome. The second argument is `next` or the options, whichever it looks like, so existing calls are untouched and neither form needs a placeholder.
-- The `README examples` suite runs every `js` block in `README.md` as one program with its assertions live, and checks that each block parses and imports only names the library exports.
 
 ### Changed
 
-- **`Retry` reacts to an I/O fault, not to an abort.** A `Failure` a step returned now propagates immediately, unretried and unwrapped, and `onExhausted` never sees it; only a Command whose function threw is retried. Previously both were retried, so a guard returning `Failure('email already in use')` cost four database round trips for an answer that could not change and arrived wrapped in `{ retryExhausted, lastError, attempts }`, and `onExhausted` could answer a deliberate abort and report `Success`. The rule this settles: you can recover from an error your I/O produced, and you cannot catch an abort. A thrown value is an I/O fault by definition, which is what the README already asked for when it said a domain outcome is returned rather than thrown.
+- **`Retry` reacts to an I/O fault, not to an abort.** A `Failure` a step returned now propagates immediately, unretried and unwrapped, and `onExhausted` never sees it; only a Command whose function threw is retried. Previously both were retried, so a guard returning `Failure('email already in use')` cost four database round trips for an answer that could not change and arrived wrapped in `{ retryExhausted, lastError, attempts }`, and `onExhausted` could answer a deliberate abort and report `Success`. The rule this settles: you can recover from an error your I/O produced, and you cannot catch an abort. A value thrown by a Command's function is an I/O fault by definition, which is what the README already asked for when it said a domain outcome is returned rather than thrown.
+- **A throw from a Command's `next` or a pure step rejects the run.** It used to become a `Failure`, and inside a `Retry` it was treated as an I/O fault, so a `TypeError` in pure code after a Command that had succeeded ran that Command again. It is now a bug in the flow, as a throw from any other continuation already was, and `runEffect` rejects with the error as thrown. A test or caller that expected a `Failure` for such a throw sees a rejection instead.
+- **A throwing `onBeforeCommand` is an abort.** The run still returns a `Failure` carrying the thrown error, but `Retry` no longer retries it and `onExhausted` never sees it, which is what the documented "throw to abort" meant.
 - **`Retry`'s `attempts` must be a positive integer.** `0` now throws a `TypeError` naming the alternatives rather than meaning run once, because a `Retry` that does not retry is not a `Retry`. It was also the one spelling that turned `onExhausted` into a plain catch at no cost. To handle an outcome without retrying, branch on it as data in the Command's `next`, or isolate a failing branch with `Parallel`'s `settled`.
 
 ### Fixed
 
 - **A replay that cannot answer a step no longer reports `Success`.** A `ReplayError` or `TimeParadox` became a domain `Failure` while the flow was still running, so `Retry`'s `onExhausted` caught it and a settled `Parallel` folded it into its outcomes. A truncated trace, which is what a recorder with `maxEntries` produces, then replayed as a `Success` whose branches each carried the replay error as though production had returned it, and a `Retry` reported a fallback that never ran. Both now reach `replayEffect`'s boundary and come back as the `Failure` it has always returned. An `EffectTypeError` still propagates, since a malformed flow is a bug in the flow rather than a problem with the trace.
+- **A `Parallel` branch that throws cancels its siblings and waits for them.** An error thrown inside a branch, such as an `EffectTypeError`, used to reject the run at once and leave the other branches running with nothing observing them; under `limit` it also stopped that worker. The branch now cancels the others the way a failing branch does, every branch settles, and then the first thrown error by array order is rethrown.
 
 ### Removed
 
@@ -152,6 +154,7 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 
 - Initial release: `Success`, `Failure`, `Command`, `effectPipe`, and `runEffect`.
 
+[0.14.0]: https://github.com/aycangulez/pure-effect/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/aycangulez/pure-effect/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/aycangulez/pure-effect/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/aycangulez/pure-effect/compare/v0.10.0...v0.11.0

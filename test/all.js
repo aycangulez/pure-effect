@@ -3743,3 +3743,146 @@ describe('Failure provenance', function () {
         assert.deepStrictEqual(aborted, Failure('nope', 'in'));
     });
 });
+
+describe('Where a throw comes from', function () {
+    beforeEach(function () {
+        configureEffect();
+    });
+
+    // A throw is an I/O fault only when the Command's function threw it. The interpreter's catch used to
+    // wrap the interceptor and the Command's `next` as well, so a guardrail's veto and a bug in pure
+    // code were both reported as "the I/O broke": `Retry` re-ran a Command that had succeeded because a
+    // TypeError followed it, and retried a guardrail the docs say aborts.
+
+    it('should treat a throwing onBeforeCommand as an abort, not retried', async function () {
+        let calls = 0;
+        let vetoes = 0;
+        configureEffect({
+            onBeforeCommand: async () => {
+                vetoes++;
+                throw new Error('tenant not allowed');
+            }
+        });
+        const result = await runEffect(
+            Retry(
+                Command(function cmdWork() {
+                    calls++;
+                    return 'ok';
+                }),
+                { attempts: 3, delay: 0, onExhausted: () => Success('fallback') }
+            ),
+            {}
+        );
+        assert.equal(result.type, 'Failure');
+        assert.equal(/** @type {any} */ (result).error.message, 'tenant not allowed', 'an abort arrives unwrapped');
+        assert.equal(vetoes, 1, 'the veto is not asked again');
+        assert.equal(calls, 0, 'the vetoed Command never runs');
+    });
+
+    it('should reject when a Command next throws, and not run the I/O again', async function () {
+        let calls = 0;
+        const bug = new TypeError('bug in next');
+        const flow = Retry(
+            Command(
+                function cmdWork() {
+                    calls++;
+                    return 'ok';
+                },
+                () => {
+                    throw bug;
+                }
+            ),
+            { attempts: 2, delay: 0 }
+        );
+        await assert.rejects(runEffect(flow), (e) => e === bug);
+        assert.equal(calls, 1, 'the I/O succeeded, so it is not repeated for a bug that followed it');
+    });
+
+    it('should reject when a pure step after a Command throws', async function () {
+        const flow = effectPipe(
+            () =>
+                Command(function cmdLoad() {
+                    return { items: null };
+                }),
+            (/** @type {any} */ order) => Success(order.items.length)
+        )(null);
+        await assert.rejects(runEffect(flow), TypeError);
+    });
+
+    it('should reject with a non-Error value thrown from next', async function () {
+        const flow = Command(
+            function cmdWork() {
+                return 'ok';
+            },
+            () => {
+                throw 'plain string';
+            }
+        );
+        await assert.rejects(runEffect(flow), (e) => e === 'plain string');
+    });
+
+    it('should cancel the siblings of a branch whose next throws, and wait for them', async function () {
+        const bug = new TypeError('bug in branch');
+        let secondStarted = false;
+        let firstSettled = false;
+        const slow = Command(
+            async function cmdSlow() {
+                await new Promise((r) => setTimeout(r, 30));
+                firstSettled = true;
+                return 'slow';
+            },
+            () =>
+                Command(function cmdAfter() {
+                    secondStarted = true;
+                    return 'after';
+                })
+        );
+        const broken = Command(
+            function cmdBroken() {
+                return 'ok';
+            },
+            () => {
+                throw bug;
+            }
+        );
+        for (const options of [undefined, { settled: true }, { limit: 1 }]) {
+            secondStarted = false;
+            firstSettled = false;
+            await assert.rejects(runEffect(Parallel([broken, slow], options)), (e) => e === bug);
+            assert.equal(firstSettled, options?.limit ? false : true, 'a started sibling is awaited');
+            assert.equal(secondStarted, false, 'a cancelled sibling starts no further Commands');
+        }
+    });
+
+    it('should reject a replay whose next throws rather than returning a Failure', async function () {
+        let broken = false;
+        const flow = () =>
+            Command(
+                function cmdWork() {
+                    return 'ok';
+                },
+                (/** @type {any} */ v) => {
+                    if (broken) throw new TypeError('regression');
+                    return Success(v);
+                }
+            );
+        const { trace } = await recordEffect(flow, null);
+        broken = true;
+        await assert.rejects(replayEffect(flow(), trace), TypeError);
+    });
+
+    it('should still fold a throwing Command function into a retried I/O fault', async function () {
+        let calls = 0;
+        const result = await runEffect(
+            Retry(
+                Command(function cmdFlaky() {
+                    calls++;
+                    throw new Error('socket reset');
+                }),
+                { attempts: 2, delay: 0 }
+            )
+        );
+        assert.equal(/** @type {any} */ (result).error.retryExhausted, true);
+        assert.equal(calls, 3);
+    });
+});
