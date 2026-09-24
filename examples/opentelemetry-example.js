@@ -4,7 +4,7 @@ import { trace, SpanStatusCode } from '@opentelemetry/api';
 import { configureEffect } from '../index.js';
 
 /** @import { Tracer } from "@opentelemetry/api" */
-/** @import { EffectConfiguration, RunWrapper, StepRunner } from "../index.js" */
+/** @import { EffectConfiguration, ParallelDecision, RunWrapper, StepRunner } from "../index.js" */
 
 /**
  * Reference wiring for OpenTelemetry spans
@@ -89,6 +89,8 @@ export function telemetryHooks(options = {}) {
     /**
      * `op` has to be awaited and its result returned. Returning a value without calling `op` is how
      * replay suppresses I/O, so a hook that forgot to call it would silently stop every Command.
+     * A Parallel's `op` returns its decision rather than throwing, even when a branch's own code threw,
+     * so a cancelled one is marked from the decision.
      * @type {StepRunner}
      */
     const onStep = (name, type, op) =>
@@ -96,7 +98,11 @@ export function telemetryHooks(options = {}) {
             span.setAttribute('effect.type', type);
             try {
                 const result = await op();
-                span.setStatus({ code: SpanStatusCode.OK });
+                const decision = type === 'Parallel' ? /** @type {ParallelDecision} */ (result) : undefined;
+                if (decision?.cancelled) {
+                    const by = decision.branch === null ? 'an enclosing Parallel' : `branch ${decision.branch}`;
+                    span.setStatus({ code: SpanStatusCode.ERROR, message: `Cancelled by ${by}` });
+                } else span.setStatus({ code: SpanStatusCode.OK });
                 return result;
             } catch (/** @type any */ err) {
                 span.recordException(err);

@@ -9,7 +9,7 @@
 - Inject context without touching function signatures
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks
-- Zero dependencies, less than 6 KB minified and gzipped
+- Zero dependencies, about 6 KB minified and gzipped
 - Works in JavaScript and TypeScript (full generics, bundled `.d.ts`)
 
 ## Table of Contents
@@ -249,7 +249,9 @@ const findProduct = (productId) =>
 
 app.post('/checkout', async (req, res) => {
     const result = await runEffect(checkoutFlow(req.body.productId), { tenant: req.tenant });
-    res.json(result);
+    if (result.type === 'Success') return res.json(result.value);
+    // A Failure also carries the flow's input, so send the client only an error meant for it.
+    res.status(400).json({ error: typeof result.error === 'string' ? result.error : 'Checkout failed.' });
 });
 ```
 
@@ -398,7 +400,7 @@ const fetchProfileUncancellable = (userId) => Command(() => fetch(`/users/${user
 
 Outside a `Parallel`, the function is called with no arguments. A `Retry` inside a cancelled branch stops retrying.
 
-Which branch failed first and cancelled the others depends on timing, so it is recorded with the trace. A replay of a cancelled `Parallel` returns the same failure production did, and stops each other branch where production stopped it, rather than letting whichever branch the replay reaches first decide. If the branch that cancelled the others no longer fails, or the `Parallel` no longer has that branch, the replay raises a `TimeParadox` naming it.
+Which branch failed first and cancelled the others depends on timing, so it is recorded with the trace. A replay of a cancelled `Parallel` returns the same failure production did, and stops each other branch where production stopped it, rather than letting whichever branch the replay reaches first decide. The same holds when the branch that cancelled the others was a `next` function or a pure step that threw: the replay throws the same error. If the branch that cancelled the others no longer fails, or the `Parallel` no longer has that branch, the replay raises a `TimeParadox` naming it.
 
 ## Composing Larger Flows
 
@@ -666,7 +668,7 @@ The same check catches a missing `return`, a Command's next function returning a
 
 - `onRun(effect, pipeline, flowName)` wraps the entire workflow; must `await pipeline()` and return its result.
 - `onStep(name, type, op, path)` wraps each Command; must `await op()` and return its result. A hook that calls another hook passes `path` on, since a replay matches steps on it. `op()` returns a promise, even for a synchronous Command. Returning a value _without_ calling `op()` is how replay works. A throw after `op()` succeeded is a bug in the hook: the run rejects, and `Retry` does not run the Command again. A throw without calling `op()` counts as the Command failing.
-- `onStep` also wraps each `Parallel`, with `name` and `type` both `'Parallel'`. Its `op()` runs the branches, so a hook must call it; a hook that returns without calling it makes the run reject with a `TypeError`. Telemetry gets one span per `Parallel`, with the spans of its branches' Commands inside it.
+- `onStep` also wraps each `Parallel`, with `name` and `type` both `'Parallel'`. Its `op()` runs the branches, so a hook must call it; a hook that returns without calling it makes the run reject with a `TypeError`. It returns which branch, if any, cancelled the others, such as `{ cancelled: true, branch: 0 }`, and it returns even when a branch threw, since the run rejects only after the hook has returned. Telemetry gets one span per `Parallel`, with the spans of its branches' Commands inside it, marked as an error when the `Parallel` was cancelled.
 - `onBeforeCommand(command, context)` fires before each Command; throw to abort. The run returns a `Failure` carrying the thrown error, and `Retry` does not retry it.
 
 It only configures hooks. Retry options are passed to `Retry(effect, options)`, and a `retry` key here throws a `TypeError`.
@@ -726,22 +728,30 @@ onStep            C.onStep( K.onStep( cmd ) )    K.onStep
 
 #### `recorder(options?)`
 
-Returns `{ onStep, entries, toTrace }`. Pass `onStep` to `runEffect` or `configureEffect` to record what every Command returned. `toTrace(meta)` packages the trace, and it copies the `initialInput` and `context` you give it at the moment you call it. A value that cannot be copied, such as a context holding a logger function, is kept as it is instead, so a Command that writes to it can still change what the trace records. If a Command can change either, for example an ORM save that adds an id to the object it was given, call `toTrace` with them before the run and take `trace` and `dropped` from a second call afterwards, as `recordEffect` does.
+Returns `{ onStep, entries, toTrace }`. Pass `onStep` to `runEffect` or `configureEffect` to record what every Command returned. `toTrace(meta)` packages the trace, and it copies the `initialInput` and `context` you give it at the moment you call it. A value that cannot be copied whole, such as a context holding a logger function, is copied around the parts that cannot be copied, which are kept as they are. If a Command can change either, for example an ORM save that adds an id to the object it was given, call `toTrace` with them before the run and take `trace` and `dropped` from a second call afterwards, as `recordEffect` does.
 
-Each entry is `{ command, path, result, durationMs }`, or `{ command, path, error, durationMs }` when the Command threw, so a trace also shows which step was slow. `path` is the Command's position in the flow, which is what a replay matches on. Each `Parallel` adds one entry, `{ command: 'Parallel', path, result }`, whose result says which branch, if any, cancelled the others: `{ cancelled: false }`, `{ cancelled: true, branch: 0 }`, or `branch: null` when an enclosing `Parallel` cancelled it. `redact` is not called for it, since it holds no data from your flow. Results are copied when recorded, so a later step that changes a returned object does not change the trace, and copied again when a replay hands them to the flow. Values that cannot be copied, such as an object holding a function, are stored by reference instead. The copy keeps data but not classes; see [Recording in Production](#recording-in-production). Recording never changes the outcome of a run: if `redact` throws, the step is recorded as `'[redaction failed]'` and the flow carries on.
+Each entry is `{ command, path, result, durationMs }`, or `{ command, path, threw: true, error, durationMs }` when the Command threw, so a trace also shows which step was slow. `threw` is what marks a step that threw, since a JSON copy of the trace drops `error` when the Command threw `undefined`; an entry with `error` and no `threw`, as older traces have, still counts as one. `path` is the Command's position in the flow, which is what a replay matches on. Each `Parallel` adds one entry, `{ command: 'Parallel', path, result }`, whose result says which branch, if any, cancelled the others: `{ cancelled: false }`, `{ cancelled: true, branch: 0 }`, or `branch: null` when an enclosing `Parallel` cancelled it. `redact` is not called for it, since it holds no data from your flow. Results are copied when recorded, so a later step that changes a returned object does not change the trace, and copied again when a replay hands them to the flow. In a value that cannot be copied whole, such as an object holding a function, the parts that cannot be copied are kept as they are. The copy keeps data but not classes; see [Recording in Production](#recording-in-production). Recording never changes the outcome of a run: if `redact` throws, the step is recorded as `'[redaction failed]'` and the flow carries on.
 
-- `options.redact(value, name, kind)`: Removes sensitive data from a trace. It receives every value the trace stores, and `kind` says which one it is:
+- `options.redact(value, name, kind)`: Removes sensitive data from a trace. It receives every value the trace stores, and `kind` says which one it is. Each value is a copy, so `redact` can delete fields in place or return a new value, and the flow still sees what it was given:
 
 ```js
-recorder({
-    redact: (value, name, kind) => {
-        if (kind === 'initialInput') return { ...value, password: '[redacted]' };
-        if (kind === 'context') return { ...value, authToken: '[redacted]' };
-        if (kind === 'error') return { ...value, attempted: '[redacted]' };
-        return name === 'cmdFetchUser' ? { ...value, email: '[redacted]' } : value;
-    }
-});
+// Masks a field only where there is one, so a lookup that found nothing still records null.
+const mask = (value, field) =>
+    value && typeof value === 'object' && field in value ? { ...value, [field]: '[redacted]' } : value;
+
+const redact = (value, name, kind) => {
+    if (kind === 'initialInput') return mask(value, 'password');
+    if (kind === 'context') return mask(value, 'authToken');
+    if (kind === 'error') return mask(value, 'attempted');
+    return name === 'cmdFetchUser' ? mask(value, 'email') : value;
+};
+recorder({ redact });
+
+assert.equal(redact(null, 'cmdFetchUser', 'result'), null); // still nothing found
+assert.equal(redact('card_declined', 'cmdCharge', 'error'), 'card_declined'); // still a string
 ```
+
+Check the value before replacing a field in it. `{ ...value, email: '[redacted]' }` turns a `null` into an object, so a lookup that found nothing replays as one that found a user, and the flow takes the other branch. It also turns an error thrown as a string into an object holding its letters.
 
 For `'result'` and `'error'`, `name` is the Command's name; for `'initialInput'` and `'context'`, it is the kind. Redacting `initialInput` rarely breaks replay, since Commands are not run; it matters only if a step branches on the removed field. Redacting `context` breaks `Ask` replay if a step reads what you removed.
 

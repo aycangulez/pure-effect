@@ -355,8 +355,8 @@ const effectPipe = (...fns) => {
 
 /**
  * Wraps one Command execution, or one Parallel: `type` is 'Parallel', and `op` runs the branches and
- * returns the Parallel's decision, so a hook must call it. Only a replay passes `op` an argument, the
- * recorded decision. `path` identifies the step's position in the Effect tree rather than its position
+ * returns the Parallel's decision, even when a branch threw, so a hook must call it. Only a replay passes
+ * `op` an argument, the recorded decision. `path` identifies the step's position in the Effect tree rather than its position
  * in completion order, so it is the same in a replay as it was in the recorded run even when `Parallel`
  * branches finish in a different order. Hooks written before `path` existed take three parameters and
  * are unaffected.
@@ -818,6 +818,9 @@ const runEffect =
                     // here, and an annotated literal would be narrowed to `{ cancelled: false }` for good.
                     let decision = /** @type {ParallelDecision} */ ({ cancelled: false });
                     let ran = false;
+                    // What a branch threw, held until this Parallel's step has returned its decision. Cast
+                    // rather than annotated, for the same reason as `decision`.
+                    let branchThrow = /** @type {{ error: unknown } | undefined} */ (undefined);
 
                     /**
                      * Runs the branches and returns the decision: which branch, if any, cancelled the others.
@@ -827,6 +830,9 @@ const runEffect =
                      * runs its recorded steps and is stopped where its recording stops, and the recorded
                      * branch's failure is the result. Replaying the abort at replay speed is what let a
                      * cancelled branch's AbortError win, or let a branch run past where production stopped it.
+                     * A branch that throws gets a decision too, and its throw is rethrown once the step has
+                     * returned it: thrown from here, the step failed and recorded the error where the decision
+                     * belonged, so the replay of a run that crashed raced the branches again.
                      * @param {any} [recorded]
                      * @returns {Promise<ParallelDecision>}
                      */
@@ -865,9 +871,11 @@ const runEffect =
                         // Which branch failed on its own account rather than because it was cancelled.
                         const triggered = new Array(effects.length).fill(false);
                         // A branch that throws (a bug in its code, or a harness error) cancels its siblings
-                        // like a failing one, under `settled` too, since the run is rejecting either way. The
-                        // error is held rather than rethrown at once: rejecting `runBounded` early used to
-                        // leave the siblings running unobserved, and under `limit` it stopped that worker.
+                        // like a failing one, and is the trigger when it is the first to, under `settled` too,
+                        // since the run is rejecting either way. When reproducing, nothing aborts: the recorded
+                        // decision already says where each branch stops. The error is held rather than rethrown
+                        // at once: rejecting `runBounded` early used to leave the siblings running unobserved,
+                        // and under `limit` it stopped that worker.
                         /** @type {{ error: unknown }[]} */
                         const thrown = new Array(effects.length);
                         try {
@@ -881,6 +889,8 @@ const runEffect =
                                         result = await execute(e, branchSignal, `${branchPath}${i}/`);
                                     } catch (error) {
                                         thrown[i] = { error };
+                                        if (reproducing) return;
+                                        if (!branchSignal?.aborted) triggered[i] = true;
                                         scope?.abort();
                                         return;
                                     }
@@ -899,11 +909,11 @@ const runEffect =
                         }
                         // The first by array order. A thrown error is held until every branch has settled, so
                         // position can decide here, where a failing branch is taken in the order it finishes.
-                        const firstThrown = thrown.find(Boolean);
-                        if (firstThrown) throw firstThrown.error;
+                        branchThrow = thrown.find(Boolean);
 
                         if (forced !== undefined && forced.cancelled) {
-                            if (forced.branch !== null && results[forced.branch].type === 'Success') {
+                            // A branch that threw has no result to check, and its throw is what is rethrown.
+                            if (!branchThrow && forced.branch !== null && results[forced.branch].type === 'Success') {
                                 throw replayError(
                                     `Time paradox at path '${branchPath}': the recorded run was cancelled by ` +
                                         `branch ${forced.branch}, which did not fail in this replay.`,
@@ -936,6 +946,8 @@ const runEffect =
                                 'A hook has to call op for a Parallel, because op runs its branches.'
                         );
                     }
+                    // Rethrown here, after the step has returned its decision, so the decision is recorded.
+                    if (branchThrow) throw branchThrow.error;
 
                     // Settled hands the outcomes on as plain Success and Failure nodes. A branch that
                     // failed is data here, so `next` runs and the Parallel itself never fails on a
@@ -1050,7 +1062,9 @@ const runEffect =
  * which is the one question a trace could not answer before: which step was slow.
  * `path` locates the Command in the Effect tree, which is what a replay matches on: it does not move
  * when `Parallel` branches finish in a different order than they did in production.
- * @typedef {{ command: string, path?: string, result?: any, error?: any, durationMs?: number }} TraceEntry
+ * `threw` marks a step that threw. The `error` key alone cannot, since JSON drops it when the value is
+ * `undefined`, as it is for `reject()` with no argument or an error `redact` removed.
+ * @typedef {{ command: string, path?: string, result?: any, threw?: true, error?: any, durationMs?: number }} TraceEntry
  */
 
 /**
@@ -1170,7 +1184,8 @@ const reviveError = (v) => {
  *           each Command's result, each serialized error, and the `initialInput` and `context` stored on the
  *           trace itself. `kind` is `'result'`, `'error'`, `'initialInput'`, or `'context'`, and `name` is the
  *           Command's name for the first two and the kind for the last two. It is the single place PII is kept
- *           out of a trace, so it has to see all four.
+ *           out of a trace, so it has to see all four. It is handed a copy, so changing the value in place
+ *           never reaches the run.
  * @property {number} [maxEntries] - Caps trace length; further steps are counted in `dropped`, not stored.
  * @property {boolean} [stack] - Records stack traces for thrown errors.
  */
@@ -1184,12 +1199,41 @@ const reviveError = (v) => {
  */
 
 /**
- * Snapshots a value on its way into a trace.
+ * Copies what `structuredClone` refused. Arrays and plain objects are rebuilt and everything inside them is
+ * copied in turn, so only the parts that cannot be copied, such as a function or an object holding one, are
+ * kept as they are. A context holding a logger is the usual case, and keeping the whole context by reference
+ * handed `redact` the live object the flow's `Ask` reads.
+ *
+ * @param {any} value
+ * @param {Map<object, any>} seen - Copies made so far, so a cycle is copied as a cycle
+ * @returns {any}
+ */
+const copyAround = (value, seen) => {
+    if (value === null || typeof value !== 'object') return value;
+    if (seen.has(value)) return seen.get(value);
+    const proto = Object.getPrototypeOf(value);
+    if (!Array.isArray(value) && proto !== Object.prototype && proto !== null) {
+        try {
+            return structuredClone(value);
+        } catch {
+            return value;
+        }
+    }
+    /** @type {any} */
+    const copy = Array.isArray(value) ? [] : Object.create(proto);
+    seen.set(value, copy);
+    for (const key of Object.keys(value)) copy[key] = copyAround(value[key], seen);
+    return copy;
+};
+
+/**
+ * Snapshots a value on its way into a trace, and on its way out of one in a replay.
  *
  * Commands return live objects, and a later step that mutates one would otherwise rewrite what the
  * trace says an earlier step returned: `toTrace` runs after the flow finishes, so by serialization
- * time the mutation is already baked in and the trace records a value production never saw. Values
- * that cannot be cloned fall back to the reference.
+ * time the mutation is already baked in and the trace records a value production never saw. The copy
+ * is also what `redact` is handed, so it has to be one the flow never sees. A value that cannot be
+ * cloned whole is copied around the parts that cannot be copied.
  *
  * @param {any} value
  * @returns {any}
@@ -1199,7 +1243,7 @@ const snapshot = (value) => {
     try {
         return typeof structuredClone === 'function' ? structuredClone(value) : JSON.parse(JSON.stringify(value));
     } catch {
-        return value;
+        return copyAround(value, new Map());
     }
 };
 
@@ -1234,29 +1278,32 @@ const recorder = (options = {}) => {
     };
 
     /**
-     * Redacts and snapshots one of the trace's own fields. `undefined` is left alone so a flow with no
+     * Snapshots one of the trace's own fields and redacts the copy. `undefined` is left alone so a flow with no
      * context does not acquire an empty object from a redact function that spreads its argument.
      */
     const redactField = (/** @type {any} */ value, /** @type {string} */ kind) =>
-        value === undefined ? undefined : snapshot(safeRedact(value, kind, kind));
+        value === undefined ? undefined : safeRedact(snapshot(value), kind, kind);
 
     // Built on `observeSteps` so the hook contract lives in one place: `op` always runs, its result is
     // always returned, and its error always propagates.
     const onStep = observeSteps(({ name, type, path }) => (end) => {
         const durationMs = Math.round(end.durationMs * 1000) / 1000;
-        // A Parallel's result is its decision, which holds no user data and has to survive intact for a
-        // replay to reproduce it, so `redact` is not asked about it.
+        // `redact` is handed a copy. Handed the live value, a redact that deleted a field in place removed it
+        // from the result the flow's `next` was about to receive, or the error the caller would get, so
+        // recording changed what production did. A Parallel's result is its decision, which holds no user
+        // data and has to survive intact for a replay to reproduce it, so `redact` is not asked about it.
         const recorded = (/** @type {any} */ result) =>
-            type === 'Parallel' ? result : safeRedact(result, name, 'result');
+            type === 'Parallel' ? snapshot(result) : safeRedact(snapshot(result), name, 'result');
         push(
             'error' in end
                 ? {
                       command: name,
                       path,
-                      error: snapshot(safeRedact(serializeError(end.error, stack), name, 'error')),
+                      threw: true,
+                      error: safeRedact(snapshot(serializeError(end.error, stack)), name, 'error'),
                       durationMs
                   }
-                : { command: name, path, result: snapshot(recorded(end.result)), durationMs }
+                : { command: name, path, result: recorded(end.result), durationMs }
         );
     });
 
@@ -1310,11 +1357,17 @@ const recordEffect = async (flowFn, initialInput, options = {}) => {
  * entry's own object let a replayed step that mutates its result rewrite the trace, so replaying the
  * same trace twice gave two different answers.
  *
+ * An entry with `threw` is an error, and so is one with an `error` key, which is how an entry recorded
+ * before `threw` existed, or written by hand, says it. Relying on the key alone turned a step that threw
+ * `undefined` into one that returned it, once the trace had been through JSON.
+ *
  * @param {TraceEntry} entry
  * @returns {ReplayOutcome}
  */
 const entryToOutcome = (entry) =>
-    'error' in entry ? { error: reviveError(snapshot(entry.error)) } : { result: snapshot(entry.result) };
+    entry.threw === true || 'error' in entry
+        ? { error: reviveError(snapshot(entry.error)) }
+        : { result: snapshot(entry.result) };
 
 /**
  * Whether an entry is a Parallel's recorded decision rather than a Command's result. A Parallel's path

@@ -1196,7 +1196,8 @@ export declare function effectPipe<
 
 /**
  * Wraps one Command execution, or one `Parallel` (`type` `'Parallel'`, `name` `'Parallel'`), whose `op`
- * runs its branches and returns its decision. A hook must call `op` for a `Parallel`; returning without
+ * runs its branches and returns its decision, even when a branch threw: the run rejects with the throw
+ * once the hook has returned. A hook must call `op` for a `Parallel`; returning without
  * calling it is legitimate only for a Command, which is how replay works. Only a replay passes `op` an
  * argument, the recorded decision. `path` is the step's position in the Effect tree rather than its
  * position in completion order, so it is the same in a replay as in the recorded run even when
@@ -1315,6 +1316,12 @@ export type TraceEntry = {
      */
     path?: string;
     result?: unknown;
+    /**
+     * Marks a step that threw. The `error` key alone cannot, since JSON drops it when the value is
+     * `undefined`, as it is for `reject()` with no argument. An entry with an `error` and no `threw`, as
+     * older traces have, still replays as a throw.
+     */
+    threw?: true;
     error?: unknown;
     /** How long the Command took in production, rounded to microseconds. */
     durationMs?: number;
@@ -1336,6 +1343,7 @@ export interface RecorderOptions {
      * `initialInput` and `context` stored on the trace itself. `kind` is `'result'`, `'error'`,
      * `'initialInput'`, or `'context'`; `name` is the Command's name for the first two and the kind for
      * the last two. This is the single place PII is kept out of a trace, which is why it sees all four.
+     * It is handed a copy, so changing the value in place never reaches the run.
      * `value` is `any` rather than `unknown` because a redact nearly always spreads or reads it, as in
      * `{ ...value, password: '[redacted]' }`, and it can be any value a flow handles.
      */

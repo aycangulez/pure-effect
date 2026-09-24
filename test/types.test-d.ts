@@ -550,6 +550,13 @@ expectType<TraceLog>(rec.toTrace({ initialInput: 1, flowName: 'f', context: {}, 
 expectAssignable<EffectConfiguration>({ onStep: rec.onStep });
 expectAssignable<TraceMeta>({ version: 'abc' });
 
+// an entry for a step that threw says so, and one without the flag, as older traces have, is still an entry
+expectType<true | undefined>(rec.entries[0].threw);
+expectAssignable<TraceEntry>({ command: 'cmdCharge', path: '0', threw: true, durationMs: 1 });
+expectAssignable<TraceEntry>({ command: 'cmdCharge', path: '0', error: 'card_declined' });
+// @ts-expect-error `threw` is only ever `true`; a step that returned has no flag
+expectAssignable<TraceEntry>({ command: 'cmdCharge', threw: false });
+
 // redact sees every kind of value a trace holds, and only those kinds
 const redactor: RecorderOptions['redact'] = (value, name, kind) => {
     expectType<any>(value);

@@ -25,7 +25,8 @@ import { configureEffect, recorder, Failure } from '../index.js';
  *           a request: hand the trace to a queue or a background task instead.
  * @property {(value: any, name: string, kind: string) => any} [redact] - Runs before any value enters the
  *           trace, so nothing sensitive reaches the sink even in memory. It sees results, serialized errors,
- *           and the `initialInput` and `context` the trace stores, distinguished by `kind`.
+ *           and the `initialInput` and `context` the trace stores, distinguished by `kind`. It is handed a copy,
+ *           so changing the value in place never reaches the run.
  * @property {number} [maxEntries] - Caps trace length; the overflow count is reported as `dropped`.
  * @property {boolean} [stack] - Records stack traces for thrown errors.
  * @property {(result: SuccessState<any> | FailureState<any>) => boolean} [keep] - Decides which runs
