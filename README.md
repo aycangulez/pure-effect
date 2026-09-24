@@ -27,6 +27,7 @@
 - [Which Errors Are Data](#which-errors-are-data)
 - [TypeScript: Typed Errors and Context](#typescript-typed-errors-and-context)
 - [Why Pure Effect](#why-pure-effect)
+- [Load Tests](#load-tests)
 - [API Reference](#api-reference)
 - [Limitations](#limitations)
 
@@ -225,7 +226,7 @@ configureEffect(
 );
 ```
 
-By default, successful runs are held in memory and then discarded. If `keep` or the sink throws, for example because `JSON.stringify` meets a value it cannot serialize, the run keeps its own outcome and the error goes to `onSinkError`, which defaults to `console.error`. `redact` runs before anything enters the trace, including the stored `initialInput` and `context`. `maxEntries` caps the length of a trace and reports the overflow as `dropped`. The sink can write a trace to S3 or a database column as JSON, as long as your Commands return plain data.
+By default, successful runs are held in memory and then discarded. A run that rejects because your own code threw, such as a `TypeError` after an API changed the shape of its response, is offered to `keep` as a `Failure` carrying the thrown error, so by default its trace is kept, and the run still rejects. Replaying that trace reproduces the throw. If `keep` or the sink throws, for example because `JSON.stringify` meets a value it cannot serialize, the run keeps its own outcome and the error goes to `onSinkError`, which defaults to `console.error`. `redact` runs before anything enters the trace, including the stored `initialInput` and `context`. `maxEntries` caps the length of a trace and reports the overflow as `dropped`. The sink can write a trace to S3 or a database column as JSON, as long as your Commands return plain data.
 
 The example reads the input from the flow itself, where `effectPipe` stores it, so build the outermost flow with `effectPipe`. A flow that starts with a bare `Command`, `Ask`, `Retry`, or `Parallel` records no input, and `timeTravel` would rebuild it from `undefined`. A one-step pipeline is enough, as in `runEffect(effectPipe(loadProfile)(userId))`. The example also takes the context from the run's first Command, so a run that stops before any Command, for example at an `Ask` check, records no context. Such a run did no I/O, so running the flow again with its input and the context from your logs reproduces it.
 
@@ -541,6 +542,26 @@ const result = await runEffect(findProduct('abc'), { tenant: 'acme', requestId: 
 
 **When to use something else:** If your code does little async I/O, or testing and debugging production are not problems for you, plain async/await is simpler.
 
+## Load Tests
+
+Timings are from Node 22 on a MacBook Pro with M4 Pro CPU:
+
+**A web service under load.** A `node:http` service ran signup and checkout flows, where each checkout was a `Parallel` of a retried stock reservation and a card charge, with the OpenTelemetry and recording examples installed.
+
+- 800 requests at once, across 4 tenants: every response and every recorded trace belonged to its own request, and no tenant, user, or request ID crossed between runs.
+- The ~3,500 telemetry spans formed 800 request traces, with every span inside its own request's trace.
+- Side effects matched the outcomes: 320 charges and 320 orders, and 80 declined cards stopped 30 stock reservations that were still running.
+- 300 traces written as JSON files and replayed with `timeTravel` each returned the response production had, including runs where a `Parallel` was cancelled.
+- 30,000 runs in a row kept memory between 10 and 11 MB, and left nothing running afterwards.
+- A background worker that ran 20,000 jobs in one flow, looping through a Command's `next`, finished in under ~400 ms without holding on to memory.
+- Stopping the server with flows still running, or clients hanging up mid-request: every flow that had started finished and was recorded, with no unhandled rejections.
+
+**Batches and parallel work.**
+
+- A settled `Parallel` over 200 records with `limit: 7` never had more than 7 records in flight, and returned the outcomes in order.
+- 5,000 branches in one `Parallel` ran in ~25 ms.
+- Running a Command through `runEffect` costs about 0.2 microseconds, against 0.06 for a plain `await`.
+
 ## API Reference
 
 ### Building blocks
@@ -704,7 +725,7 @@ onStep            C.onStep( K.onStep( cmd ) )    K.onStep
 
 #### `recorder(options?)`
 
-Returns `{ onStep, entries, toTrace }`. Pass `onStep` to `runEffect` or `configureEffect` to record what every Command returned. `toTrace(meta)` packages the trace, and it copies the `initialInput` and `context` you give it at the moment you call it. If a Command can change either, for example an ORM save that adds an id to the object it was given, call `toTrace` with them before the run and take `trace` and `dropped` from a second call afterwards, as `recordEffect` does.
+Returns `{ onStep, entries, toTrace }`. Pass `onStep` to `runEffect` or `configureEffect` to record what every Command returned. `toTrace(meta)` packages the trace, and it copies the `initialInput` and `context` you give it at the moment you call it. A value that cannot be copied, such as a context holding a logger function, is kept as it is instead, so a Command that writes to it can still change what the trace records. If a Command can change either, for example an ORM save that adds an id to the object it was given, call `toTrace` with them before the run and take `trace` and `dropped` from a second call afterwards, as `recordEffect` does.
 
 Each entry is `{ command, path, result, durationMs }`, or `{ command, path, error, durationMs }` when the Command threw, so a trace also shows which step was slow. `path` is the Command's position in the flow, which is what a replay matches on. Each `Parallel` adds one entry, `{ command: 'Parallel', path, result }`, whose result says which branch, if any, cancelled the others: `{ cancelled: false }`, `{ cancelled: true, branch: 0 }`, or `branch: null` when an enclosing `Parallel` cancelled it. `redact` is not called for it, since it holds no data from your flow. Results are copied when recorded, so a later step that changes a returned object does not change the trace, and copied again when a replay hands them to the flow. Values that cannot be copied, such as an object holding a function, are stored by reference instead. The copy keeps data but not classes; see [Recording in Production](#recording-in-production). Recording never changes the outcome of a run: if `redact` throws, the step is recorded as `'[redaction failed]'` and the flow carries on.
 
@@ -735,8 +756,8 @@ Runs a flow for real while recording, returning `{ result, trace }`. Accepts `re
 Replays a flow, feeding recorded results to Commands instead of running them. Returns `{ result, unreached }`: the flow's outcome, and the recorded entries the flow never asked for (empty when every step was reached). A flow that stops early raises no `TimeParadox`, so `unreached` is where that shows up. With a resolver, only `{ result }` is returned, since a resolver cannot list what it holds.
 
 - `traceOrResolver`: a trace (or bare entries array) to replay directly, or a resolver function for traces stored in some other shape. A resolver returns `{ result }`, `{ error }`, or `undefined` if the step is unrecorded. A resolver is also asked about each `Parallel`, with `step.type` set to `'Parallel'`: answering with `{ result }` holding the recorded cancellation replays it as production decided, and anything else replays that `Parallel` by timing, as before. A malformed trace rejects with a `ReplayError`.
-- `options.context`: context for `Ask`; pass the recorded context.
-- `options.onMissing`: `'throw'` (default) fails on an unrecorded step; `'execute'` runs the real Command, giving a recorded prefix with a live tail.
+- `options.context`: context for `Ask`. With a trace it defaults to the context the trace recorded, so pass one only to replay with a different one. A resolver has no recorded context, so pass it one if the flow reads `Ask`.
+- `options.onMissing`: `'throw'` (default) fails on an unrecorded step; `'execute'` runs the real Command, giving a recorded prefix with a live tail. Use it for a trace that was cut short, such as one capped by `maxEntries`. After a flow changes shape, for example when a Command is newly wrapped in `Retry`, its steps sit at new positions, so `'execute'` would run all of them live and leave the recorded ones unused: record the flow again instead.
 - `options.fastRetry` (default `true`): strip `Retry` delays.
 - `options.hooks` (default `false`): run the replay inside the configured hooks, so they see the replayed steps, a configured recorder included. When off, the configured hooks are skipped, so a replay cannot reach a telemetry backend or a trace sink.
 - `options.onResolved(step, outcome)`: observe each replayed step. If it throws, the replay stops there and `replayEffect` rejects with that error; it never changes a step's outcome.

@@ -1498,6 +1498,31 @@ describe('Recording and replay', function () {
         assert.doesNotMatch(out, /never reached/, 'both recorded steps were consumed');
     });
 
+    it('should replay Ask with the context the trace recorded when none is passed', async function () {
+        // The README's replays pass only the flow and the trace. The replay used an empty context, so an Ask gate
+        // went the other way and a run that succeeded replayed as a Failure, with no paradox to flag it.
+        const approve = (/** @type {any} */ input) =>
+            effectPipe(
+                (/** @type {any} */ i) =>
+                    Ask((/** @type {any} */ ctx) => (ctx.role === 'admin' ? Success(i) : Failure('forbidden'))),
+                (/** @type {any} */ i) =>
+                    Command(function cmdApprove() {
+                        return { approved: i.invoiceId };
+                    })
+            )(input);
+        const { result, trace } = await recordEffect(approve, { invoiceId: 'inv_1' }, { context: { role: 'admin' } });
+        const stored = JSON.parse(JSON.stringify(trace));
+
+        const { result: replayed, unreached } = await replayEffect(approve(stored.initialInput), stored);
+        assert.deepEqual(replayed, result);
+        assert.deepEqual(unreached, []);
+
+        const { result: asViewer } = await replayEffect(approve(stored.initialInput), stored, {
+            context: { role: 'viewer' }
+        });
+        assert.deepEqual(asViewer, Failure('forbidden', stored.initialInput), 'a context passed in still wins');
+    });
+
     it('should reject a replay whose onResolved throws, without asking for the step again', async function () {
         // A throw from the observer happened before the replayed result was handed back, so it counted as the
         // Command failing: the Retry asked for an attempt production never made, and the replay came back as a
@@ -2045,6 +2070,40 @@ describe('examples/recording-example.js', function () {
         assert.equal(written[0].flowName, 'writer');
         assert.deepEqual(written[0].context, { flowName: 'writer', tenant: 'acme' }, 'context captured for Ask replay');
         assert.deepEqual(written[0].initialInput, { id: 1 });
+    });
+
+    it('should send the trace of a run whose own code throws, and still reject', async function () {
+        // Since a throw in a pure step rejects the run, the wiring awaited the run outside its try block, and a
+        // rejection skipped keep and the sink. That is the run most worth replaying: the payment provider renamed
+        // a field and the step after the charge crashed, and the recorded charge reproduces it offline.
+        /** @type {any[]} */
+        const written = [];
+        /** @type {any[]} */
+        const offered = [];
+        enableRecording({
+            keep: (/** @type {any} */ result) => (offered.push(result), result.type === 'Failure'),
+            sink: (/** @type {any} */ t) => void written.push(t)
+        });
+        const checkout = (/** @type {any} */ order) =>
+            effectPipe(
+                () =>
+                    Command(function cmdCharge() {
+                        return { id: 'ch_1', amount_cents: order.total * 100 };
+                    }),
+                (/** @type {any} */ charge) => Success(`Charged ${charge.amount.toFixed(2)}`)
+            )(order);
+
+        await assert.rejects(runEffect(checkout({ total: 12 })), TypeError, 'the run still rejects with its own error');
+        assert.equal(offered.length, 1, 'keep is offered the run that crashed');
+        assert.equal(offered[0].type, 'Failure', 'as a Failure');
+        assert.ok(offered[0].error instanceof TypeError);
+        assert.equal(written.length, 1, 'and the default keep sends it to the sink');
+        assert.deepEqual(
+            written[0].trace.map((/** @type {any} */ e) => e.command),
+            ['cmdCharge']
+        );
+        configureEffect();
+        await assert.rejects(replayEffect(checkout(written[0].initialInput), written[0]), TypeError);
     });
 
     it('should send the input and context as the run received them', async function () {

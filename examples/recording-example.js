@@ -1,7 +1,7 @@
 // @ts-check
 
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { configureEffect, recorder } from '../index.js';
+import { configureEffect, recorder, Failure } from '../index.js';
 
 /** @import { EffectConfiguration, RunWrapper, StepRunner, CommandInterceptor, TraceLog, SuccessState, FailureState } from "../index.js" */
 
@@ -30,7 +30,8 @@ import { configureEffect, recorder } from '../index.js';
  * @property {boolean} [stack] - Records stack traces for thrown errors.
  * @property {(result: SuccessState<any> | FailureState<any>) => boolean} [keep] - Decides which runs
  *           reach the sink. Defaults to failures only. Return `true` always to keep everything, or
- *           sample successes with a probability check.
+ *           sample successes with a probability check. A run that rejected, because the flow's own code
+ *           threw, is offered as a Failure carrying the thrown error, so the default keeps it.
  * @property {(error: unknown, flowName?: string) => void} [onSinkError] - Receives an error thrown by `keep`
  *           or `sink`, which would otherwise have replaced the run's outcome. Defaults to `console.error`.
  */
@@ -73,7 +74,17 @@ export function recordingHooks(options = {}) {
         /** @type {RecordingStore} */
         const store = { rec, head, contextCaptured: false };
         return scope.run(store, async () => {
-            const result = await pipeline();
+            // A run rejects when the flow's own code throws, a TypeError after an API changed shape for one, and
+            // that is the run most worth replaying: the trace reproduces the throw offline. So it is offered to
+            // `keep` as a Failure carrying the thrown error, and still rejects once the trace has been handled.
+            /** @type {{ result: SuccessState<any> | FailureState<any> } | { error: unknown }} */
+            let outcome;
+            try {
+                outcome = { result: await pipeline() };
+            } catch (error) {
+                outcome = { error };
+            }
+            const result = 'result' in outcome ? outcome.result : Failure(outcome.error);
             // Recording must never decide a run's outcome, the rule the telemetry example keeps as well. `keep`
             // and `sink` are the application's code, and a sink that serializes the trace throws on a circular
             // value such as an HTTP client's error, so a failure is reported rather than returned.
@@ -89,7 +100,8 @@ export function recordingHooks(options = {}) {
                     // A reporter that throws does not get to change the run either.
                 }
             }
-            return result;
+            if ('error' in outcome) throw outcome.error;
+            return outcome.result;
         });
     };
 

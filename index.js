@@ -1519,7 +1519,7 @@ const zeroRetryDelays = (eff) => {
 // `async` so a malformed trace arrives as a rejection rather than a synchronous throw:
 // the function otherwise returns a promise, and callers should not have to handle both.
 const replayEffect = async (effect, traceOrResolver, options = {}) => {
-    const { context = {}, fastRetry = true, hooks = false, onMissing = 'throw', onResolved } = options;
+    const { fastRetry = true, hooks = false, onMissing = 'throw', onResolved } = options;
     // A trace is data and a Resolver is a function, so nothing else is needed to tell them
     // apart, including the bare entries array that `fromTrace` also accepts.
     const fromResolver = typeof traceOrResolver === 'function';
@@ -1528,6 +1528,11 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     const { resolve, missing } = fromResolver
         ? { resolve: traceOrResolver, missing: undefined }
         : fromTrace(traceOrResolver, { onEntry: (entry) => void reached.add(entry) });
+    // A trace carries the context production ran with, and `Ask` has to see it for the replay to take the
+    // branches production took. An empty context replayed an `Ask` gate the other way, with no paradox to
+    // flag it, whenever a caller passed only the flow and the trace, as the README's replays do.
+    const recorded = fromResolver || Array.isArray(traceOrResolver) ? undefined : traceOrResolver.context;
+    const context = options.context ?? recorded ?? {};
     let index = 0;
     // What `onResolved` threw, if it did. The throw happened before the recorded result was handed back, so it
     // counted as the Command failing and a Retry asked for an attempt production never made. It stops the
