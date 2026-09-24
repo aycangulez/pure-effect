@@ -193,13 +193,14 @@ describe('Core', function () {
                 },
                 (r) => Success(r)
             ),
-            { attempts: 3, delay: 30, backoff: 1 }
+            { attempts: 3, delay: 30, backoff: 2 }
         );
         const result = await runEffect(effect);
         const elapsed = Date.now() - start;
         assert.equal(result.type, 'Success');
-        // 2 retries × 30 ms = at least 55 ms (5 ms margin for timing variance)
-        assert.ok(elapsed >= 55, `Expected ≥ 55 ms elapsed, got ${elapsed} ms`);
+        // Two retries, waiting 30 ms and then 60 ms. A flat delay would total 60 ms, so anything from
+        // 85 ms up (5 ms of margin for timer variance) shows the multiplier was applied.
+        assert.ok(elapsed >= 85, `Expected at least 85 ms elapsed, got ${elapsed} ms`);
     });
 
     it('should work at any step inside effectPipe', async function () {
@@ -294,7 +295,7 @@ describe('Core', function () {
         assert.deepEqual(result.value, { x: 10, y: 20 });
     });
 
-    it('should return Success after runEffect with telemetry disabled', async function () {
+    it('should run the registration flow to Success', async function () {
         const input = { email: 'test-no-telemetry@test.com', password: 'password123' };
         const result = await registerUser(input);
         assert.equal(result.type, 'Success');
@@ -579,10 +580,12 @@ describe('Recording and replay', function () {
     });
 
     it('should replay retry exhaustion as the same structured Failure', async function () {
+        let calls = 0;
         const flow = () =>
             Retry(
                 Command(
                     function cmdFlaky() {
+                        calls++;
                         throw new Error('down');
                     },
                     (/** @type {any} */ v) => Success(v)
@@ -593,8 +596,10 @@ describe('Recording and replay', function () {
         const { result, trace } = await recordEffect(flow, null);
         assert.equal(result.type, 'Failure');
 
+        const during = calls;
         const { result: replayed } = await replayEffect(flow(), trace);
-        assert.equal(replayed.type, 'Failure');
+        assert.equal(calls, during, 'the replay executes nothing');
+        assert.equal(replayed.type, 'Failure', 'a recorded error still replays as an I/O fault, so it is retried');
         const error = /** @type {import('../index.js').RetryExhaustedError<Error>} */ (errorOf(replayed));
         assert.equal(error.retryExhausted, true);
         assert.equal(error.attempts, 2);
@@ -665,8 +670,10 @@ describe('Recording and replay', function () {
         const { result, trace } = await recordEffect(flow, [40, 5]);
         assert.deepEqual(valueOf(result), ['A', 'B']);
 
-        // Replay with the latencies reversed, so completion order is the opposite of the recorded run.
-        const { result: replayed } = await replayEffect(flow([5, 40]), trace);
+        // B finished first in the recording, while a replay asks for the steps in array order, A first:
+        // it runs no Commands, so the latencies play no part. Pairing steps by name in completion order
+        // would hand A the result B recorded.
+        const { result: replayed } = await replayEffect(flow([40, 5]), trace);
         assert.equal(replayed.type, 'Success');
         assert.deepEqual(valueOf(replayed), ['A', 'B'], 'branch results were not swapped');
     });
@@ -3370,10 +3377,19 @@ describe('Parallel limit and settled', function () {
     });
 
     it('should keep paths tied to array position, not to completion order', async function () {
+        // Two slots, and the second branch is the faster, so it finishes first. The trace lists it first,
+        // and its path still names its place in the array.
         const meter = { inFlight: 0, peak: 0 };
         const effects = [tracked(meter, 'a', 20), tracked(meter, 'b', 1)];
-        const { trace } = await recordEffect(() => Parallel(effects, { limit: 1 }), null);
-        assert.deepEqual(trace.trace.map((e) => e.path).sort(), ['0p', '0p0/0', '0p1/0']);
+        const { trace } = await recordEffect(() => Parallel(effects, { limit: 2 }), null);
+        assert.deepEqual(
+            trace.trace.map((e) => [e.path, e.result]),
+            [
+                ['0p1/0', 'b'],
+                ['0p0/0', 'a'],
+                ['0p', { cancelled: false }]
+            ]
+        );
     });
 
     it('should not start queued branches once one has failed', async function () {
@@ -3861,14 +3877,22 @@ describe('Replay errors are harness errors', function () {
             return Promise.resolve(n);
         });
 
-    /** Records a flow, then drops every entry, so the replay can answer nothing. */
-    const emptiedTrace = async (/** @type {() => any} */ flow) => {
-        const { trace } = await recordEffect(flow, null);
-        trace.trace = [];
-        return trace;
-    };
-
     const nameOf = (/** @type {any} */ result) => result.error?.name;
+
+    /**
+     * Records a flow keeping only its first entry, as a recorder with `maxEntries: 1` does, so the trace
+     * still carries paths and every later step is genuinely missing. An emptied trace would not do: with
+     * no entries it cannot be matched by path, and a Parallel step is then refused rather than missing.
+     */
+    const truncatedTrace = async (/** @type {() => any} */ flow) =>
+        (await recordEffect(flow, null, { maxEntries: 1 })).trace;
+
+    /** A replay stopped by a step the truncated trace does not hold. */
+    const assertMissing = (/** @type {any} */ result) => {
+        assert.equal(result.type, 'Failure');
+        assert.equal(nameOf(result), 'ReplayError');
+        assert.match(result.error.message, /Trace has no step at path/);
+    };
 
     it('should report a missing entry in a plain flow', async function () {
         const flow = () =>
@@ -3876,30 +3900,28 @@ describe('Replay errors are harness errors', function () {
                 () => step(1),
                 () => step(2)
             )(null);
-        const { result } = await replayEffect(flow(), await emptiedTrace(flow));
-        assert.equal(result.type, 'Failure');
-        assert.equal(nameOf(result), 'ReplayError');
+        assertMissing((await replayEffect(flow(), await truncatedTrace(flow))).result);
     });
 
     it('should report a missing entry in a plain Parallel', async function () {
         const flow = () => Parallel([step(1), step(2)]);
-        const { result } = await replayEffect(flow(), await emptiedTrace(flow));
-        assert.equal(result.type, 'Failure');
-        assert.equal(nameOf(result), 'ReplayError');
+        assertMissing((await replayEffect(flow(), await truncatedTrace(flow))).result);
     });
 
     it('should not let onExhausted swallow a missing entry', async function () {
-        const flow = () => Retry(step(1), { attempts: 1, delay: 0, onExhausted: () => Success(99) });
-        const { result } = await replayEffect(flow(), await emptiedTrace(flow));
-        assert.equal(result.type, 'Failure', 'a fallback that never ran in production must not be reported');
-        assert.equal(nameOf(result), 'ReplayError');
+        const flaky = () =>
+            Command(function cmdFlaky() {
+                return Promise.reject(new Error('down'));
+            });
+        const flow = () => Retry(flaky(), { attempts: 1, delay: 0, onExhausted: () => Success(99) });
+        const { result } = await replayEffect(flow(), await truncatedTrace(flow));
+        assertMissing(result);
     });
 
     it('should not let a settled Parallel fold a missing entry into its outcomes', async function () {
         const flow = () => Parallel([step(1), step(2)], { settled: true });
-        const { result } = await replayEffect(flow(), await emptiedTrace(flow));
-        assert.equal(result.type, 'Failure', 'branches must not look as though production failed them');
-        assert.equal(nameOf(result), 'ReplayError');
+        const { result } = await replayEffect(flow(), await truncatedTrace(flow));
+        assertMissing(result);
     });
 
     const moving = (/** @type {boolean} */ moved) =>
@@ -4158,23 +4180,6 @@ describe('Failure provenance', function () {
             );
         await runEffect(Retry(inner(), { attempts: 1, delay: 0 }));
         assert.equal(calls, 4, 'two attempts of the inner Retry, twice');
-    });
-
-    it('should still retry a replayed I/O fault', async function () {
-        let calls = 0;
-        const flow = () =>
-            Retry(
-                Command(function cmdFlaky() {
-                    calls++;
-                    return Promise.reject(new Error('down'));
-                }),
-                { attempts: 2, delay: 0 }
-            );
-        const { trace } = await recordEffect(flow, null);
-        const during = calls;
-        const { result } = await replayEffect(flow(), trace);
-        assert.equal(calls, during, 'replay executes nothing');
-        assert.equal(/** @type {any} */ (result).error.retryExhausted, true, 'the recorded error replays as a fault');
     });
 
     it('should hand the caller a plain Failure for an I/O fault', async function () {

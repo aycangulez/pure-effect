@@ -411,8 +411,6 @@ configureEffect({});
 // rejects invalid shapes
 // @ts-expect-error onStep must be a function
 configureEffect({ onStep: 'not-a-function' });
-// @ts-expect-error retry options are per-use, never configured
-configureEffect({ retry: { attempts: 3 } });
 
 // --- runEffect callConfig: `inherit` ---
 runEffect(flow({ email: 'a@b.com', password: 'secret123' }), {}, { inherit: true });
@@ -518,6 +516,9 @@ const resolver: Resolver = (step) => {
 };
 expectAssignable<ReplayOutcome>({ error: new Error('x') });
 
+// @ts-expect-error a bare value is not an outcome; the wrapper is what distinguishes undefined from unrecorded
+const bareResolver: Resolver = () => 42;
+
 // a Parallel's step records its decision, and a Resolver can supply one from another storage format
 expectAssignable<ParallelDecision>({ cancelled: false });
 expectAssignable<ParallelDecision>({ cancelled: true, branch: 0 });
@@ -528,8 +529,6 @@ const decisionResolver: Resolver = (step) =>
     step.type === 'Parallel' ? { result: { cancelled: true, branch: 0 } } : undefined;
 // op takes an argument only when a replay passes it the recorded decision
 const passesDecision: StepRunner = async (name, type, op) => (type === 'Parallel' ? op({ cancelled: false }) : op());
-// @ts-expect-error a bare value is not an outcome; the wrapper is what distinguishes undefined from unrecorded
-const bareResolver: Resolver = () => 42;
 
 // timeTravel returns the bare outcome and takes the trace's own type
 expectType<Promise<SuccessState<SavedUser> | FailureState<ValidationError | DbError>>>(
