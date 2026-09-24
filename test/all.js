@@ -3604,6 +3604,15 @@ describe('Malformed flows', function () {
         assert.match(e.message, /Step 'lookupUser' returned null\./);
     });
 
+    it('should name a type the library does not recognise', async function () {
+        function saveUser(/** @type {any} */ input) {
+            return { type: 'Sucess', value: input }; // a typo for Success
+        }
+        const e = await errorFrom(() => runEffect(effectPipe(/** @type {any} */ (saveUser))({ id: 1 })));
+        assert.equal(e?.name, 'EffectTypeError');
+        assert.match(e.message, /Step 'saveUser' returned an object with an unrecognised type 'Sucess'\./);
+    });
+
     it('should call a missing return what it usually is', async function () {
         function ensureEmailAvailable() {}
         const e = await errorFrom(() => runEffect(effectPipe(/** @type {any} */ (ensureEmailAvailable))({ id: 1 })));

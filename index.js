@@ -191,20 +191,16 @@ const isPositiveInteger = (value) => Number.isInteger(value) && value >= 1;
  * @param {any} value
  * @returns {string}
  */
-const describeValue = (value) =>
-    value === undefined
-        ? 'undefined, which usually means a missing return'
-        : value === null
-          ? 'null'
-          : value instanceof Promise
-            ? 'a Promise, which usually means an async function'
-            : typeof value === 'function'
-              ? 'a function, which usually means a flow was passed without being called with its input'
-              : typeof value === 'object'
-                ? typeof value.type === 'string'
-                    ? `an object with an unrecognised type '${value.type}'`
-                    : 'a plain object'
-                : `the ${typeof value} ${JSON.stringify(value)}`;
+const describeValue = (value) => {
+    if (value === undefined) return 'undefined, which usually means a missing return';
+    if (value === null) return 'null';
+    if (value instanceof Promise) return 'a Promise, which usually means an async function';
+    if (typeof value === 'function')
+        return 'a function, which usually means a flow was passed without being called with its input';
+    if (typeof value !== 'object') return `the ${typeof value} ${JSON.stringify(value)}`;
+    if (typeof value.type === 'string') return `an object with an unrecognised type '${value.type}'`;
+    return 'a plain object';
+};
 
 /**
  * Marks an error as the harness failing rather than the flow: a malformed flow, or a trace that cannot
