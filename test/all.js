@@ -1479,6 +1479,22 @@ describe('Recording and replay', function () {
         assert.match(out, /1 recorded step was never reached: cmdWrite\. The flow diverged/);
     });
 
+    it("should name an unreached step's path when the trace carries paths", async function () {
+        const read = () =>
+            Command(function cmdRead() {
+                return { row: 1 };
+            });
+        const write = () =>
+            Command(function cmdWrite() {
+                return { written: 1 };
+            });
+        const { trace } = await recordEffect((/** @type {any} */ input) => effectPipe(read, write)(input), { id: 1 });
+        /** @type {string[]} */
+        const lines = [];
+        await timeTravel((/** @type {any} */ input) => effectPipe(read)(input), trace, { log: (l) => lines.push(l) });
+        assert.match(lines.join('\n'), /1 recorded step was never reached: cmdWrite \(path '1'\)\. The flow diverged/);
+    });
+
     it('should not warn about unreached steps when a TimeParadox already named the divergence', async function () {
         const a = makeFlow();
         const { trace } = await recordEffect(a.flow, { id: 'x1' });
@@ -1781,6 +1797,20 @@ describe('configureEffect merging', function () {
             ['a', 'checkout'],
             ['b', 'checkout']
         ]);
+    });
+
+    it('should pass onRun an empty flowName when the context names none', async function () {
+        /** @type {any[]} */
+        const seen = [];
+        configureEffect({
+            onRun: async (/** @type {any} */ effect, /** @type {any} */ op, /** @type {any} */ flowName) => {
+                seen.push(flowName);
+                return await op();
+            }
+        });
+        await runEffect(work('ok'));
+        await runEffect(work('ok'), {});
+        assert.deepEqual(seen, ['', '']);
     });
 
     it('should run every onBeforeCommand interceptor in order', async function () {
@@ -2857,6 +2887,7 @@ describe('Recorded values are snapshots', function () {
             ok: true,
             tags: ['a'],
             none: [],
+            handlers: ['a', callback],
             note: null,
             when: new Date('2026-01-01T00:00:00Z'),
             logger,
@@ -2877,11 +2908,13 @@ describe('Recorded values are snapshots', function () {
         assert.equal(result.type, 'Success', 'an uncloneable result must not fail the run');
         row.ok = false;
         row.tags.push('b');
+        row.handlers.push('b');
         row.when.setFullYear(2030);
         options.retries = 2;
         const entry = /** @type {any} */ (rec.entries[0].result);
         assert.equal(entry.ok, true, 'a later mutation does not rewrite the entry');
         assert.deepEqual(entry.tags, ['a'], 'nested values are copied too');
+        assert.deepEqual(entry.handlers, ['a', callback], 'an array holding a function is copied around the function');
         assert.deepEqual(entry.none, []);
         assert.equal(entry.note, null);
         assert.ok(entry.when instanceof Date, 'an object that can be cloned on its own is cloned');
@@ -4632,6 +4665,19 @@ describe('Replaying a cancelled Parallel', function () {
         const notADecision = (/** @type {any} */ s) => ({ result: s.type === 'Parallel' ? 'no decision' : s.name });
         const { result: plain } = await replayEffect(Parallel([step('a', () => 1), step('b', () => 2)]), notADecision);
         assert.deepEqual(plain, Success(['a', 'b']));
+
+        // A branch that is not an index into the Parallel, such as a string from a trace edited by hand or a negative
+        // number, which is never recorded, is not a decision either.
+        for (const branch of ['0', -1]) {
+            const notAnIndex = (/** @type {any} */ s) => ({
+                result: s.type === 'Parallel' ? { cancelled: true, branch } : s.name
+            });
+            const { result: timed } = await replayEffect(
+                Parallel([step('a', () => 1), step('b', () => 2)]),
+                notAnIndex
+            );
+            assert.deepEqual(timed, Success(['a', 'b']), `branch ${JSON.stringify(branch)} is not a decision`);
+        }
     });
 
     it('should not redact a Parallel decision', async function () {
