@@ -4879,7 +4879,8 @@ describe('Where a throw comes from', function () {
         for (const options of [undefined, { settled: true }, { limit: 1 }]) {
             secondStarted = false;
             firstSettled = false;
-            await assert.rejects(runEffect(Parallel([broken, slow], options)), (e) => e === bug);
+            // Cast: the loop makes `settled` a plain boolean, which the declarations refuse on purpose.
+            await assert.rejects(runEffect(Parallel([broken, slow], /** @type {any} */ (options))), (e) => e === bug);
             assert.equal(firstSettled, options?.limit ? false : true, 'a started sibling is awaited');
             assert.equal(secondStarted, false, 'a cancelled sibling starts no further Commands');
         }

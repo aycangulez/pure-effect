@@ -122,7 +122,17 @@ export declare function Failure<E = unknown>(error: E, initialInput?: unknown): 
  *
  * A `meta.name` becomes this Command's identity, which keeps it independent of how `cmd` was declared
  * and immune to minification. Without one the identity falls back to `cmd.name`, then to 'anonymous'.
+ *
+ * The first overload is the default `next`, where the value is the function's result. Without it, a
+ * `Command(fn)` inside a step with an annotated return type had its value type inferred from the
+ * annotation, as `unknown`, rather than from `fn`, and `Retry(Command(fn))` failed to compile there.
  */
+export declare function Command<R, E = unknown, Ctx = unknown>(
+    cmd: (signal?: AbortSignal) => Promise<R> | R,
+    next?: undefined,
+    meta?: CommandMeta
+): CommandState<R, R, E, Ctx>;
+
 export declare function Command<R, T = R, E = unknown, Ctx = unknown>(
     cmd: (signal?: AbortSignal) => Promise<R> | R,
     next?: (result: R) => Effect<T, E, Ctx>,
@@ -160,6 +170,11 @@ export declare function Retry<T, E = unknown, Ctx = unknown>(
  * `next` is optional and defaults to `(values) => Success(values)`, same as `Command`'s default,
  * so a bare `Parallel(effects)` resolves to the ordered array of success values. The second argument
  * is `next` or the options, whichever it looks like.
+ *
+ * The non-settled overloads accept only `settled?: false`. A `settled` known only as a `boolean`, from a
+ * shared options object or a caller's `ParallelOptions`, could be `true` at runtime, and matching it to
+ * an overload that types `next` as the values let a batch compile while it read outcome objects as
+ * values. It matches no overload instead: write `settled: true` inline, or add `as const`.
  */
 export declare function Parallel<T extends readonly unknown[], E = unknown, Ctx = unknown>(
     effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
@@ -174,34 +189,47 @@ export declare function Parallel<T extends readonly unknown[], R, E = unknown, C
 
 export declare function Parallel<T extends readonly unknown[], E = unknown, Ctx = unknown>(
     effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
-    options?: ParallelOptions
+    options?: ParallelOptions & { settled?: false }
 ): ParallelState<[...T], [...T], E, Ctx>;
 
 export declare function Parallel<T extends readonly unknown[], R, E = unknown, Ctx = unknown>(
     effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
     next: (values: [...T]) => Effect<R, E, Ctx>,
-    options?: ParallelOptions
+    options?: ParallelOptions & { settled?: false }
 ): ParallelState<[...T], R, E, Ctx>;
 
 /**
  * Composes steps into a pipeline: each step receives the previous step's success value, and a Failure
  * from any step stops the pipeline. Typed for 1 to 20 steps, the same ceiling as Effect-TS's `pipe`. A
  * pipeline is itself a step, so a longer one nests: `effectPipe(effectPipe(s1, s2), effectPipe(s3, s4))`.
+ * Each step's context type is its own, and the pipeline's is all of them together, so a step that reads
+ * no context does not erase a later step's, and `runEffect` asks for every context a step reads.
  */
-export declare function effectPipe<T0, T1, E1 = unknown, Ctx = unknown>(
-    f1: (value: T0) => Effect<T1, E1, Ctx>
-): (start: T0) => Effect<T1, E1, Ctx>;
+export declare function effectPipe<T0, T1, E1 = unknown, C1 = unknown>(
+    f1: (value: T0) => Effect<T1, E1, C1>
+): (start: T0) => Effect<T1, E1, C1>;
 
-export declare function effectPipe<T0, T1, T2, E1 = unknown, E2 = unknown, Ctx = unknown>(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>
-): (start: T0) => Effect<T2, E1 | E2, Ctx>;
+export declare function effectPipe<T0, T1, T2, E1 = unknown, E2 = unknown, C1 = unknown, C2 = unknown>(
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>
+): (start: T0) => Effect<T2, E1 | E2, C1 & C2>;
 
-export declare function effectPipe<T0, T1, T2, T3, E1 = unknown, E2 = unknown, E3 = unknown, Ctx = unknown>(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>
-): (start: T0) => Effect<T3, E1 | E2 | E3, Ctx>;
+export declare function effectPipe<
+    T0,
+    T1,
+    T2,
+    T3,
+    E1 = unknown,
+    E2 = unknown,
+    E3 = unknown,
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown
+>(
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>
+): (start: T0) => Effect<T3, E1 | E2 | E3, C1 & C2 & C3>;
 
 export declare function effectPipe<
     T0,
@@ -213,13 +241,16 @@ export declare function effectPipe<
     E2 = unknown,
     E3 = unknown,
     E4 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>
-): (start: T0) => Effect<T4, E1 | E2 | E3 | E4, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>
+): (start: T0) => Effect<T4, E1 | E2 | E3 | E4, C1 & C2 & C3 & C4>;
 
 export declare function effectPipe<
     T0,
@@ -233,14 +264,18 @@ export declare function effectPipe<
     E3 = unknown,
     E4 = unknown,
     E5 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>,
-    f5: (value: T4) => Effect<T5, E5, Ctx>
-): (start: T0) => Effect<T5, E1 | E2 | E3 | E4 | E5, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>
+): (start: T0) => Effect<T5, E1 | E2 | E3 | E4 | E5, C1 & C2 & C3 & C4 & C5>;
 
 export declare function effectPipe<
     T0,
@@ -256,15 +291,20 @@ export declare function effectPipe<
     E4 = unknown,
     E5 = unknown,
     E6 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>,
-    f5: (value: T4) => Effect<T5, E5, Ctx>,
-    f6: (value: T5) => Effect<T6, E6, Ctx>
-): (start: T0) => Effect<T6, E1 | E2 | E3 | E4 | E5 | E6, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>
+): (start: T0) => Effect<T6, E1 | E2 | E3 | E4 | E5 | E6, C1 & C2 & C3 & C4 & C5 & C6>;
 
 export declare function effectPipe<
     T0,
@@ -282,16 +322,22 @@ export declare function effectPipe<
     E5 = unknown,
     E6 = unknown,
     E7 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>,
-    f5: (value: T4) => Effect<T5, E5, Ctx>,
-    f6: (value: T5) => Effect<T6, E6, Ctx>,
-    f7: (value: T6) => Effect<T7, E7, Ctx>
-): (start: T0) => Effect<T7, E1 | E2 | E3 | E4 | E5 | E6 | E7, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>
+): (start: T0) => Effect<T7, E1 | E2 | E3 | E4 | E5 | E6 | E7, C1 & C2 & C3 & C4 & C5 & C6 & C7>;
 
 export declare function effectPipe<
     T0,
@@ -311,17 +357,24 @@ export declare function effectPipe<
     E6 = unknown,
     E7 = unknown,
     E8 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>,
-    f5: (value: T4) => Effect<T5, E5, Ctx>,
-    f6: (value: T5) => Effect<T6, E6, Ctx>,
-    f7: (value: T6) => Effect<T7, E7, Ctx>,
-    f8: (value: T7) => Effect<T8, E8, Ctx>
-): (start: T0) => Effect<T8, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>
+): (start: T0) => Effect<T8, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8, C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8>;
 
 export declare function effectPipe<
     T0,
@@ -343,18 +396,26 @@ export declare function effectPipe<
     E7 = unknown,
     E8 = unknown,
     E9 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>,
-    f5: (value: T4) => Effect<T5, E5, Ctx>,
-    f6: (value: T5) => Effect<T6, E6, Ctx>,
-    f7: (value: T6) => Effect<T7, E7, Ctx>,
-    f8: (value: T7) => Effect<T8, E8, Ctx>,
-    f9: (value: T8) => Effect<T9, E9, Ctx>
-): (start: T0) => Effect<T9, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>
+): (start: T0) => Effect<T9, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9, C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9>;
 
 export declare function effectPipe<
     T0,
@@ -378,19 +439,30 @@ export declare function effectPipe<
     E8 = unknown,
     E9 = unknown,
     E10 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>,
-    f5: (value: T4) => Effect<T5, E5, Ctx>,
-    f6: (value: T5) => Effect<T6, E6, Ctx>,
-    f7: (value: T6) => Effect<T7, E7, Ctx>,
-    f8: (value: T7) => Effect<T8, E8, Ctx>,
-    f9: (value: T8) => Effect<T9, E9, Ctx>,
-    f10: (value: T9) => Effect<T10, E10, Ctx>
-): (start: T0) => Effect<T10, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>
+): (
+    start: T0
+) => Effect<T10, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10, C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10>;
 
 export declare function effectPipe<
     T0,
@@ -416,20 +488,36 @@ export declare function effectPipe<
     E9 = unknown,
     E10 = unknown,
     E11 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>,
-    f5: (value: T4) => Effect<T5, E5, Ctx>,
-    f6: (value: T5) => Effect<T6, E6, Ctx>,
-    f7: (value: T6) => Effect<T7, E7, Ctx>,
-    f8: (value: T7) => Effect<T8, E8, Ctx>,
-    f9: (value: T8) => Effect<T9, E9, Ctx>,
-    f10: (value: T9) => Effect<T10, E10, Ctx>,
-    f11: (value: T10) => Effect<T11, E11, Ctx>
-): (start: T0) => Effect<T11, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>
+): (
+    start: T0
+) => Effect<
+    T11,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11
+>;
 
 export declare function effectPipe<
     T0,
@@ -457,21 +545,38 @@ export declare function effectPipe<
     E10 = unknown,
     E11 = unknown,
     E12 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>,
-    f5: (value: T4) => Effect<T5, E5, Ctx>,
-    f6: (value: T5) => Effect<T6, E6, Ctx>,
-    f7: (value: T6) => Effect<T7, E7, Ctx>,
-    f8: (value: T7) => Effect<T8, E8, Ctx>,
-    f9: (value: T8) => Effect<T9, E9, Ctx>,
-    f10: (value: T9) => Effect<T10, E10, Ctx>,
-    f11: (value: T10) => Effect<T11, E11, Ctx>,
-    f12: (value: T11) => Effect<T12, E12, Ctx>
-): (start: T0) => Effect<T12, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>
+): (
+    start: T0
+) => Effect<
+    T12,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12
+>;
 
 export declare function effectPipe<
     T0,
@@ -501,22 +606,40 @@ export declare function effectPipe<
     E11 = unknown,
     E12 = unknown,
     E13 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown,
+    C13 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>,
-    f5: (value: T4) => Effect<T5, E5, Ctx>,
-    f6: (value: T5) => Effect<T6, E6, Ctx>,
-    f7: (value: T6) => Effect<T7, E7, Ctx>,
-    f8: (value: T7) => Effect<T8, E8, Ctx>,
-    f9: (value: T8) => Effect<T9, E9, Ctx>,
-    f10: (value: T9) => Effect<T10, E10, Ctx>,
-    f11: (value: T10) => Effect<T11, E11, Ctx>,
-    f12: (value: T11) => Effect<T12, E12, Ctx>,
-    f13: (value: T12) => Effect<T13, E13, Ctx>
-): (start: T0) => Effect<T13, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>,
+    f13: (value: T12) => Effect<T13, E13, C13>
+): (
+    start: T0
+) => Effect<
+    T13,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13
+>;
 
 export declare function effectPipe<
     T0,
@@ -548,23 +671,42 @@ export declare function effectPipe<
     E12 = unknown,
     E13 = unknown,
     E14 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown,
+    C13 = unknown,
+    C14 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>,
-    f5: (value: T4) => Effect<T5, E5, Ctx>,
-    f6: (value: T5) => Effect<T6, E6, Ctx>,
-    f7: (value: T6) => Effect<T7, E7, Ctx>,
-    f8: (value: T7) => Effect<T8, E8, Ctx>,
-    f9: (value: T8) => Effect<T9, E9, Ctx>,
-    f10: (value: T9) => Effect<T10, E10, Ctx>,
-    f11: (value: T10) => Effect<T11, E11, Ctx>,
-    f12: (value: T11) => Effect<T12, E12, Ctx>,
-    f13: (value: T12) => Effect<T13, E13, Ctx>,
-    f14: (value: T13) => Effect<T14, E14, Ctx>
-): (start: T0) => Effect<T14, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>,
+    f13: (value: T12) => Effect<T13, E13, C13>,
+    f14: (value: T13) => Effect<T14, E14, C14>
+): (
+    start: T0
+) => Effect<
+    T14,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14
+>;
 
 export declare function effectPipe<
     T0,
@@ -598,24 +740,44 @@ export declare function effectPipe<
     E13 = unknown,
     E14 = unknown,
     E15 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown,
+    C13 = unknown,
+    C14 = unknown,
+    C15 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>,
-    f5: (value: T4) => Effect<T5, E5, Ctx>,
-    f6: (value: T5) => Effect<T6, E6, Ctx>,
-    f7: (value: T6) => Effect<T7, E7, Ctx>,
-    f8: (value: T7) => Effect<T8, E8, Ctx>,
-    f9: (value: T8) => Effect<T9, E9, Ctx>,
-    f10: (value: T9) => Effect<T10, E10, Ctx>,
-    f11: (value: T10) => Effect<T11, E11, Ctx>,
-    f12: (value: T11) => Effect<T12, E12, Ctx>,
-    f13: (value: T12) => Effect<T13, E13, Ctx>,
-    f14: (value: T13) => Effect<T14, E14, Ctx>,
-    f15: (value: T14) => Effect<T15, E15, Ctx>
-): (start: T0) => Effect<T15, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>,
+    f13: (value: T12) => Effect<T13, E13, C13>,
+    f14: (value: T13) => Effect<T14, E14, C14>,
+    f15: (value: T14) => Effect<T15, E15, C15>
+): (
+    start: T0
+) => Effect<
+    T15,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15
+>;
 
 export declare function effectPipe<
     T0,
@@ -651,27 +813,46 @@ export declare function effectPipe<
     E14 = unknown,
     E15 = unknown,
     E16 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown,
+    C13 = unknown,
+    C14 = unknown,
+    C15 = unknown,
+    C16 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>,
-    f5: (value: T4) => Effect<T5, E5, Ctx>,
-    f6: (value: T5) => Effect<T6, E6, Ctx>,
-    f7: (value: T6) => Effect<T7, E7, Ctx>,
-    f8: (value: T7) => Effect<T8, E8, Ctx>,
-    f9: (value: T8) => Effect<T9, E9, Ctx>,
-    f10: (value: T9) => Effect<T10, E10, Ctx>,
-    f11: (value: T10) => Effect<T11, E11, Ctx>,
-    f12: (value: T11) => Effect<T12, E12, Ctx>,
-    f13: (value: T12) => Effect<T13, E13, Ctx>,
-    f14: (value: T13) => Effect<T14, E14, Ctx>,
-    f15: (value: T14) => Effect<T15, E15, Ctx>,
-    f16: (value: T15) => Effect<T16, E16, Ctx>
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>,
+    f13: (value: T12) => Effect<T13, E13, C13>,
+    f14: (value: T13) => Effect<T14, E14, C14>,
+    f15: (value: T14) => Effect<T15, E15, C15>,
+    f16: (value: T15) => Effect<T16, E16, C16>
 ): (
     start: T0
-) => Effect<T16, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16, Ctx>;
+) => Effect<
+    T16,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16
+>;
 
 export declare function effectPipe<
     T0,
@@ -709,28 +890,48 @@ export declare function effectPipe<
     E15 = unknown,
     E16 = unknown,
     E17 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown,
+    C13 = unknown,
+    C14 = unknown,
+    C15 = unknown,
+    C16 = unknown,
+    C17 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>,
-    f5: (value: T4) => Effect<T5, E5, Ctx>,
-    f6: (value: T5) => Effect<T6, E6, Ctx>,
-    f7: (value: T6) => Effect<T7, E7, Ctx>,
-    f8: (value: T7) => Effect<T8, E8, Ctx>,
-    f9: (value: T8) => Effect<T9, E9, Ctx>,
-    f10: (value: T9) => Effect<T10, E10, Ctx>,
-    f11: (value: T10) => Effect<T11, E11, Ctx>,
-    f12: (value: T11) => Effect<T12, E12, Ctx>,
-    f13: (value: T12) => Effect<T13, E13, Ctx>,
-    f14: (value: T13) => Effect<T14, E14, Ctx>,
-    f15: (value: T14) => Effect<T15, E15, Ctx>,
-    f16: (value: T15) => Effect<T16, E16, Ctx>,
-    f17: (value: T16) => Effect<T17, E17, Ctx>
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>,
+    f13: (value: T12) => Effect<T13, E13, C13>,
+    f14: (value: T13) => Effect<T14, E14, C14>,
+    f15: (value: T14) => Effect<T15, E15, C15>,
+    f16: (value: T15) => Effect<T16, E16, C16>,
+    f17: (value: T16) => Effect<T17, E17, C17>
 ): (
     start: T0
-) => Effect<T17, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17, Ctx>;
+) => Effect<
+    T17,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16 & C17
+>;
 
 export declare function effectPipe<
     T0,
@@ -770,29 +971,50 @@ export declare function effectPipe<
     E16 = unknown,
     E17 = unknown,
     E18 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown,
+    C13 = unknown,
+    C14 = unknown,
+    C15 = unknown,
+    C16 = unknown,
+    C17 = unknown,
+    C18 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>,
-    f5: (value: T4) => Effect<T5, E5, Ctx>,
-    f6: (value: T5) => Effect<T6, E6, Ctx>,
-    f7: (value: T6) => Effect<T7, E7, Ctx>,
-    f8: (value: T7) => Effect<T8, E8, Ctx>,
-    f9: (value: T8) => Effect<T9, E9, Ctx>,
-    f10: (value: T9) => Effect<T10, E10, Ctx>,
-    f11: (value: T10) => Effect<T11, E11, Ctx>,
-    f12: (value: T11) => Effect<T12, E12, Ctx>,
-    f13: (value: T12) => Effect<T13, E13, Ctx>,
-    f14: (value: T13) => Effect<T14, E14, Ctx>,
-    f15: (value: T14) => Effect<T15, E15, Ctx>,
-    f16: (value: T15) => Effect<T16, E16, Ctx>,
-    f17: (value: T16) => Effect<T17, E17, Ctx>,
-    f18: (value: T17) => Effect<T18, E18, Ctx>
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>,
+    f13: (value: T12) => Effect<T13, E13, C13>,
+    f14: (value: T13) => Effect<T14, E14, C14>,
+    f15: (value: T14) => Effect<T15, E15, C15>,
+    f16: (value: T15) => Effect<T16, E16, C16>,
+    f17: (value: T16) => Effect<T17, E17, C17>,
+    f18: (value: T17) => Effect<T18, E18, C18>
 ): (
     start: T0
-) => Effect<T18, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17 | E18, Ctx>;
+) => Effect<
+    T18,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17 | E18,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16 & C17 & C18
+>;
 
 export declare function effectPipe<
     T0,
@@ -834,33 +1056,51 @@ export declare function effectPipe<
     E17 = unknown,
     E18 = unknown,
     E19 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown,
+    C13 = unknown,
+    C14 = unknown,
+    C15 = unknown,
+    C16 = unknown,
+    C17 = unknown,
+    C18 = unknown,
+    C19 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>,
-    f5: (value: T4) => Effect<T5, E5, Ctx>,
-    f6: (value: T5) => Effect<T6, E6, Ctx>,
-    f7: (value: T6) => Effect<T7, E7, Ctx>,
-    f8: (value: T7) => Effect<T8, E8, Ctx>,
-    f9: (value: T8) => Effect<T9, E9, Ctx>,
-    f10: (value: T9) => Effect<T10, E10, Ctx>,
-    f11: (value: T10) => Effect<T11, E11, Ctx>,
-    f12: (value: T11) => Effect<T12, E12, Ctx>,
-    f13: (value: T12) => Effect<T13, E13, Ctx>,
-    f14: (value: T13) => Effect<T14, E14, Ctx>,
-    f15: (value: T14) => Effect<T15, E15, Ctx>,
-    f16: (value: T15) => Effect<T16, E16, Ctx>,
-    f17: (value: T16) => Effect<T17, E17, Ctx>,
-    f18: (value: T17) => Effect<T18, E18, Ctx>,
-    f19: (value: T18) => Effect<T19, E19, Ctx>
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>,
+    f13: (value: T12) => Effect<T13, E13, C13>,
+    f14: (value: T13) => Effect<T14, E14, C14>,
+    f15: (value: T14) => Effect<T15, E15, C15>,
+    f16: (value: T15) => Effect<T16, E16, C16>,
+    f17: (value: T16) => Effect<T17, E17, C17>,
+    f18: (value: T17) => Effect<T18, E18, C18>,
+    f19: (value: T18) => Effect<T19, E19, C19>
 ): (
     start: T0
 ) => Effect<
     T19,
     E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17 | E18 | E19,
-    Ctx
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16 & C17 & C18 & C19
 >;
 
 export declare function effectPipe<
@@ -905,34 +1145,53 @@ export declare function effectPipe<
     E18 = unknown,
     E19 = unknown,
     E20 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown,
+    C13 = unknown,
+    C14 = unknown,
+    C15 = unknown,
+    C16 = unknown,
+    C17 = unknown,
+    C18 = unknown,
+    C19 = unknown,
+    C20 = unknown
 >(
-    f1: (value: T0) => Effect<T1, E1, Ctx>,
-    f2: (value: T1) => Effect<T2, E2, Ctx>,
-    f3: (value: T2) => Effect<T3, E3, Ctx>,
-    f4: (value: T3) => Effect<T4, E4, Ctx>,
-    f5: (value: T4) => Effect<T5, E5, Ctx>,
-    f6: (value: T5) => Effect<T6, E6, Ctx>,
-    f7: (value: T6) => Effect<T7, E7, Ctx>,
-    f8: (value: T7) => Effect<T8, E8, Ctx>,
-    f9: (value: T8) => Effect<T9, E9, Ctx>,
-    f10: (value: T9) => Effect<T10, E10, Ctx>,
-    f11: (value: T10) => Effect<T11, E11, Ctx>,
-    f12: (value: T11) => Effect<T12, E12, Ctx>,
-    f13: (value: T12) => Effect<T13, E13, Ctx>,
-    f14: (value: T13) => Effect<T14, E14, Ctx>,
-    f15: (value: T14) => Effect<T15, E15, Ctx>,
-    f16: (value: T15) => Effect<T16, E16, Ctx>,
-    f17: (value: T16) => Effect<T17, E17, Ctx>,
-    f18: (value: T17) => Effect<T18, E18, Ctx>,
-    f19: (value: T18) => Effect<T19, E19, Ctx>,
-    f20: (value: T19) => Effect<T20, E20, Ctx>
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>,
+    f13: (value: T12) => Effect<T13, E13, C13>,
+    f14: (value: T13) => Effect<T14, E14, C14>,
+    f15: (value: T14) => Effect<T15, E15, C15>,
+    f16: (value: T15) => Effect<T16, E16, C16>,
+    f17: (value: T16) => Effect<T17, E17, C17>,
+    f18: (value: T17) => Effect<T18, E18, C18>,
+    f19: (value: T18) => Effect<T19, E19, C19>,
+    f20: (value: T19) => Effect<T20, E20, C20>
 ): (
     start: T0
 ) => Effect<
     T20,
     E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17 | E18 | E19 | E20,
-    Ctx
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16 & C17 & C18 & C19 & C20
 >;
 
 /**
@@ -941,13 +1200,15 @@ export declare function effectPipe<
  * calling it is legitimate only for a Command, which is how replay works. Only a replay passes `op` an
  * argument, the recorded decision. `path` is the step's position in the Effect tree rather than its
  * position in completion order, so it is the same in a replay as in the recorded run even when
- * `Parallel` branches finish in a different order. Hooks that take three parameters are unaffected.
+ * `Parallel` branches finish in a different order. Hooks that take three parameters are unaffected. The
+ * interpreter always passes `path`, so it is declared as present, and a wrapper that calls another
+ * `StepRunner` has to pass it on: a trace recorded without paths cannot replay a `Parallel`.
  */
 export type StepRunner = (
     name: string,
     type: string,
     op: (decision?: ParallelDecision) => Promise<unknown>,
-    path?: string
+    path: string
 ) => Promise<unknown>;
 
 /**
@@ -957,13 +1218,22 @@ export type StepRunner = (
  */
 export type ParallelDecision = { cancelled: false } | { cancelled: true; branch: number | null };
 
+/** `flowName` is `context.flowName`, or `''` when the context has none; the interpreter always passes it. */
 export type RunWrapper = (
     effect: Effect<unknown>,
     op: () => Promise<SuccessState<unknown> | FailureState<unknown>>,
-    flowName?: string
+    flowName: string
 ) => Promise<SuccessState<unknown> | FailureState<unknown>>;
 
-export type CommandInterceptor = (command: CommandState<unknown, unknown>, context?: any) => Promise<void>;
+/**
+ * Runs before each Command; throw to abort. The interpreter awaits whatever it returns, so it need not be
+ * async. A union of two function types rather than one returning `Promise<void> | void`: in a JavaScript
+ * file, a JSDoc `@type` on an async function is its declared signature, and an async function's declared
+ * return type has to be a `Promise`, so the single signature broke every JSDoc-annotated async interceptor.
+ */
+export type CommandInterceptor =
+    | ((command: CommandState<unknown, unknown>, context?: any) => Promise<void>)
+    | ((command: CommandState<unknown, unknown>, context?: any) => void);
 
 export interface EffectConfiguration {
     onStep?: StepRunner;
@@ -990,10 +1260,15 @@ export declare function configureEffect(...configs: (EffectConfiguration | undef
  */
 export type CallConfiguration = EffectConfiguration & { inherit?: boolean };
 
+/**
+ * A flow whose context type is not `unknown` reads one through `Ask`, so the context is required for it;
+ * the runtime would otherwise hand `Ask` an empty object.
+ */
 export declare function runEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
-    context?: Ctx,
-    callConfig?: CallConfiguration
+    ...args: unknown extends Ctx
+        ? [context?: Ctx, callConfig?: CallConfiguration]
+        : [context: Ctx, callConfig?: CallConfiguration]
 ): Promise<SuccessState<T> | FailureState<E>>;
 
 export type ReplayStep = {
@@ -1013,9 +1288,10 @@ export type ReplayStep = {
     /**
      * The Command's position in the Effect tree, stable across runs: steps are numbered within a
      * subtree, and each `Parallel` branch and `Retry` attempt opens its own prefix. This is what a
-     * replay matches on, and what a Resolver should key off. Absent on traces recorded before paths.
+     * replay matches on, and what a Resolver should key off. Every step has one; it is a recorded
+     * `TraceEntry` that can lack a path, when it was written by hand or recorded before paths existed.
      */
-    path?: string;
+    path: string;
 };
 
 /**
@@ -1060,8 +1336,10 @@ export interface RecorderOptions {
      * `initialInput` and `context` stored on the trace itself. `kind` is `'result'`, `'error'`,
      * `'initialInput'`, or `'context'`; `name` is the Command's name for the first two and the kind for
      * the last two. This is the single place PII is kept out of a trace, which is why it sees all four.
+     * `value` is `any` rather than `unknown` because a redact nearly always spreads or reads it, as in
+     * `{ ...value, password: '[redacted]' }`, and it can be any value a flow handles.
      */
-    redact?: (value: unknown, name: string, kind: 'result' | 'error' | 'initialInput' | 'context') => unknown;
+    redact?: (value: any, name: string, kind: 'result' | 'error' | 'initialInput' | 'context') => unknown;
     /** Cap trace length; further steps are counted in `dropped`, not stored. */
     maxEntries?: number;
     /** Record stack traces for thrown errors. Off by default. */
@@ -1072,7 +1350,8 @@ export interface TraceMeta {
     initialInput?: unknown;
     flowName?: string;
     context?: unknown;
-    version?: string;
+    /** Accepts `undefined`, so `process.env.BUILD_ID` passes under `exactOptionalPropertyTypes`. */
+    version?: string | undefined;
 }
 
 export declare function recorder(options?: RecorderOptions): {
@@ -1081,14 +1360,24 @@ export declare function recorder(options?: RecorderOptions): {
     toTrace(meta?: TraceMeta): TraceLog;
 };
 
-export declare function recordEffect<T, E = unknown, Ctx = unknown>(
-    flowFn: (input: any) => Effect<T, E, Ctx>,
-    initialInput: any,
-    options?: RecorderOptions & { context?: Ctx; version?: string }
+/** `recordEffect`'s options: recorder options, plus the context the run gets and a build id. */
+export type RecordOptions<Ctx = unknown> = RecorderOptions & { context?: Ctx; version?: string | undefined };
+
+/**
+ * The input is checked against what the flow takes. A flow whose context type is not `unknown` reads
+ * one through `Ask`, so recording it requires `options.context`.
+ */
+export declare function recordEffect<I, T, E = unknown, Ctx = unknown>(
+    flowFn: (input: I) => Effect<T, E, Ctx>,
+    initialInput: I,
+    ...options: unknown extends Ctx ? [options?: RecordOptions<Ctx>] : [options: RecordOptions<Ctx> & { context: Ctx }]
 ): Promise<{ result: SuccessState<T> | FailureState<E>; trace: TraceLog }>;
 
 export interface ReplayOptions<Ctx = unknown> {
-    /** Context for `Ask`. Pass the recorded context to reproduce a run faithfully. */
+    /**
+     * Context for `Ask`. With a trace it defaults to the context the trace recorded, so pass one only to
+     * replay with a different one. A Resolver has no recorded context, so pass it one if the flow reads `Ask`.
+     */
     context?: Ctx;
     /** Strip `Retry` delays so a replay does not wait out production backoff (default `true`). */
     fastRetry?: boolean;
@@ -1145,5 +1434,5 @@ export declare function replayEffect<T, E = unknown, Ctx = unknown>(
 export declare function timeTravel<T, E = unknown, Ctx = unknown>(
     flowFn: (input: any) => Effect<T, E, Ctx>,
     traceLog: TraceLog,
-    options?: { log?: (...args: any[]) => void; context?: Ctx; version?: string }
+    options?: { log?: (...args: any[]) => void; context?: Ctx; version?: string | undefined }
 ): Promise<SuccessState<T> | FailureState<E>>;

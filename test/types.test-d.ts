@@ -22,6 +22,7 @@ import type {
     RetryState,
     ParallelState,
     ParallelOutcomes,
+    ParallelOptions,
     ParallelDecision,
     RetryExhaustedError,
     Effect,
@@ -197,6 +198,14 @@ const recoveredResult = await runEffect(recovered);
 if (recoveredResult.type === 'Failure') {
     expectType<'flaky' | 'cache_miss'>(recoveredResult.error);
 }
+
+// A step annotated with its return type can return a retried Command that keeps its default next, which is the
+// shape the README recommends. Command's value type was inferred from the annotation rather than from the
+// function, as unknown, until the no-next case got its own overload.
+type Seat = { seat: string };
+const cmdHoldSeat = async (): Promise<Seat> => ({ seat: '12A' });
+const holdSeat = (): Effect<Seat, RetryExhaustedError> => Retry(Command(cmdHoldSeat), { attempts: 2 });
+const holdSeatOnce = (): Effect<Seat, never> => Command(cmdHoldSeat);
 
 // @ts-expect-error retry options, onExhausted included, are per-use rather than configured
 configureEffect({ retry: { attempts: 2, onExhausted: () => Success(1) } });
@@ -375,6 +384,24 @@ Parallel([Success(42)], { limit: 'five' });
 // @ts-expect-error settled is a boolean
 Parallel([Success(42)], { settled: 'yes' });
 
+// A settled flag known only as a boolean could be true at runtime, so it matches no overload rather than the
+// one that types next as the values
+const batchOptions = { limit: 2, settled: true };
+// @ts-expect-error settled widened to boolean: write it inline, or add `as const`
+Parallel([Success(42)], batchOptions);
+// @ts-expect-error the same with a next
+Parallel([Success(42)], (values) => Success(values), batchOptions);
+declare const optionsFromCaller: ParallelOptions;
+// @ts-expect-error a caller's ParallelOptions may carry settled: true
+Parallel([Success(42)], optionsFromCaller);
+// settled: false, or no settled at all, still types next as the values, and `as const` keeps a shared flag exact
+expectType<ParallelState<[number], [number]>>(Parallel([Success(42)], { limit: 2, settled: false }));
+const settledOptions = { limit: 2, settled: true } as const;
+const parSettledShared = Parallel([Success(42)], settledOptions);
+expectType<
+    ParallelState<[number], ParallelOutcomes<[number], unknown>, unknown, unknown, ParallelOutcomes<[number], unknown>>
+>(parSettledShared);
+
 // --- Ctx (context type) ---
 
 interface AppCtx {
@@ -398,6 +425,29 @@ expectType<SuccessState<{ email: string; password: string; conn: string }> | Fai
 // wrong context shape should error
 // @ts-expect-error context does not match Ctx
 runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { wrong: 'thing' });
+// @ts-expect-error the flow reads AppCtx, so a context is required
+runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }));
+// a flow that reads no context still needs none
+runEffect(Success(1));
+
+// each step contributes its own context, so a step that reads none does not erase a later step's
+const parseConnId = (raw: string): Effect<string, 'bad_id'> => (raw ? Success(raw) : Failure('bad_id'));
+const findConn = (id: string): Effect<string, 'not_found', AppCtx> =>
+    Ask<string, 'not_found', AppCtx>((ctx) => Success(ctx.db + id));
+const validateThenLookup = effectPipe(parseConnId, findConn);
+expectType<(start: string) => Effect<string, 'bad_id' | 'not_found', AppCtx>>(validateThenLookup);
+// @ts-expect-error the lookup reads AppCtx, whichever step comes first
+runEffect(validateThenLookup('p1'), { wrong: 'thing' });
+// and a pipeline needs every context its steps read
+interface TenantCtx {
+    tenant: string;
+}
+const findTenant = (conn: string): Effect<string, never, TenantCtx> =>
+    Ask<string, never, TenantCtx>((ctx) => Success(conn + ctx.tenant));
+const needsBoth = effectPipe(findConn, findTenant);
+expectType<(start: string) => Effect<string, 'not_found', AppCtx & TenantCtx>>(needsBoth);
+// @ts-expect-error the tenant is missing
+runEffect(needsBoth('p1'), { db: 'conn' });
 
 // --- configureEffect / EffectConfiguration ---
 
@@ -435,13 +485,23 @@ const myStep: StepRunner = async (name, type, op) => {
 
 const myRun: RunWrapper = async (effect, op, flowName) => {
     expectType<Effect<unknown>>(effect);
-    expectType<string | undefined>(flowName);
+    expectType<string>(flowName);
     return op();
 };
 
 const myInterceptor: CommandInterceptor = async (cmd, _ctx) => {
     expectType<CommandState<unknown, unknown>>(cmd);
 };
+
+// the runtime always passes a path and a flow name, so a hook may declare them as present
+const pathStep: StepRunner = async (name, type, op, path: string) => op();
+const namedRun: RunWrapper = async (effect, op, flowName: string) => op();
+// a guard that throws to abort needs no async
+const syncGuard: CommandInterceptor = (cmd, ctx) => {
+    if (!ctx) throw new Error('no context');
+};
+// @ts-expect-error a wrapper has to pass path on, or its trace cannot replay a Parallel
+const forgetsPath: StepRunner = async (name, type, op) => myStep(name, type, op);
 
 // EffectConfiguration is a usable type
 const config: EffectConfiguration = { onStep: myStep, onRun: myRun, onBeforeCommand: myInterceptor };
@@ -492,13 +552,15 @@ expectAssignable<TraceMeta>({ version: 'abc' });
 
 // redact sees every kind of value a trace holds, and only those kinds
 const redactor: RecorderOptions['redact'] = (value, name, kind) => {
-    expectType<unknown>(value);
+    expectType<any>(value);
     expectType<string>(name);
     expectType<'result' | 'error' | 'initialInput' | 'context'>(kind);
     return value;
 };
 // @ts-expect-error 'argument' is not a kind a trace records
 const narrowRedactor: RecorderOptions['redact'] = (value, name, kind: 'argument') => value;
+// the README's redact spreads the value it is given
+recorder({ redact: (value, name, kind) => (kind === 'initialInput' ? { ...value, password: '[redacted]' } : value) });
 
 // recordEffect returns the typed outcome beside the trace, and types its context
 (async () => {
@@ -509,13 +571,17 @@ const narrowRedactor: RecorderOptions['redact'] = (value, name, kind: 'argument'
     expectType<SuccessState<{ email: string; password: string; conn: string }> | FailureState<unknown>>(withCtx.result);
 })();
 // @ts-expect-error context does not match the flow's Ctx
-recordEffect(ctxFlow, {}, { context: { db: 42 } });
+recordEffect(ctxFlow, { email: 'a@b.c', password: 'x' }, { context: { db: 42 } });
+// @ts-expect-error the flow reads AppCtx, so recording it needs a context
+recordEffect(ctxFlow, { email: 'a@b.c', password: 'x' });
+// @ts-expect-error the input has to be what the flow takes
+recordEffect(typedFlow, { email: 'a@b.c', pasword: 'x' });
 
 // a Resolver answers with a wrapped outcome or undefined for an unrecorded step
 const resolver: Resolver = (step) => {
     expectType<ReplayStep>(step);
     expectType<string>(step.name);
-    expectType<string | undefined>(step.path);
+    expectType<string>(step.path);
     return step.index === 0 ? { result: 1 } : undefined;
 };
 expectAssignable<ReplayOutcome>({ error: new Error('x') });

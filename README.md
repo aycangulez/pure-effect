@@ -364,7 +364,7 @@ Parallel(subscriptions.map(billOne), { limit: 5 });
 Parallel(subscriptions.map(billOne), { limit: 5, settled: true });
 ```
 
-Without `settled`, one failing branch cancels the rest and becomes the result of the whole `Parallel`, so one bad record can stop a batch halfway through. With `settled: true`, every branch runs to the end and `next` receives one `Success` or `Failure` per branch, in order, so a failed record is something you can count instead of the end of the job:
+Without `settled`, one failing branch cancels the rest and becomes the result of the whole `Parallel`, so one bad record can stop a batch halfway through. With `settled: true`, every branch runs to the end and `next` receives one `Success` or `Failure` per branch, in order, so a failed record is something you can count instead of the end of the job. In TypeScript, write `settled: true` where you call `Parallel`, or mark a shared options object `as const`: since `settled` decides what `next` receives, a value the compiler only knows as `true` or `false` is refused.
 
 ```js
 Parallel(subscriptions.map(billOne), (outcomes) => Success(outcomes.map(summarize)), { limit: 5, settled: true });
@@ -532,6 +532,8 @@ const findProduct = (productId: string): Effect<Product, 'not_found', AppContext
 const result = await runEffect(findProduct('abc'), { tenant: 'acme', requestId: '123' });
 ```
 
+Every step's context counts, so a pipeline needs all the contexts its steps read, even when the first step reads none. `runEffect` requires a context whenever the flow reads one, since the flow would otherwise get an empty object.
+
 ## Why Pure Effect
 
 **vs. Temporal and durable execution (Restate, Inngest):** The closest relatives, built on the same idea: record what every step returned and replay it. Those engines store the history on a server and resume workflows automatically after a crash. Pure Effect leaves storage and restarts to your application, and there is no infrastructure to run.
@@ -551,7 +553,6 @@ Timings are from Node 22 on a MacBook Pro with M4 Pro CPU:
 - 800 requests at once, across 4 tenants: every response and every recorded trace belonged to its own request, and no tenant, user, or request ID crossed between runs.
 - The ~3,500 telemetry spans formed 800 request traces, with every span inside its own request's trace.
 - Side effects matched the outcomes: 320 charges and 320 orders, and 80 declined cards stopped 30 stock reservations that were still running.
-- 300 traces written as JSON files and replayed with `timeTravel` each returned the response production had, including runs where a `Parallel` was cancelled.
 - 30,000 runs in a row kept memory between 10 and 11 MB, and left nothing running afterwards.
 - A background worker that ran 20,000 jobs in one flow, looping through a Command's `next`, finished in under ~400 ms without holding on to memory.
 - Stopping the server with flows still running, or clients hanging up mid-request: every flow that had started finished and was recorded, with no unhandled rejections.
@@ -629,7 +630,7 @@ A step does not have to use the value it receives. In JavaScript, closing over s
 const registerUserFlow = (input) => effectPipe(validateRegistration, () => saveUser(input))(input);
 ```
 
-In TypeScript, types stop being checked at that step, because a function that ignores its parameter puts no constraint on the step before it. See [TypeScript: Typed Errors and Context](#typescript-typed-errors-and-context). Passing the value through every step keeps the whole pipeline checked, which is why the Quick Start does it.
+In TypeScript, types stop being checked at that step, because a function that ignores its parameter puts no constraint on the step before it. See [TypeScript: Typed Errors and Context](#typescript-typed-errors-and-context). Passing the value through every step keeps the whole pipeline checked, which is why the [Quick Start](#quick-start) does it.
 
 One shape to avoid in either language:
 
@@ -664,7 +665,7 @@ The same check catches a missing `return`, a Command's next function returning a
 #### `configureEffect(...configs)`
 
 - `onRun(effect, pipeline, flowName)` wraps the entire workflow; must `await pipeline()` and return its result.
-- `onStep(name, type, op)` wraps each Command; must `await op()` and return its result. `op()` returns a promise, even for a synchronous Command. Returning a value _without_ calling `op()` is how replay works. A throw after `op()` succeeded is a bug in the hook: the run rejects, and `Retry` does not run the Command again. A throw without calling `op()` counts as the Command failing.
+- `onStep(name, type, op, path)` wraps each Command; must `await op()` and return its result. A hook that calls another hook passes `path` on, since a replay matches steps on it. `op()` returns a promise, even for a synchronous Command. Returning a value _without_ calling `op()` is how replay works. A throw after `op()` succeeded is a bug in the hook: the run rejects, and `Retry` does not run the Command again. A throw without calling `op()` counts as the Command failing.
 - `onStep` also wraps each `Parallel`, with `name` and `type` both `'Parallel'`. Its `op()` runs the branches, so a hook must call it; a hook that returns without calling it makes the run reject with a `TypeError`. Telemetry gets one span per `Parallel`, with the spans of its branches' Commands inside it.
 - `onBeforeCommand(command, context)` fires before each Command; throw to abort. The run returns a `Failure` carrying the thrown error, and `Retry` does not retry it.
 
