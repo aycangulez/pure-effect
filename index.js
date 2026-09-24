@@ -148,8 +148,8 @@ const Retry = (effect, options = {}) => ({
 
 /**
  * Runs multiple Effect trees concurrently. The first branch to fail cancels its siblings, and that
- * branch's Failure is what the Parallel returns; `next` is skipped. When several branches fail in the
- * same tick, the first by array order wins.
+ * branch's Failure is what the Parallel returns; `next` is skipped. Which branch fails first depends on
+ * timing, so it is recorded, and a replay returns the same one.
  *
  * Cancellation is cooperative and works at two levels. A cancelled branch starts no further Commands,
  * which needs nothing from the caller. Stopping the Command already in flight needs its thunk to accept
@@ -657,6 +657,13 @@ const delayFor = (ms, signal) =>
             setTimeout(resolve, ms);
             return;
         }
+        // A listener added to a signal that has already fired never runs. That is the usual case, not an edge:
+        // a Command that honours the signal rejects the moment a sibling fails, and the Retry around it starts
+        // its backoff on the aborted signal.
+        if (signal.aborted) {
+            resolve();
+            return;
+        }
         const onAbort = () => {
             clearTimeout(timer);
             resolve();
@@ -890,7 +897,8 @@ const runEffect =
                         } finally {
                             if (signal && scope) signal.removeEventListener('abort', relay);
                         }
-                        // The first by array order, matching how a Failure is chosen when several land at once.
+                        // The first by array order. A thrown error is held until every branch has settled, so
+                        // position can decide here, where a failing branch is taken in the order it finishes.
                         const firstThrown = thrown.find(Boolean);
                         if (firstThrown) throw firstThrown.error;
 
@@ -975,6 +983,9 @@ const runEffect =
                     if (e && /** @type {any} */ (e)[harnessError]) throw e;
                     return Failure(e, initialInput);
                 }
+                // Checked again because an interceptor can wait, a rate limiter handing out tokens for one, and a
+                // sibling can fail meanwhile. The check at the top of the loop ran before that wait.
+                if (signal?.aborted) return Failure(parallelCancelled(), initialInput);
                 let result;
                 try {
                     result = await localStepRunner(cmdName, 'Command', op, cmdPath);
@@ -1250,6 +1261,8 @@ const recorder = (options = {}) => {
     });
 
     /**
+     * Redacts and copies `meta.initialInput` and `meta.context` when it is called, so call it before the run
+     * when the run can change them, and take `dropped` and `trace` from a second call once it ends.
      * @param {TraceMeta} [meta]
      * @returns {TraceLog}
      */
@@ -1279,13 +1292,15 @@ const recorder = (options = {}) => {
 const recordEffect = async (flowFn, initialInput, options = {}) => {
     const { context = {}, version, ...recorderOptions } = options;
     const rec = recorder(recorderOptions);
+    // Packaged before the run, which is when `toTrace` copies the input and the context. Packaged after it, a
+    // Command that wrote to either, such as an ORM save assigning an id to the object it was handed, rewrote
+    // what the trace says production received, and the replay was rebuilt from a value the run never saw.
+    const head = rec.toTrace({ initialInput, flowName: context.flowName, context, version });
     // The recorder is added to the global wiring, so recording inside an instrumented application keeps
     // its spans.
     const result = await runEffect(flowFn(initialInput), context, { onStep: rec.onStep });
-    return {
-        result,
-        trace: rec.toTrace({ initialInput, flowName: context.flowName, context, version })
-    };
+    const { dropped, trace } = rec.toTrace();
+    return { result, trace: { ...head, dropped, trace } };
 };
 
 /**
@@ -1514,6 +1529,11 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
         ? { resolve: traceOrResolver, missing: undefined }
         : fromTrace(traceOrResolver, { onEntry: (entry) => void reached.add(entry) });
     let index = 0;
+    // What `onResolved` threw, if it did. The throw happened before the recorded result was handed back, so it
+    // counted as the Command failing and a Retry asked for an attempt production never made. It stops the
+    // replay instead, as a throw from any other code in the flow does, and the replay rejects with it. Cast
+    // rather than annotated, since only the step runner assigns it.
+    let observerFailure = /** @type {{ error: unknown } | undefined} */ (undefined);
 
     /** @type {StepRunner} */
     const onStep = async (name, type, op, path) => {
@@ -1525,7 +1545,14 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
         }
         const step = { index: index++, name, type, path };
         const outcome = resolve(step);
-        if (onResolved) onResolved(step, outcome);
+        if (onResolved) {
+            try {
+                onResolved(step, outcome);
+            } catch (error) {
+                observerFailure ??= { error };
+                throw asHarnessError(new Error('onResolved threw.'));
+            }
+        }
         if (outcome === undefined) {
             if (onMissing !== 'execute') {
                 const what = missing ? missing(step) : `No recorded outcome for '${name}' at step ${step.index}`;
@@ -1558,6 +1585,7 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     try {
         result = await runEffect(fastRetry ? zeroRetryDelays(effect) : effect, context, callConfig);
     } catch (e) {
+        if (observerFailure) throw observerFailure.error;
         if (!(e && /** @type {any} */ (e)[replayFault])) throw e;
         result = Failure(e, effect.initialInput);
     }
@@ -1585,11 +1613,15 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
     const { log = console.log, context, version } = options;
     const { initialInput, trace, flowName, version: traceVersion } = traceLog;
     // `message` and `stack` are non-enumerable on Error, so JSON.stringify alone would
-    // drop the most useful line of the report.
-    const format = (/** @type {any} */ v) =>
-        v instanceof Error
-            ? JSON.stringify({ ...v, name: v.name, message: v.message }, null, 2)
-            : JSON.stringify(v, null, 2);
+    // drop the most useful line of the report. It throws on a BigInt and on a cycle, both of which a
+    // recorded result can hold, and narration must not be what fails a replay.
+    const format = (/** @type {any} */ v) => {
+        try {
+            return JSON.stringify(v instanceof Error ? { ...v, name: v.name, message: v.message } : v, null, 2);
+        } catch {
+            return String(v);
+        }
+    };
 
     if (version && traceVersion && version !== traceVersion) {
         log(`Warning: trace was recorded at ${traceVersion}, replaying against ${version}.`);

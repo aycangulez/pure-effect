@@ -1290,12 +1290,12 @@ describe('Recording and replay', function () {
         assert.deepEqual(
             seen,
             [
-                ['result', 'cmdRead'],
-                ['error', 'cmdSave'],
                 ['initialInput', 'initialInput'],
-                ['context', 'context']
+                ['context', 'context'],
+                ['result', 'cmdRead'],
+                ['error', 'cmdSave']
             ],
-            'results, errors, and the trace-level fields all pass through redact'
+            'every value a trace holds passes through redact, each as it enters the trace: the input and context before the run'
         );
         const json = JSON.stringify(trace);
         assert.ok(!json.includes('hunter2'), 'no password anywhere in the trace');
@@ -1496,6 +1496,60 @@ describe('Recording and replay', function () {
         assert.match(out, /cmdSlow returned/);
         assert.match(out, /cmdFast returned/);
         assert.doesNotMatch(out, /never reached/, 'both recorded steps were consumed');
+    });
+
+    it('should reject a replay whose onResolved throws, without asking for the step again', async function () {
+        // A throw from the observer happened before the replayed result was handed back, so it counted as the
+        // Command failing: the Retry asked for an attempt production never made, and the replay came back as a
+        // retry exhaustion instead of the observer's error.
+        const flow = () =>
+            Retry(
+                Command(function cmdFindOrder() {
+                    return { total: 100 };
+                }),
+                { attempts: 2, delay: 0 }
+            );
+        const { trace } = await recordEffect(flow, null);
+        /** @type {(string | undefined)[]} */
+        const asked = [];
+        await assert.rejects(
+            replayEffect(flow(), trace, {
+                onResolved: (step) => {
+                    asked.push(step.path);
+                    throw new Error('logger down');
+                }
+            }),
+            /logger down/
+        );
+        assert.deepEqual(asked, ['0r0/0'], 'the recorded step was replayed once');
+    });
+
+    it('should narrate a result JSON cannot print without changing the replay', async function () {
+        // timeTravel narrated each step with JSON.stringify, which throws on a BigInt and on a cycle, and that
+        // throw turned a run that succeeded into a Failure.
+        const flow = (/** @type {any} */ input) =>
+            effectPipe(
+                () =>
+                    Command(function cmdFindOrder() {
+                        return { id: 9007199254740993n, total: 100 };
+                    }),
+                (/** @type {any} */ order) =>
+                    Command(
+                        function cmdLoadGraph() {
+                            /** @type {any} */
+                            const node = { total: order.total };
+                            node.self = node;
+                            return node;
+                        },
+                        (/** @type {any} */ node) => Success(node.total)
+                    )
+            )(input);
+        const { result, trace } = await recordEffect(flow, null);
+        /** @type {string[]} */
+        const lines = [];
+        const replayed = await timeTravel(flow, trace, { log: (l) => lines.push(l) });
+        assert.deepEqual(replayed, result);
+        assert.equal(lines.filter((l) => l.startsWith('Step ')).length, 2, 'both steps were narrated');
     });
 
     it('should not execute any Command across every primitive during replay', async function () {
@@ -1991,6 +2045,27 @@ describe('examples/recording-example.js', function () {
         assert.equal(written[0].flowName, 'writer');
         assert.deepEqual(written[0].context, { flowName: 'writer', tenant: 'acme' }, 'context captured for Ask replay');
         assert.deepEqual(written[0].initialInput, { id: 1 });
+    });
+
+    it('should send the input and context as the run received them', async function () {
+        // Both were held by reference and copied only when the trace was packaged, so a Command that wrote to
+        // either rewrote what the trace said production received.
+        /** @type {any[]} */
+        const written = [];
+        enableRecording({ keep: () => true, sink: (/** @type {any} */ t) => void written.push(t) });
+        const flow = (/** @type {any} */ input) =>
+            effectPipe((/** @type {any} */ i) =>
+                Ask((/** @type {any} */ ctx) =>
+                    Command(function cmdSave() {
+                        i.id = 'u_1';
+                        ctx.user = { id: 7 };
+                        return i.id;
+                    })
+                )
+            )(input);
+        await runEffect(flow({ email: 'a@b.com' }), { tenant: 'acme' });
+        assert.deepEqual(written[0].initialInput, { email: 'a@b.com' });
+        assert.deepEqual(written[0].context, { tenant: 'acme' });
     });
 
     it('should not let a failing sink change the outcome, and report the failure', async function () {
@@ -2645,6 +2720,54 @@ describe('Recorded values are snapshots', function () {
         /** @type {any} */ (first.result).error.response.status = 200;
         const second = await replayEffect(flow(), trace);
         assert.equal(/** @type {any} */ (second.result).error.response.status, 503);
+    });
+
+    it('should record the input a run was called with, even when a Command changes it', async function () {
+        // An ORM save assigns the new id to the object it is handed, as TypeORM and Mongoose do. The input was
+        // copied when the trace was packaged after the run, so the trace claimed production received an id,
+        // and the unchanged flow replayed down the update branch as a TimeParadox.
+        const orm = {
+            async save(/** @type {any} */ entity) {
+                entity.id ??= 'u_1';
+                return entity;
+            }
+        };
+        const upsert = (/** @type {any} */ user) =>
+            user.id
+                ? Command(function cmdUpdateUser() {
+                      return orm.save(user);
+                  })
+                : Command(
+                      function cmdInsertUser() {
+                          return orm.save(user);
+                      },
+                      (/** @type {any} */ saved) => Success(saved.id)
+                  );
+        const { result, trace } = await recordEffect(upsert, { email: 'a@b.com' });
+        assert.deepEqual(trace.initialInput, { email: 'a@b.com' }, 'the trace holds what production received');
+        const { result: replayed } = await replayEffect(upsert(trace.initialInput), trace);
+        assert.deepEqual(replayed, result);
+    });
+
+    it('should record the context a run was given, even when a Command changes it', async function () {
+        // Ask read the context before the sign-in Command wrote to it. A copy taken after the run held what the
+        // Command wrote, so the replay took the other branch and reported a Failure with no warning.
+        const flow = (/** @type {any} */ input) =>
+            effectPipe(
+                (/** @type {any} */ i) =>
+                    Ask((/** @type {any} */ ctx) => (ctx.user ? Failure('already signed in') : Success(i))),
+                () =>
+                    Ask((/** @type {any} */ ctx) =>
+                        Command(function cmdSignIn() {
+                            ctx.user = { id: 7 };
+                            return ctx.user;
+                        })
+                    )
+            )(input);
+        const { result, trace } = await recordEffect(flow, { email: 'a@b.com' }, { context: {} });
+        assert.deepEqual(trace.context, {}, 'the trace holds the context Ask saw');
+        const replayed = await timeTravel(flow, trace, { log: () => {} });
+        assert.deepEqual(replayed, result);
     });
 });
 
@@ -3400,6 +3523,70 @@ describe('Parallel cancellation', function () {
         const elapsed = Date.now() - start;
         assert.equal(/** @type {any} */ (result).error.message, 'declined');
         assert.ok(elapsed < 500, `the Parallel reported its failure after ${elapsed} ms`);
+    });
+
+    it('should not wait out a retry backoff that starts after the branch was cancelled', async function () {
+        // The recommended Command, one that honours the signal, rejects the moment a sibling fails. That is an
+        // I/O fault, so the Retry around it starts its backoff on a signal that has already fired, and a
+        // listener added to an aborted signal never runs.
+        const start = Date.now();
+        const result = await runEffect(
+            Parallel([
+                Command(async function cmdFails() {
+                    await new Promise((r) => setTimeout(r, 5));
+                    throw new Error('declined');
+                }),
+                Retry(
+                    Command(function cmdFetch(/** @type {AbortSignal | undefined} */ signal) {
+                        return cancellableSleep(1000, signal);
+                    }),
+                    { attempts: 1, delay: 1500 }
+                )
+            ])
+        );
+        const elapsed = Date.now() - start;
+        assert.equal(/** @type {any} */ (result).error.message, 'declined');
+        assert.ok(elapsed < 500, `the Parallel reported its failure after ${elapsed} ms`);
+    });
+
+    it('should not start a Command whose onBeforeCommand was still running when the branch was cancelled', async function () {
+        // A rate limiter that waits before a Command is an interceptor that performs I/O. The branch was checked
+        // for cancellation before the interceptor and not after it, so the charge started once the wait ended,
+        // after a sibling had already failed.
+        /** @type {string[]} */
+        const started = [];
+        /** @type {CommandInterceptor} */
+        const rateLimiter = async (command) => {
+            if (command.meta?.name === 'chargeCard') await new Promise((r) => setTimeout(r, 50));
+        };
+        const checkout = Command(
+            function cmdReserve() {
+                started.push('reserve');
+                return 'r1';
+            },
+            () =>
+                Command(
+                    function cmdCharge() {
+                        started.push('charge');
+                        return 'ch_1';
+                    },
+                    undefined,
+                    { name: 'chargeCard' }
+                )
+        );
+        const result = await runEffect(
+            Parallel([
+                checkout,
+                Command(async function cmdCheckStock() {
+                    await new Promise((r) => setTimeout(r, 10));
+                    throw new Error('out of stock');
+                })
+            ]),
+            {},
+            { onBeforeCommand: rateLimiter }
+        );
+        assert.equal(/** @type {any} */ (result).error.message, 'out of stock');
+        assert.deepEqual(started, ['reserve'], 'the charge never started');
     });
 
     it('should propagate cancellation into a nested Parallel', async function () {

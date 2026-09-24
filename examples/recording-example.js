@@ -14,9 +14,8 @@ import { configureEffect, recorder } from '../index.js';
 /**
  * @typedef {Object} RecordingStore
  * @property {ReturnType<typeof recorder>} rec
- * @property {string} [flowName]
- * @property {any} initialInput
- * @property {any} context
+ * @property {TraceLog} head - The trace's own fields, packaged as the run starts rather than after it
+ * @property {boolean} contextCaptured
  */
 
 /**
@@ -66,18 +65,26 @@ export function recordingHooks(options = {}) {
      */
     const onRun = async (effect, pipeline, flowName) => {
         const rec = recorder({ redact, maxEntries, stack });
+        // `toTrace` copies the input when it is called, so it is called now: a Command that assigns an id to
+        // the object it was handed would otherwise rewrite what the trace says production received. The input
+        // is read off the flow, where only `effectPipe` puts it, so a flow whose outermost node is a bare
+        // Command, Ask, Retry, or Parallel records none; wrap it in a one-step pipeline to record it.
+        const head = rec.toTrace({ flowName, initialInput: /** @type {any} */ (effect).initialInput });
         /** @type {RecordingStore} */
-        const store = { rec, flowName, initialInput: /** @type {any} */ (effect).initialInput, context: undefined };
+        const store = { rec, head, contextCaptured: false };
         return scope.run(store, async () => {
             const result = await pipeline();
             // Recording must never decide a run's outcome, the rule the telemetry example keeps as well. `keep`
             // and `sink` are the application's code, and a sink that serializes the trace throws on a circular
             // value such as an HTTP client's error, so a failure is reported rather than returned.
             try {
-                if (keep(result)) await sink(rec.toTrace(store));
+                if (keep(result)) {
+                    const { dropped, trace } = rec.toTrace();
+                    await sink({ ...head, dropped, trace });
+                }
             } catch (error) {
                 try {
-                    onSinkError(error, store.flowName);
+                    onSinkError(error, flowName);
                 } catch {
                     // A reporter that throws does not get to change the run either.
                 }
@@ -98,12 +105,17 @@ export function recordingHooks(options = {}) {
     };
 
     /**
-     * `onRun` never sees the context, so it is captured from the first Command of the run.
+     * `onRun` never sees the context, so it is captured from the first Command of the run, and copied there,
+     * before that Command can write to it. A run that stops before any Command, at a validation step or an
+     * `Ask` check, records no context, and its replay can take another branch and report `Trace exhausted`.
+     * Such a run did no I/O, so running the flow again with its input and the logged context reproduces it.
      * @type {CommandInterceptor}
      */
     const onBeforeCommand = async (command, context) => {
         const store = scope.getStore();
-        if (store && store.context === undefined) store.context = context;
+        if (!store || store.contextCaptured) return;
+        store.contextCaptured = true;
+        store.head.context = store.rec.toTrace({ context }).context;
     };
 
     return { onRun, onStep, onBeforeCommand };
