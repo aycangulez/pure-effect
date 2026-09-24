@@ -599,6 +599,24 @@ describe('Recording and replay', function () {
         assert.ok(elapsed < 100, `replay skipped 200 ms + 400 ms of backoff (took ${elapsed} ms)`);
     });
 
+    it('should wait out the backoff when a replay passes fastRetry: false', async function () {
+        let calls = 0;
+        const flow = () =>
+            Retry(
+                Command(function cmdFlaky() {
+                    if (++calls === 1) throw new Error('once');
+                    return 'ok';
+                }),
+                { attempts: 1, delay: 120 }
+            );
+        const { trace } = await recordEffect(flow, null);
+        const start = Date.now();
+        const { result } = await replayEffect(flow(), trace, { fastRetry: false });
+        const elapsed = Date.now() - start;
+        assert.equal(valueOf(result), 'ok');
+        assert.ok(elapsed >= 100, `the replay waited the recorded delay (took ${elapsed} ms)`);
+    });
+
     it('should strip Retry delays inside a Parallel branch during replay', async function () {
         this.timeout(3000);
         let calls = 0;

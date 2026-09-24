@@ -694,21 +694,20 @@ const delayFor = (ms, signal) =>
         signal.addEventListener('abort', onAbort, { once: true });
     });
 
-const runEffect =
+const interpret =
     /**
-     * The Interpreter
-     * Iterates through the Effect tree, executing Commands and handling async flow.
-     * Ask effects are resolved synchronously with the context object.
+     * The interpreter: walks the Effect tree, executing Commands and resolving Ask, Retry, and Parallel.
+     * `runEffect` and `replayEffect` both run flows through it, so a replay cannot drift from a run.
+     * `fastRetry` is the one thing only a replay sets: it waits no time between retry attempts, since a
+     * delay is written on the Retry node and nothing else can override it.
      *
-     * onRun fires exactly once per runEffect call; Retry attempts run inside that single span.
-     *
-     * @param {Effect} effect - The Effect tree returned by a pipeline
-     * @param {any} [context] - Optional context object. Passed to Ask continuations and the Command Interceptor.
-     * @param {CallConfiguration} [callConfig] - Per-call configuration, added to the wiring `configureEffect`
-     *        installed unless `inherit: false`, which ignores that wiring for this run.
+     * @param {Effect} effect
+     * @param {any} [context]
+     * @param {CallConfiguration} [callConfig]
+     * @param {boolean} [fastRetry]
      * @returns {Promise<SuccessState | FailureState>}
      */
-    async function runEffect(effect, context = {}, callConfig = {}) {
+    async function interpret(effect, context = {}, callConfig = {}, fastRetry = false) {
         rejectRetryKey(callConfig, "runEffect's callConfig");
         const { inherit = true, ...local } = callConfig;
         // Not coerced: `'false'` quietly inheriting everything is the behaviour this option exists to remove.
@@ -780,7 +779,11 @@ const runEffect =
                 );
             let lastError;
             for (let attempt = 0; attempt <= attempts; attempt++) {
-                if (attempt > 0) await delayFor(opts.delay * Math.pow(opts.backoff, attempt - 1), signal);
+                // Under `fastRetry` this waits for no time rather than skipping the wait, so branches replayed by
+                // timing still interleave as they do with a delay.
+                if (attempt > 0) {
+                    await delayFor(fastRetry ? 0 : opts.delay * Math.pow(opts.backoff, attempt - 1), signal);
+                }
                 // After the wait, so a branch cancelled mid-backoff makes no further attempt.
                 if (signal?.aborted) return cancelledBranch(retry.initialInput);
                 const result = await execute(retry.effect, signal, `${stepPath}r${attempt}/`);
@@ -1001,6 +1004,18 @@ const runEffect =
         };
         return localRunWrapper(effect, run, context?.flowName || '');
     };
+
+/**
+ * Runs a flow: executes its Commands, resolving `Ask` with the context and running `Retry` and `Parallel`.
+ * onRun fires exactly once per call; Retry attempts run inside that single span.
+ *
+ * @param {Effect} effect - The Effect tree returned by a pipeline
+ * @param {any} [context] - Optional context object. Passed to Ask continuations and the Command Interceptor.
+ * @param {CallConfiguration} [callConfig] - Per-call configuration, added to the wiring `configureEffect`
+ *        installed unless `inherit: false`, which ignores that wiring for this run.
+ * @returns {Promise<SuccessState | FailureState>}
+ */
+const runEffect = (effect, context, callConfig) => interpret(effect, context, callConfig);
 
 /**
  * The step a replay is asking about. `path` is the Command's position in the Effect tree and is stable
@@ -1440,49 +1455,10 @@ const fromTrace = (traceLog, options = {}) => {
 };
 
 /**
- * Rewrites `Retry` nodes to zero delay, lazily, through their `next` continuations. Retry options are
- * per-use only, so without this, replaying a flow that retried in production waits out its backoff.
- *
- * @param {any} eff - Any Effect node
- * @returns {any} The same tree with Retry delays removed
- */
-const zeroRetryDelays = (eff) => {
-    if (!eff || typeof eff.type !== 'string') return eff;
-    switch (eff.type) {
-        case 'Retry': {
-            const options = { ...eff.options, delay: 0, backoff: 1 };
-            // The fallback tree only exists once onExhausted runs, so it is rewritten lazily too;
-            // otherwise a Retry inside the fallback keeps its production backoff during replay.
-            if (typeof options.onExhausted === 'function') {
-                const original = options.onExhausted;
-                options.onExhausted = (/** @type {any} */ error) => zeroRetryDelays(original(error));
-            }
-            return {
-                ...eff,
-                options,
-                effect: zeroRetryDelays(eff.effect),
-                next: (/** @type {any} */ value) => zeroRetryDelays(eff.next(value))
-            };
-        }
-        case 'Command':
-            return { ...eff, next: (/** @type {any} */ result) => zeroRetryDelays(eff.next(result)) };
-        case 'Ask':
-            return { ...eff, next: (/** @type {any} */ ctx) => zeroRetryDelays(eff.next(ctx)) };
-        case 'Parallel':
-            return {
-                ...eff,
-                effects: eff.effects.map(zeroRetryDelays),
-                next: (/** @type {any} */ values) => zeroRetryDelays(eff.next(values))
-            };
-        default:
-            return eff;
-    }
-};
-
-/**
  * @typedef {Object} ReplayOptions
  * @property {any} [context] - Context for `Ask`; defaults to the context a trace recorded.
- * @property {boolean} [fastRetry] - Strips Retry delays so a replay does not wait out production backoff.
+ * @property {boolean} [fastRetry] - Waits no time between Retry attempts, so a replay does not wait out
+ *           production backoff. On by default.
  * @property {boolean} [hooks] - Runs the replay inside the hooks `configureEffect` installed, with the
  *           resolver innermost, so a configured `onStep` observes each replayed step and `onRun` and
  *           `onBeforeCommand` fire. Off by default, which ignores the global hooks, so a replay cannot
@@ -1587,7 +1563,7 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     // here, where nothing downstream can.
     let result;
     try {
-        result = await runEffect(fastRetry ? zeroRetryDelays(effect) : effect, context, callConfig);
+        result = await interpret(effect, context, callConfig, fastRetry);
     } catch (e) {
         if (observerFailure) throw observerFailure.error;
         if (!hasMark(e, replayFault)) throw e;
