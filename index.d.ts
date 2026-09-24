@@ -50,28 +50,58 @@ export type RetryOptions = {
 };
 
 /**
- * `E` is the error the node contributes to its pipeline, which for a Retry is the exhaustion failure:
- * the interpreter never lets an inner attempt's error escape unwrapped, so the wrapped tree's own
- * error type is consumed by the retry loop rather than exposed here.
+ * `E` is the error the node contributes to its pipeline. A Retry contributes two kinds: an abort the
+ * wrapped tree returned, which is not retried and leaves unwrapped, and the exhaustion failure that
+ * follows an I/O fault the retry loop could not get past.
  */
 export type RetryState<T, E = unknown, Ctx = unknown> = {
     type: 'Retry';
     effect: Effect<T, any, Ctx>;
-    options: RetryOptions & { onExhausted?: (error: RetryExhaustedError<any>) => Effect<T, any, Ctx> };
+    options: RetryOptions & { onExhausted?: (error: RetryExhaustedError) => Effect<T, any, Ctx> };
     next(value: T): Effect<T, E, Ctx>;
     initialInput?: unknown;
 };
 
-export type RetryExhaustedError<E = unknown> = {
+/**
+ * The error a `Retry` fails with once every attempt has hit an I/O fault. `lastError` is what the last
+ * attempt threw: a Command's function throwing, or a nested `Retry` running out. It is never a `Failure`
+ * a step returned, since that is an abort and is not retried, so the wrapped tree's error type cannot
+ * reach it. Nothing declares what a function throws, so `Retry` leaves `Thrown` as `unknown`; pass it
+ * only to annotate a value whose thrown type you already know.
+ */
+export type RetryExhaustedError<Thrown = unknown> = {
     retryExhausted: true;
-    lastError: E;
+    lastError: Thrown;
     attempts: number;
 };
 
-export type ParallelState<T extends readonly unknown[], R, E = unknown, Ctx = unknown> = {
+export type ParallelOptions = {
+    /** Most branches in flight at once. Results and paths stay in array order regardless. */
+    limit?: number;
+    /** Hand every branch's outcome to `next` instead of failing on the first one. */
+    settled?: boolean;
+};
+
+/** What a settled `Parallel` hands to `next`: one outcome per branch, in array order. */
+export type ParallelOutcomes<T extends readonly unknown[], E> = {
+    [K in keyof T]: SuccessState<T[K]> | FailureState<E>;
+};
+
+/**
+ * `V` is what `next` receives, which is the branch values normally and the branch outcomes under
+ * `settled`. It defaults to `T`, so every non-settled use reads as it always did.
+ */
+export type ParallelState<
+    T extends readonly unknown[],
+    R,
+    E = unknown,
+    Ctx = unknown,
+    V extends readonly unknown[] = T
+> = {
     type: 'Parallel';
     effects: { [K in keyof T]: Effect<T[K], E, Ctx> };
-    next(values: [...T]): Effect<R, E, Ctx>;
+    next(values: [...V]): Effect<R, E, Ctx>;
+    options?: ParallelOptions;
     initialInput?: unknown;
 };
 
@@ -92,7 +122,17 @@ export declare function Failure<E = unknown>(error: E, initialInput?: unknown): 
  *
  * A `meta.name` becomes this Command's identity, which keeps it independent of how `cmd` was declared
  * and immune to minification. Without one the identity falls back to `cmd.name`, then to 'anonymous'.
+ *
+ * The first overload is the default `next`, where the value is the function's result. Without it, a
+ * `Command(fn)` inside a step with an annotated return type had its value type inferred from the
+ * annotation, as `unknown`, rather than from `fn`, and `Retry(Command(fn))` failed to compile there.
  */
+export declare function Command<R, E = unknown, Ctx = unknown>(
+    cmd: (signal?: AbortSignal) => Promise<R> | R,
+    next?: undefined,
+    meta?: CommandMeta
+): CommandState<R, R, E, Ctx>;
+
 export declare function Command<R, T = R, E = unknown, Ctx = unknown>(
     cmd: (signal?: AbortSignal) => Promise<R> | R,
     next?: (result: R) => Effect<T, E, Ctx>,
@@ -106,125 +146,175 @@ export declare function Ask<T, E = unknown, Ctx = unknown>(
 /**
  * With `onExhausted`, the exhaustion failure never escapes: the fallback Effect runs instead, its
  * success feeds `next`, and its failure propagates unwrapped, so the node's declared error is the
- * fallback's own error type. `onExhausted` is a per-use option only; the global `retry` defaults in
- * `EffectConfiguration` deliberately cannot carry one.
+ * fallback's own error type alongside `E`, since an abort the wrapped tree returned reaches neither
+ * the retry loop nor the fallback and leaves as itself. `onExhausted` is a per-use option, and so is every other retry
+ * option: there are no configured defaults for one to be carried by.
  */
 export declare function Retry<T, E = unknown, E2 = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
-    options: RetryOptions & { onExhausted: (error: RetryExhaustedError<E>) => Effect<T, E2, Ctx> }
-): RetryState<T, E2, Ctx>;
+    options: RetryOptions & { onExhausted: (error: RetryExhaustedError) => Effect<T, E2, Ctx> }
+): RetryState<T, E | E2, Ctx>;
 
 /**
- * Without `onExhausted`, the declared error type is `RetryExhaustedError<E>`, because that is what
- * a Retry's Failure actually carries: on exhaustion the interpreter returns
- * `Failure({ retryExhausted: true, lastError, attempts })` rather than the inner error itself,
- * so `result.error.lastError` is where the wrapped tree's `E` survives.
+ * Without `onExhausted`, an I/O fault the retry loop cannot get past arrives as
+ * `Failure({ retryExhausted: true, lastError, attempts })`, with whatever was thrown as `lastError`.
+ * An abort the wrapped tree returned is not retried and is not wrapped, so `E` reaches the pipeline
+ * as itself and never as `lastError`.
  */
 export declare function Retry<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     options?: RetryOptions
-): RetryState<T, RetryExhaustedError<E>, Ctx>;
+): RetryState<T, E | RetryExhaustedError, Ctx>;
 
 /**
  * `next` is optional and defaults to `(values) => Success(values)`, same as `Command`'s default,
- * so a bare `Parallel(effects)` resolves to the ordered array of success values.
+ * so a bare `Parallel(effects)` resolves to the ordered array of success values. The second argument
+ * is `next` or the options, whichever it looks like.
+ *
+ * The non-settled overloads accept only `settled?: false`. A `settled` known only as a `boolean`, from a
+ * shared options object or a caller's `ParallelOptions`, could be `true` at runtime, and matching it to
+ * an overload that types `next` as the values let a batch compile while it read outcome objects as
+ * values. It matches no overload instead: write `settled: true` inline, or add `as const`.
  */
-export declare function Parallel<T extends readonly unknown[], E = unknown, Ctx = unknown>(effects: {
-    [K in keyof T]: Effect<T[K], E, Ctx>;
-}): ParallelState<[...T], [...T], E, Ctx>;
+export declare function Parallel<T extends readonly unknown[], E = unknown, Ctx = unknown>(
+    effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
+    options: ParallelOptions & { settled: true }
+): ParallelState<[...T], ParallelOutcomes<T, E>, E, Ctx, ParallelOutcomes<T, E>>;
 
 export declare function Parallel<T extends readonly unknown[], R, E = unknown, Ctx = unknown>(
     effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
-    next: (values: [...T]) => Effect<R, E, Ctx>
+    next: (values: ParallelOutcomes<T, E>) => Effect<R, E, Ctx>,
+    options: ParallelOptions & { settled: true }
+): ParallelState<[...T], R, E, Ctx, ParallelOutcomes<T, E>>;
+
+export declare function Parallel<T extends readonly unknown[], E = unknown, Ctx = unknown>(
+    effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
+    options?: ParallelOptions & { settled?: false }
+): ParallelState<[...T], [...T], E, Ctx>;
+
+export declare function Parallel<T extends readonly unknown[], R, E = unknown, Ctx = unknown>(
+    effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
+    next: (values: [...T]) => Effect<R, E, Ctx>,
+    options?: ParallelOptions & { settled?: false }
 ): ParallelState<[...T], R, E, Ctx>;
 
-export declare function effectPipe<A, B, E1 = unknown, Ctx = unknown>(
-    f1: (a: A) => Effect<B, E1, Ctx>
-): (start: A) => Effect<B, E1, Ctx>;
+/**
+ * Composes steps into a pipeline: each step receives the previous step's success value, and a Failure
+ * from any step stops the pipeline. Typed for 1 to 20 steps, the same ceiling as Effect-TS's `pipe`. A
+ * pipeline is itself a step, so a longer one nests: `effectPipe(effectPipe(s1, s2), effectPipe(s3, s4))`.
+ * Each step's context type is its own, and the pipeline's is all of them together, so a step that reads
+ * no context does not erase a later step's, and `runEffect` asks for every context a step reads.
+ */
+export declare function effectPipe<T0, T1, E1 = unknown, C1 = unknown>(
+    f1: (value: T0) => Effect<T1, E1, C1>
+): (start: T0) => Effect<T1, E1, C1>;
 
-export declare function effectPipe<A, B, C, E1 = unknown, E2 = unknown, Ctx = unknown>(
-    f1: (a: A) => Effect<B, E1, Ctx>,
-    f2: (b: B) => Effect<C, E2, Ctx>
-): (start: A) => Effect<C, E1 | E2, Ctx>;
-
-export declare function effectPipe<A, B, C, D, E1 = unknown, E2 = unknown, E3 = unknown, Ctx = unknown>(
-    f1: (a: A) => Effect<B, E1, Ctx>,
-    f2: (b: B) => Effect<C, E2, Ctx>,
-    f3: (c: C) => Effect<D, E3, Ctx>
-): (start: A) => Effect<D, E1 | E2 | E3, Ctx>;
+export declare function effectPipe<T0, T1, T2, E1 = unknown, E2 = unknown, C1 = unknown, C2 = unknown>(
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>
+): (start: T0) => Effect<T2, E1 | E2, C1 & C2>;
 
 export declare function effectPipe<
-    A,
-    B,
-    C,
-    D,
-    F,
+    T0,
+    T1,
+    T2,
+    T3,
+    E1 = unknown,
+    E2 = unknown,
+    E3 = unknown,
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown
+>(
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>
+): (start: T0) => Effect<T3, E1 | E2 | E3, C1 & C2 & C3>;
+
+export declare function effectPipe<
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
     E1 = unknown,
     E2 = unknown,
     E3 = unknown,
     E4 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown
 >(
-    f1: (a: A) => Effect<B, E1, Ctx>,
-    f2: (b: B) => Effect<C, E2, Ctx>,
-    f3: (c: C) => Effect<D, E3, Ctx>,
-    f4: (d: D) => Effect<F, E4, Ctx>
-): (start: A) => Effect<F, E1 | E2 | E3 | E4, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>
+): (start: T0) => Effect<T4, E1 | E2 | E3 | E4, C1 & C2 & C3 & C4>;
 
 export declare function effectPipe<
-    A,
-    B,
-    C,
-    D,
-    F,
-    G,
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
     E1 = unknown,
     E2 = unknown,
     E3 = unknown,
     E4 = unknown,
     E5 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown
 >(
-    f1: (a: A) => Effect<B, E1, Ctx>,
-    f2: (b: B) => Effect<C, E2, Ctx>,
-    f3: (c: C) => Effect<D, E3, Ctx>,
-    f4: (d: D) => Effect<F, E4, Ctx>,
-    f5: (f: F) => Effect<G, E5, Ctx>
-): (start: A) => Effect<G, E1 | E2 | E3 | E4 | E5, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>
+): (start: T0) => Effect<T5, E1 | E2 | E3 | E4 | E5, C1 & C2 & C3 & C4 & C5>;
 
 export declare function effectPipe<
-    A,
-    B,
-    C,
-    D,
-    F,
-    G,
-    H,
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
     E1 = unknown,
     E2 = unknown,
     E3 = unknown,
     E4 = unknown,
     E5 = unknown,
     E6 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown
 >(
-    f1: (a: A) => Effect<B, E1, Ctx>,
-    f2: (b: B) => Effect<C, E2, Ctx>,
-    f3: (c: C) => Effect<D, E3, Ctx>,
-    f4: (d: D) => Effect<F, E4, Ctx>,
-    f5: (f: F) => Effect<G, E5, Ctx>,
-    f6: (g: G) => Effect<H, E6, Ctx>
-): (start: A) => Effect<H, E1 | E2 | E3 | E4 | E5 | E6, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>
+): (start: T0) => Effect<T6, E1 | E2 | E3 | E4 | E5 | E6, C1 & C2 & C3 & C4 & C5 & C6>;
 
 export declare function effectPipe<
-    A,
-    B,
-    C,
-    D,
-    F,
-    G,
-    H,
-    I,
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
+    T7,
     E1 = unknown,
     E2 = unknown,
     E3 = unknown,
@@ -232,27 +322,33 @@ export declare function effectPipe<
     E5 = unknown,
     E6 = unknown,
     E7 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown
 >(
-    f1: (a: A) => Effect<B, E1, Ctx>,
-    f2: (b: B) => Effect<C, E2, Ctx>,
-    f3: (c: C) => Effect<D, E3, Ctx>,
-    f4: (d: D) => Effect<F, E4, Ctx>,
-    f5: (f: F) => Effect<G, E5, Ctx>,
-    f6: (g: G) => Effect<H, E6, Ctx>,
-    f7: (h: H) => Effect<I, E7, Ctx>
-): (start: A) => Effect<I, E1 | E2 | E3 | E4 | E5 | E6 | E7, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>
+): (start: T0) => Effect<T7, E1 | E2 | E3 | E4 | E5 | E6 | E7, C1 & C2 & C3 & C4 & C5 & C6 & C7>;
 
 export declare function effectPipe<
-    A,
-    B,
-    C,
-    D,
-    F,
-    G,
-    H,
-    I,
-    J,
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
+    T7,
+    T8,
     E1 = unknown,
     E2 = unknown,
     E3 = unknown,
@@ -261,61 +357,919 @@ export declare function effectPipe<
     E6 = unknown,
     E7 = unknown,
     E8 = unknown,
-    Ctx = unknown
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown
 >(
-    f1: (a: A) => Effect<B, E1, Ctx>,
-    f2: (b: B) => Effect<C, E2, Ctx>,
-    f3: (c: C) => Effect<D, E3, Ctx>,
-    f4: (d: D) => Effect<F, E4, Ctx>,
-    f5: (f: F) => Effect<G, E5, Ctx>,
-    f6: (g: G) => Effect<H, E6, Ctx>,
-    f7: (h: H) => Effect<I, E7, Ctx>,
-    f8: (i: I) => Effect<J, E8, Ctx>
-): (start: A) => Effect<J, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8, Ctx>;
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>
+): (start: T0) => Effect<T8, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8, C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8>;
+
+export declare function effectPipe<
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
+    T7,
+    T8,
+    T9,
+    E1 = unknown,
+    E2 = unknown,
+    E3 = unknown,
+    E4 = unknown,
+    E5 = unknown,
+    E6 = unknown,
+    E7 = unknown,
+    E8 = unknown,
+    E9 = unknown,
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown
+>(
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>
+): (start: T0) => Effect<T9, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9, C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9>;
+
+export declare function effectPipe<
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
+    T7,
+    T8,
+    T9,
+    T10,
+    E1 = unknown,
+    E2 = unknown,
+    E3 = unknown,
+    E4 = unknown,
+    E5 = unknown,
+    E6 = unknown,
+    E7 = unknown,
+    E8 = unknown,
+    E9 = unknown,
+    E10 = unknown,
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown
+>(
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>
+): (
+    start: T0
+) => Effect<T10, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10, C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10>;
+
+export declare function effectPipe<
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
+    T7,
+    T8,
+    T9,
+    T10,
+    T11,
+    E1 = unknown,
+    E2 = unknown,
+    E3 = unknown,
+    E4 = unknown,
+    E5 = unknown,
+    E6 = unknown,
+    E7 = unknown,
+    E8 = unknown,
+    E9 = unknown,
+    E10 = unknown,
+    E11 = unknown,
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown
+>(
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>
+): (
+    start: T0
+) => Effect<
+    T11,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11
+>;
+
+export declare function effectPipe<
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
+    T7,
+    T8,
+    T9,
+    T10,
+    T11,
+    T12,
+    E1 = unknown,
+    E2 = unknown,
+    E3 = unknown,
+    E4 = unknown,
+    E5 = unknown,
+    E6 = unknown,
+    E7 = unknown,
+    E8 = unknown,
+    E9 = unknown,
+    E10 = unknown,
+    E11 = unknown,
+    E12 = unknown,
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown
+>(
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>
+): (
+    start: T0
+) => Effect<
+    T12,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12
+>;
+
+export declare function effectPipe<
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
+    T7,
+    T8,
+    T9,
+    T10,
+    T11,
+    T12,
+    T13,
+    E1 = unknown,
+    E2 = unknown,
+    E3 = unknown,
+    E4 = unknown,
+    E5 = unknown,
+    E6 = unknown,
+    E7 = unknown,
+    E8 = unknown,
+    E9 = unknown,
+    E10 = unknown,
+    E11 = unknown,
+    E12 = unknown,
+    E13 = unknown,
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown,
+    C13 = unknown
+>(
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>,
+    f13: (value: T12) => Effect<T13, E13, C13>
+): (
+    start: T0
+) => Effect<
+    T13,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13
+>;
+
+export declare function effectPipe<
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
+    T7,
+    T8,
+    T9,
+    T10,
+    T11,
+    T12,
+    T13,
+    T14,
+    E1 = unknown,
+    E2 = unknown,
+    E3 = unknown,
+    E4 = unknown,
+    E5 = unknown,
+    E6 = unknown,
+    E7 = unknown,
+    E8 = unknown,
+    E9 = unknown,
+    E10 = unknown,
+    E11 = unknown,
+    E12 = unknown,
+    E13 = unknown,
+    E14 = unknown,
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown,
+    C13 = unknown,
+    C14 = unknown
+>(
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>,
+    f13: (value: T12) => Effect<T13, E13, C13>,
+    f14: (value: T13) => Effect<T14, E14, C14>
+): (
+    start: T0
+) => Effect<
+    T14,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14
+>;
+
+export declare function effectPipe<
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
+    T7,
+    T8,
+    T9,
+    T10,
+    T11,
+    T12,
+    T13,
+    T14,
+    T15,
+    E1 = unknown,
+    E2 = unknown,
+    E3 = unknown,
+    E4 = unknown,
+    E5 = unknown,
+    E6 = unknown,
+    E7 = unknown,
+    E8 = unknown,
+    E9 = unknown,
+    E10 = unknown,
+    E11 = unknown,
+    E12 = unknown,
+    E13 = unknown,
+    E14 = unknown,
+    E15 = unknown,
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown,
+    C13 = unknown,
+    C14 = unknown,
+    C15 = unknown
+>(
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>,
+    f13: (value: T12) => Effect<T13, E13, C13>,
+    f14: (value: T13) => Effect<T14, E14, C14>,
+    f15: (value: T14) => Effect<T15, E15, C15>
+): (
+    start: T0
+) => Effect<
+    T15,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15
+>;
+
+export declare function effectPipe<
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
+    T7,
+    T8,
+    T9,
+    T10,
+    T11,
+    T12,
+    T13,
+    T14,
+    T15,
+    T16,
+    E1 = unknown,
+    E2 = unknown,
+    E3 = unknown,
+    E4 = unknown,
+    E5 = unknown,
+    E6 = unknown,
+    E7 = unknown,
+    E8 = unknown,
+    E9 = unknown,
+    E10 = unknown,
+    E11 = unknown,
+    E12 = unknown,
+    E13 = unknown,
+    E14 = unknown,
+    E15 = unknown,
+    E16 = unknown,
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown,
+    C13 = unknown,
+    C14 = unknown,
+    C15 = unknown,
+    C16 = unknown
+>(
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>,
+    f13: (value: T12) => Effect<T13, E13, C13>,
+    f14: (value: T13) => Effect<T14, E14, C14>,
+    f15: (value: T14) => Effect<T15, E15, C15>,
+    f16: (value: T15) => Effect<T16, E16, C16>
+): (
+    start: T0
+) => Effect<
+    T16,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16
+>;
+
+export declare function effectPipe<
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
+    T7,
+    T8,
+    T9,
+    T10,
+    T11,
+    T12,
+    T13,
+    T14,
+    T15,
+    T16,
+    T17,
+    E1 = unknown,
+    E2 = unknown,
+    E3 = unknown,
+    E4 = unknown,
+    E5 = unknown,
+    E6 = unknown,
+    E7 = unknown,
+    E8 = unknown,
+    E9 = unknown,
+    E10 = unknown,
+    E11 = unknown,
+    E12 = unknown,
+    E13 = unknown,
+    E14 = unknown,
+    E15 = unknown,
+    E16 = unknown,
+    E17 = unknown,
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown,
+    C13 = unknown,
+    C14 = unknown,
+    C15 = unknown,
+    C16 = unknown,
+    C17 = unknown
+>(
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>,
+    f13: (value: T12) => Effect<T13, E13, C13>,
+    f14: (value: T13) => Effect<T14, E14, C14>,
+    f15: (value: T14) => Effect<T15, E15, C15>,
+    f16: (value: T15) => Effect<T16, E16, C16>,
+    f17: (value: T16) => Effect<T17, E17, C17>
+): (
+    start: T0
+) => Effect<
+    T17,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16 & C17
+>;
+
+export declare function effectPipe<
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
+    T7,
+    T8,
+    T9,
+    T10,
+    T11,
+    T12,
+    T13,
+    T14,
+    T15,
+    T16,
+    T17,
+    T18,
+    E1 = unknown,
+    E2 = unknown,
+    E3 = unknown,
+    E4 = unknown,
+    E5 = unknown,
+    E6 = unknown,
+    E7 = unknown,
+    E8 = unknown,
+    E9 = unknown,
+    E10 = unknown,
+    E11 = unknown,
+    E12 = unknown,
+    E13 = unknown,
+    E14 = unknown,
+    E15 = unknown,
+    E16 = unknown,
+    E17 = unknown,
+    E18 = unknown,
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown,
+    C13 = unknown,
+    C14 = unknown,
+    C15 = unknown,
+    C16 = unknown,
+    C17 = unknown,
+    C18 = unknown
+>(
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>,
+    f13: (value: T12) => Effect<T13, E13, C13>,
+    f14: (value: T13) => Effect<T14, E14, C14>,
+    f15: (value: T14) => Effect<T15, E15, C15>,
+    f16: (value: T15) => Effect<T16, E16, C16>,
+    f17: (value: T16) => Effect<T17, E17, C17>,
+    f18: (value: T17) => Effect<T18, E18, C18>
+): (
+    start: T0
+) => Effect<
+    T18,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17 | E18,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16 & C17 & C18
+>;
+
+export declare function effectPipe<
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
+    T7,
+    T8,
+    T9,
+    T10,
+    T11,
+    T12,
+    T13,
+    T14,
+    T15,
+    T16,
+    T17,
+    T18,
+    T19,
+    E1 = unknown,
+    E2 = unknown,
+    E3 = unknown,
+    E4 = unknown,
+    E5 = unknown,
+    E6 = unknown,
+    E7 = unknown,
+    E8 = unknown,
+    E9 = unknown,
+    E10 = unknown,
+    E11 = unknown,
+    E12 = unknown,
+    E13 = unknown,
+    E14 = unknown,
+    E15 = unknown,
+    E16 = unknown,
+    E17 = unknown,
+    E18 = unknown,
+    E19 = unknown,
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown,
+    C13 = unknown,
+    C14 = unknown,
+    C15 = unknown,
+    C16 = unknown,
+    C17 = unknown,
+    C18 = unknown,
+    C19 = unknown
+>(
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>,
+    f13: (value: T12) => Effect<T13, E13, C13>,
+    f14: (value: T13) => Effect<T14, E14, C14>,
+    f15: (value: T14) => Effect<T15, E15, C15>,
+    f16: (value: T15) => Effect<T16, E16, C16>,
+    f17: (value: T16) => Effect<T17, E17, C17>,
+    f18: (value: T17) => Effect<T18, E18, C18>,
+    f19: (value: T18) => Effect<T19, E19, C19>
+): (
+    start: T0
+) => Effect<
+    T19,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17 | E18 | E19,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16 & C17 & C18 & C19
+>;
+
+export declare function effectPipe<
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
+    T7,
+    T8,
+    T9,
+    T10,
+    T11,
+    T12,
+    T13,
+    T14,
+    T15,
+    T16,
+    T17,
+    T18,
+    T19,
+    T20,
+    E1 = unknown,
+    E2 = unknown,
+    E3 = unknown,
+    E4 = unknown,
+    E5 = unknown,
+    E6 = unknown,
+    E7 = unknown,
+    E8 = unknown,
+    E9 = unknown,
+    E10 = unknown,
+    E11 = unknown,
+    E12 = unknown,
+    E13 = unknown,
+    E14 = unknown,
+    E15 = unknown,
+    E16 = unknown,
+    E17 = unknown,
+    E18 = unknown,
+    E19 = unknown,
+    E20 = unknown,
+    C1 = unknown,
+    C2 = unknown,
+    C3 = unknown,
+    C4 = unknown,
+    C5 = unknown,
+    C6 = unknown,
+    C7 = unknown,
+    C8 = unknown,
+    C9 = unknown,
+    C10 = unknown,
+    C11 = unknown,
+    C12 = unknown,
+    C13 = unknown,
+    C14 = unknown,
+    C15 = unknown,
+    C16 = unknown,
+    C17 = unknown,
+    C18 = unknown,
+    C19 = unknown,
+    C20 = unknown
+>(
+    f1: (value: T0) => Effect<T1, E1, C1>,
+    f2: (value: T1) => Effect<T2, E2, C2>,
+    f3: (value: T2) => Effect<T3, E3, C3>,
+    f4: (value: T3) => Effect<T4, E4, C4>,
+    f5: (value: T4) => Effect<T5, E5, C5>,
+    f6: (value: T5) => Effect<T6, E6, C6>,
+    f7: (value: T6) => Effect<T7, E7, C7>,
+    f8: (value: T7) => Effect<T8, E8, C8>,
+    f9: (value: T8) => Effect<T9, E9, C9>,
+    f10: (value: T9) => Effect<T10, E10, C10>,
+    f11: (value: T10) => Effect<T11, E11, C11>,
+    f12: (value: T11) => Effect<T12, E12, C12>,
+    f13: (value: T12) => Effect<T13, E13, C13>,
+    f14: (value: T13) => Effect<T14, E14, C14>,
+    f15: (value: T14) => Effect<T15, E15, C15>,
+    f16: (value: T15) => Effect<T16, E16, C16>,
+    f17: (value: T16) => Effect<T17, E17, C17>,
+    f18: (value: T17) => Effect<T18, E18, C18>,
+    f19: (value: T18) => Effect<T19, E19, C19>,
+    f20: (value: T19) => Effect<T20, E20, C20>
+): (
+    start: T0
+) => Effect<
+    T20,
+    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17 | E18 | E19 | E20,
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16 & C17 & C18 & C19 & C20
+>;
 
 /**
- * Wraps one Command execution. `path` is the Command's position in the Effect tree rather than its
+ * Wraps one Command execution, or one `Parallel` (`type` `'Parallel'`, `name` `'Parallel'`), whose `op`
+ * runs its branches and returns its decision, even when a branch threw: the run rejects with the throw
+ * once the hook has returned. A hook must call `op` for a `Parallel`; returning without
+ * calling it is legitimate only for a Command, which is how replay works. Only a replay passes `op` an
+ * argument, the recorded decision. `path` is the step's position in the Effect tree rather than its
  * position in completion order, so it is the same in a replay as in the recorded run even when
- * `Parallel` branches finish in a different order. Hooks that take three parameters are unaffected.
+ * `Parallel` branches finish in a different order. Hooks that take three parameters are unaffected. The
+ * interpreter always passes `path`, so it is declared as present, and a wrapper that calls another
+ * `StepRunner` has to pass it on: a trace recorded without paths cannot replay a `Parallel`.
  */
-export type StepRunner = (name: string, type: string, op: () => Promise<unknown>, path?: string) => Promise<unknown>;
+export type StepRunner = (
+    name: string,
+    type: string,
+    op: (decision?: ParallelDecision) => Promise<unknown>,
+    path: string
+) => Promise<unknown>;
 
+/**
+ * Which branch, if any, cancelled a `Parallel`: what a `Parallel`'s step returns and what its trace entry
+ * records, so a replay reproduces the decision rather than recomputing it from timing. `branch: null`
+ * means an enclosing `Parallel` cancelled it.
+ */
+export type ParallelDecision = { cancelled: false } | { cancelled: true; branch: number | null };
+
+/** `flowName` is `context.flowName`, or `''` when the context has none; the interpreter always passes it. */
 export type RunWrapper = (
     effect: Effect<unknown>,
     op: () => Promise<SuccessState<unknown> | FailureState<unknown>>,
-    flowName?: string
+    flowName: string
 ) => Promise<SuccessState<unknown> | FailureState<unknown>>;
 
-export type CommandInterceptor = (command: CommandState<unknown, unknown>, context?: any) => Promise<void>;
+/**
+ * Runs before each Command; throw to abort. The interpreter awaits whatever it returns, so it need not be
+ * async. A union of two function types rather than one returning `Promise<void> | void`: in a JavaScript
+ * file, a JSDoc `@type` on an async function is its declared signature, and an async function's declared
+ * return type has to be a `Promise`, so the single signature broke every JSDoc-annotated async interceptor.
+ */
+export type CommandInterceptor =
+    | ((command: CommandState<unknown, unknown>, context?: any) => Promise<void>)
+    | ((command: CommandState<unknown, unknown>, context?: any) => void);
 
 export interface EffectConfiguration {
     onStep?: StepRunner;
     onRun?: RunWrapper;
     onBeforeCommand?: CommandInterceptor;
-    retry?: RetryOptions;
 }
 
 /**
  * Adds a layer to the global runner's wiring and returns a function that removes it. Layers merge:
  * `onStep` and `onRun` nest with the earliest layer outermost, `onBeforeCommand` interceptors all run
- * in the order installed, and `retry` merges with later layers winning. Several configurations passed
+ * in the order installed. Several configurations passed
  * to one call form one layer, which is the same as installing them in separate calls. Calling with no
  * arguments at all removes every layer; a call whose arguments are all `undefined` adds and removes nothing.
+ *
+ * A `retry` key throws a `TypeError`: retry options are per-use, passed to `Retry(effect, options)`.
  */
 export declare function configureEffect(...configs: (EffectConfiguration | undefined)[]): () => void;
 
 /**
  * A per-call configuration for `runEffect`. With `inherit: true` (default) the call's hooks are added to
- * the wiring `configureEffect` installed: where both define a hook the two nest, global outermost, and
- * `retry` merges with the call winning. With `inherit: false` the global wiring is ignored, so unset
- * slots fall back to the library defaults.
+ * the wiring `configureEffect` installed: where both define a hook the two nest, global outermost. With
+ * `inherit: false` the global wiring is ignored, so an unset hook falls back to the library default.
+ * A `retry` key throws a `TypeError`, as it does for `configureEffect`.
  */
 export type CallConfiguration = EffectConfiguration & { inherit?: boolean };
 
+/**
+ * A flow whose context type is not `unknown` reads one through `Ask`, so the context is required for it;
+ * the runtime would otherwise hand `Ask` an empty object.
+ */
 export declare function runEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
-    context?: Ctx,
-    callConfig?: CallConfiguration
+    ...args: unknown extends Ctx
+        ? [context?: Ctx, callConfig?: CallConfiguration]
+        : [context: Ctx, callConfig?: CallConfiguration]
 ): Promise<SuccessState<T> | FailureState<E>>;
 
 export type ReplayStep = {
@@ -324,16 +1278,21 @@ export type ReplayStep = {
      * whose branches finish in whatever order they finish in. Prefer `path`.
      */
     index: number;
-    /** `cmd.name`, or 'anonymous'. */
+    /** `meta.name`, `cmd.name`, or 'anonymous'; 'Parallel' for a `Parallel`'s step. */
     name: string;
-    /** Always 'Command' today; reserved. */
+    /**
+     * 'Command', or 'Parallel' for the step a `Parallel` records its decision under. A Resolver that
+     * answers a 'Parallel' step with `{ result: ParallelDecision }` has it reproduced; anything else
+     * replays that `Parallel` under timing. A 'Parallel' step does not advance `index`.
+     */
     type: string;
     /**
      * The Command's position in the Effect tree, stable across runs: steps are numbered within a
      * subtree, and each `Parallel` branch and `Retry` attempt opens its own prefix. This is what a
-     * replay matches on, and what a Resolver should key off. Absent on traces recorded before paths.
+     * replay matches on, and what a Resolver should key off. Every step has one; it is a recorded
+     * `TraceEntry` that can lack a path, when it was written by hand or recorded before paths existed.
      */
-    path?: string;
+    path: string;
 };
 
 /**
@@ -345,6 +1304,10 @@ export type ReplayOutcome = { result: unknown } | { error: unknown };
 
 export type Resolver = (step: ReplayStep) => ReplayOutcome | undefined;
 
+/**
+ * A recorded step: a Command's result or error, or a `Parallel`'s decision, whose `command` is
+ * 'Parallel', whose `path` ends in the `Parallel`'s `p` marker, and whose `result` is a `ParallelDecision`.
+ */
 export type TraceEntry = {
     command: string;
     /**
@@ -353,6 +1316,12 @@ export type TraceEntry = {
      */
     path?: string;
     result?: unknown;
+    /**
+     * Marks a step that threw. The `error` key alone cannot, since JSON drops it when the value is
+     * `undefined`, as it is for `reject()` with no argument. An entry with an `error` and no `threw`, as
+     * older traces have, still replays as a throw.
+     */
+    threw?: true;
     error?: unknown;
     /** How long the Command took in production, rounded to microseconds. */
     durationMs?: number;
@@ -374,8 +1343,11 @@ export interface RecorderOptions {
      * `initialInput` and `context` stored on the trace itself. `kind` is `'result'`, `'error'`,
      * `'initialInput'`, or `'context'`; `name` is the Command's name for the first two and the kind for
      * the last two. This is the single place PII is kept out of a trace, which is why it sees all four.
+     * It is handed a copy, so changing the value in place never reaches the run.
+     * `value` is `any` rather than `unknown` because a redact nearly always spreads or reads it, as in
+     * `{ ...value, password: '[redacted]' }`, and it can be any value a flow handles.
      */
-    redact?: (value: unknown, name: string, kind: 'result' | 'error' | 'initialInput' | 'context') => unknown;
+    redact?: (value: any, name: string, kind: 'result' | 'error' | 'initialInput' | 'context') => unknown;
     /** Cap trace length; further steps are counted in `dropped`, not stored. */
     maxEntries?: number;
     /** Record stack traces for thrown errors. Off by default. */
@@ -386,7 +1358,8 @@ export interface TraceMeta {
     initialInput?: unknown;
     flowName?: string;
     context?: unknown;
-    version?: string;
+    /** Accepts `undefined`, so `process.env.BUILD_ID` passes under `exactOptionalPropertyTypes`. */
+    version?: string | undefined;
 }
 
 export declare function recorder(options?: RecorderOptions): {
@@ -395,20 +1368,31 @@ export declare function recorder(options?: RecorderOptions): {
     toTrace(meta?: TraceMeta): TraceLog;
 };
 
-export declare function recordEffect<T, E = unknown, Ctx = unknown>(
-    flowFn: (input: any) => Effect<T, E, Ctx>,
-    initialInput: any,
-    options?: RecorderOptions & { context?: Ctx; version?: string }
+/** `recordEffect`'s options: recorder options, plus the context the run gets and a build id. */
+export type RecordOptions<Ctx = unknown> = RecorderOptions & { context?: Ctx; version?: string | undefined };
+
+/**
+ * The input is checked against what the flow takes. A flow whose context type is not `unknown` reads
+ * one through `Ask`, so recording it requires `options.context`.
+ */
+export declare function recordEffect<I, T, E = unknown, Ctx = unknown>(
+    flowFn: (input: I) => Effect<T, E, Ctx>,
+    initialInput: I,
+    ...options: unknown extends Ctx ? [options?: RecordOptions<Ctx>] : [options: RecordOptions<Ctx> & { context: Ctx }]
 ): Promise<{ result: SuccessState<T> | FailureState<E>; trace: TraceLog }>;
 
 export interface ReplayOptions<Ctx = unknown> {
-    /** Context for `Ask`. Pass the recorded context to reproduce a run faithfully. */
+    /**
+     * Context for `Ask`. With a trace it defaults to the context the trace recorded, so pass one only to
+     * replay with a different one. A Resolver has no recorded context, so pass it one if the flow reads `Ask`.
+     */
     context?: Ctx;
     /** Strip `Retry` delays so a replay does not wait out production backoff (default `true`). */
     fastRetry?: boolean;
     /**
      * Run the replay inside the global hooks, resolver innermost, so configured hooks observe it
-     * (default `false`, which ignores the global hooks). Global `retry` defaults apply either way.
+     * (default `false`, which ignores the global hooks). Retry options are per-use, so a replay reads the
+     * same ones the recorded run did.
      */
     hooks?: boolean;
     /**
@@ -458,5 +1442,5 @@ export declare function replayEffect<T, E = unknown, Ctx = unknown>(
 export declare function timeTravel<T, E = unknown, Ctx = unknown>(
     flowFn: (input: any) => Effect<T, E, Ctx>,
     traceLog: TraceLog,
-    options?: { log?: (...args: any[]) => void; context?: Ctx; version?: string }
+    options?: { log?: (...args: any[]) => void; context?: Ctx; version?: string | undefined }
 ): Promise<SuccessState<T> | FailureState<E>>;

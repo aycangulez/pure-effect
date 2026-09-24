@@ -1,6 +1,6 @@
 {
     "name": "pure-effect",
-    "version": "0.13.0",
+    "version": "0.14.0",
     "description": "Records what your business logic did in production and replays it anywhere: time-travel debugging for JavaScript and TypeScript, with zero dependencies. Business logic is plain data you can test without mocks.",
     "keywords": [
         "effect",
@@ -48,6 +48,8 @@
         "@opentelemetry/exporter-trace-otlp-proto": "^0.221.0",
         "@opentelemetry/sdk-node": "^0.221.0",
         "@opentelemetry/sdk-trace-base": "^2.10.0",
+        "@stryker-mutator/core": "^10.0.0",
+        "@stryker-mutator/mocha-runner": "^10.0.0",
         "@types/mocha": "^10.0.10",
         "@types/node": "^24.10.1",
         "mocha": "^11.3.0",

@@ -4,7 +4,7 @@ import { trace, SpanStatusCode } from '@opentelemetry/api';
 import { configureEffect } from '../index.js';
 
 /** @import { Tracer } from "@opentelemetry/api" */
-/** @import { EffectConfiguration, RunWrapper, StepRunner } from "../index.js" */
+/** @import { EffectConfiguration, ParallelDecision, RunWrapper, StepRunner } from "../index.js" */
 
 /**
  * Reference wiring for OpenTelemetry spans
@@ -23,10 +23,11 @@ import { configureEffect } from '../index.js';
  * the one place they cannot be redacted after the fact, and an initial input routinely holds a
  * password, a token, or a card number.
  *
- * These hooks use the raw `onStep` and `onRun` rather than `observe`, because a span has to wrap
- * `op`: `startActiveSpan` is what makes each Command span a child of the run's span. An integration
- * that only watches, such as metrics or logging, should use `observe` instead and cannot break a
- * flow by throwing.
+ * A span has to wrap `op`: `startActiveSpan` is what makes each Command span a child of the run's
+ * span. Anything these hooks throw reaches the flow. A throw after `op` succeeded rejects the run
+ * without running the Command again, one before `op` is called counts as the Command failing, and
+ * one from `onRun` rejects the run. An integration that only watches, such as metrics or logging,
+ * should catch its own errors so it cannot change a run's outcome.
  */
 
 /**
@@ -88,6 +89,8 @@ export function telemetryHooks(options = {}) {
     /**
      * `op` has to be awaited and its result returned. Returning a value without calling `op` is how
      * replay suppresses I/O, so a hook that forgot to call it would silently stop every Command.
+     * A Parallel's `op` returns its decision rather than throwing, even when a branch's own code threw,
+     * so a cancelled one is marked from the decision.
      * @type {StepRunner}
      */
     const onStep = (name, type, op) =>
@@ -95,7 +98,11 @@ export function telemetryHooks(options = {}) {
             span.setAttribute('effect.type', type);
             try {
                 const result = await op();
-                span.setStatus({ code: SpanStatusCode.OK });
+                const decision = type === 'Parallel' ? /** @type {ParallelDecision} */ (result) : undefined;
+                if (decision?.cancelled) {
+                    const by = decision.branch === null ? 'an enclosing Parallel' : `branch ${decision.branch}`;
+                    span.setStatus({ code: SpanStatusCode.ERROR, message: `Cancelled by ${by}` });
+                } else span.setStatus({ code: SpanStatusCode.OK });
                 return result;
             } catch (/** @type any */ err) {
                 span.recordException(err);

@@ -1,0 +1,13 @@
+{
+    "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+    "testRunner": "mocha",
+    "mochaOptions": {
+        "spec": ["test/all.js"]
+    },
+    "mutate": ["index.js"],
+    "coverageAnalysis": "perTest",
+    "reporters": ["clear-text", "progress", "html"],
+    "htmlReporter": {
+        "fileName": "reports/mutation/index.html"
+    }
+}
