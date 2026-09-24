@@ -102,7 +102,7 @@ const Command = (cmd, next = (/** @type {any} */ result) => Success(result), met
  */
 const commandName = (eff) => {
     const meta = eff.meta;
-    const named = meta && typeof meta === 'object' ? meta.name : undefined;
+    const named = isObject(meta) ? meta.name : undefined;
     return typeof named === 'string' && named !== '' ? named : eff.cmd.name || 'anonymous';
 };
 
@@ -172,6 +172,19 @@ const Parallel = (effects, nextOrOptions, maybeOptions) => {
         options: (hasNext ? maybeOptions : nextOrOptions) ?? {}
     };
 };
+
+/**
+ * Whether a value is an object that can carry properties: not `null`, a primitive, or a function.
+ * @param {any} value
+ * @returns {boolean}
+ */
+const isObject = (value) => value !== null && typeof value === 'object';
+
+/**
+ * @param {any} value
+ * @returns {boolean}
+ */
+const isPositiveInteger = (value) => Number.isInteger(value) && value >= 1;
 
 /**
  * Describes a value for an error message, leading with the mistake it most likely is.
@@ -263,12 +276,32 @@ const effectTypeError = (value, source) => {
 };
 
 /**
+ * A Success or a Failure: a flow with nothing left to run.
+ * @param {any} value
+ * @returns {value is SuccessState | FailureState}
+ */
+const isOutcome = (value) => ['Success', 'Failure'].includes(value?.type);
+
+/**
+ * A Command, Ask, Retry, or Parallel: a flow the interpreter still has work to do on.
+ * @param {any} value
+ * @returns {value is CommandState | AskState | RetryState | ParallelState}
+ */
+const isPending = (value) => ['Command', 'Ask', 'Retry', 'Parallel'].includes(value?.type);
+
+/**
+ * @param {any} value
+ * @returns {value is Effect}
+ */
+const isEffect = (value) => isOutcome(value) || isPending(value);
+
+/**
  * @param {any} value
  * @param {string} source
  * @returns {Effect}
  */
 const asEffect = (value, source) => {
-    if (value && ['Success', 'Failure', 'Command', 'Ask', 'Retry', 'Parallel'].includes(value.type)) return value;
+    if (isEffect(value)) return value;
     throw effectTypeError(value, source);
 };
 
@@ -360,7 +393,7 @@ const defaultRetryOptions = { attempts: 3, delay: 100, backoff: 1 };
  * @param {string} source
  */
 const rejectRetryKey = (config, source) => {
-    if (config && typeof config === 'object' && 'retry' in config)
+    if (isObject(config) && 'retry' in config)
         throw new TypeError(
             `${source} no longer takes 'retry'. Retry options are per-use: pass them to Retry(effect, options).`
         );
@@ -557,6 +590,13 @@ const cancelledBranch = (initialInput) =>
  */
 
 /**
+ * @param {any} branch
+ * @param {number} count - How many branches the Parallel has
+ * @returns {boolean}
+ */
+const isBranchIndex = (branch, count) => Number.isInteger(branch) && branch >= 0 && branch < count;
+
+/**
  * Reads a recorded decision, or `undefined` for anything that is not one, which replays the Parallel
  * under timing.
  * @param {any} value
@@ -564,12 +604,12 @@ const cancelledBranch = (initialInput) =>
  * @returns {ParallelDecision | undefined}
  */
 const asDecision = (value, branches) => {
-    if (!value || typeof value !== 'object') return undefined;
+    if (!isObject(value)) return undefined;
     if (value.cancelled === false) return { cancelled: false };
     if (value.cancelled !== true) return undefined;
     const { branch } = value;
     if (branch === null) return { cancelled: true, branch: null };
-    return Number.isInteger(branch) && branch >= 0 && branch < branches ? { cancelled: true, branch } : undefined;
+    return isBranchIndex(branch, branches) ? { cancelled: true, branch } : undefined;
 };
 
 /**
@@ -700,10 +740,7 @@ const runEffect =
          */
         async function execute(eff, signal, path = '') {
             let step = 0;
-            while (
-                eff &&
-                (eff.type === 'Command' || eff.type === 'Ask' || eff.type === 'Retry' || eff.type === 'Parallel')
-            ) {
+            while (isPending(eff)) {
                 // Checked before every node: a Command already in flight cannot be stopped, but the next never starts.
                 if (signal?.aborted) return cancelledBranch(eff.initialInput);
                 if (eff.type === 'Ask') {
@@ -722,7 +759,7 @@ const runEffect =
                 // rejects the run.
                 eff = eff.next(outcome.value);
             }
-            if (eff && (eff.type === 'Success' || eff.type === 'Failure')) return eff;
+            if (isOutcome(eff)) return eff;
             throw effectTypeError(eff, 'The flow');
         }
 
@@ -739,7 +776,7 @@ const runEffect =
             const opts = { ...defaultRetryOptions, ...retry.options };
             const { attempts, onExhausted } = opts;
             // `0` is refused rather than meaning run once: it would make `onExhausted` a free catch.
-            if (!Number.isInteger(attempts) || attempts < 1)
+            if (!isPositiveInteger(attempts))
                 throw new TypeError(
                     `Retry 'attempts' must be a positive integer, received ${describeValue(attempts)}. ` +
                         `To handle an outcome without retrying, branch on it as data in the Command's ` +
@@ -780,7 +817,7 @@ const runEffect =
             const branchPath = `${stepPath}p`;
             const options = parallel.options ?? {};
             const { limit, settled } = options;
-            if (limit !== undefined && (!Number.isInteger(limit) || limit < 1))
+            if (limit !== undefined && !isPositiveInteger(limit))
                 throw new TypeError(`Parallel 'limit' must be a positive integer, received ${describeValue(limit)}.`);
             // Cast rather than annotated, since only `op` assigns it.
             let run = /** @type {BranchRun | undefined} */ (undefined);
@@ -835,7 +872,8 @@ const runEffect =
             // A recorded branch past the end means the flow changed shape since the recording. A negative one is
             // not a decision, so it replays by timing like anything else.
             const recordedBranch = recorded?.cancelled === true ? recorded.branch : undefined;
-            if (Number.isInteger(recordedBranch) && recordedBranch >= effects.length) {
+            const pastTheEnd = Number.isInteger(recordedBranch) && recordedBranch >= effects.length;
+            if (pastTheEnd) {
                 const count = effects.length === 1 ? '1 branch' : `${effects.length} branches`;
                 throw replayError(
                     `Time paradox at path '${branchPath}': the recorded run was cancelled by branch ` +
@@ -890,7 +928,9 @@ const runEffect =
 
             if (forced !== undefined && forced.cancelled) {
                 // A branch that threw has no result to check, and its throw is what is rethrown.
-                if (!firstThrown && forced.branch !== null && results[forced.branch].type === 'Success') {
+                const recordedTriggerSucceeded =
+                    !firstThrown && forced.branch !== null && results[forced.branch].type === 'Success';
+                if (recordedTriggerSucceeded) {
                     throw replayError(
                         `Time paradox at path '${branchPath}': the recorded run was cancelled by ` +
                             `branch ${forced.branch}, which did not fail in this replay.`,
@@ -1068,7 +1108,8 @@ const serializeError = (e, withStack) => {
     // So is an AggregateError's `errors`, which is where its detail lives. It goes under its own key so
     // revival can tell it from an enumerable `errors`, which is data and is copied below as it is.
     const errors = /** @type {any} */ (e).errors;
-    if (Array.isArray(errors) && !Object.prototype.propertyIsEnumerable.call(e, 'errors')) {
+    const hasHiddenErrors = Array.isArray(errors) && !Object.prototype.propertyIsEnumerable.call(e, 'errors');
+    if (hasHiddenErrors) {
         out.__errors = errors.map((x) => serializeError(x, withStack));
     }
     for (const k of Object.keys(e)) out[k] = /** @type {any} */ (e)[k];
@@ -1082,14 +1123,16 @@ const serializeError = (e, withStack) => {
  * @returns {any}
  */
 const reviveError = (v) => {
-    if (!v || typeof v !== 'object' || v.__error !== true) return v;
+    if (!isObject(v) || v.__error !== true) return v;
     const e = new Error(v.message);
     // `name`, `cause` and `errors` are defined non-enumerable, as on a native Error, so a revived error
     // deep-equals the one the Command threw. Every other key was enumerable on the original.
     const hidden = { enumerable: false, configurable: true, writable: true };
     Object.defineProperty(e, 'name', { ...hidden, value: v.name });
+    // The marker is dropped, and `name` and `message` are already set.
+    const alreadyHandled = ['__error', 'name', 'message'];
     for (const [k, val] of Object.entries(v)) {
-        if (k === '__error' || k === 'name' || k === 'message') continue;
+        if (alreadyHandled.includes(k)) continue;
         if (k === 'cause') Object.defineProperty(e, 'cause', { ...hidden, value: reviveError(val) });
         else if (k === '__errors' && Array.isArray(val)) {
             Object.defineProperty(e, 'errors', { ...hidden, value: val.map(reviveError) });
@@ -1119,6 +1162,18 @@ const reviveError = (v) => {
  */
 
 /**
+ * An array, a plain object, or an object with no prototype: the shapes `copyAround` rebuilds itself rather
+ * than handing to `structuredClone`.
+ * @param {object} value
+ * @returns {boolean}
+ */
+const isPlainContainer = (value) => {
+    if (Array.isArray(value)) return true;
+    const proto = Object.getPrototypeOf(value);
+    return proto === Object.prototype || proto === null;
+};
+
+/**
  * Copies what `structuredClone` refused. Arrays and plain objects are rebuilt and everything inside them is
  * copied in turn, so only the parts that cannot be copied, such as a function or an object holding one, are
  * kept as they are. A context holding a logger is the usual case.
@@ -1128,10 +1183,9 @@ const reviveError = (v) => {
  * @returns {any}
  */
 const copyAround = (value, seen) => {
-    if (value === null || typeof value !== 'object') return value;
+    if (!isObject(value)) return value;
     if (seen.has(value)) return seen.get(value);
-    const proto = Object.getPrototypeOf(value);
-    if (!Array.isArray(value) && proto !== Object.prototype && proto !== null) {
+    if (!isPlainContainer(value)) {
         try {
             return structuredClone(value);
         } catch {
@@ -1139,7 +1193,7 @@ const copyAround = (value, seen) => {
         }
     }
     /** @type {any} */
-    const copy = Array.isArray(value) ? [] : Object.create(proto);
+    const copy = Array.isArray(value) ? [] : Object.create(Object.getPrototypeOf(value));
     seen.set(value, copy);
     for (const key of Object.keys(value)) copy[key] = copyAround(value[key], seen);
     return copy;
@@ -1155,7 +1209,7 @@ const copyAround = (value, seen) => {
  * @returns {any}
  */
 const snapshot = (value) => {
-    if (value === null || typeof value !== 'object') return value;
+    if (!isObject(value)) return value;
     try {
         return typeof structuredClone === 'function' ? structuredClone(value) : JSON.parse(JSON.stringify(value));
     } catch {
@@ -1259,17 +1313,36 @@ const recordEffect = async (flowFn, initialInput, options = {}) => {
 };
 
 /**
+ * Whether a recorded entry says its step threw: `threw`, or an `error` key, which is how older and
+ * hand-written traces say it.
+ * @param {TraceEntry} entry
+ * @returns {boolean}
+ */
+const entryThrew = (entry) => entry.threw === true || 'error' in entry;
+
+/**
+ * Whether a trace entry or a replay step carries a path.
+ * @param {{ path?: string }} step
+ * @returns {boolean}
+ */
+const hasPath = (step) => typeof step.path === 'string';
+
+/**
+ * Whether a path lies inside a Parallel branch, which a `p` followed by the branch number marks.
+ * @param {string | undefined} path
+ * @returns {boolean}
+ */
+const isInsideParallel = (path) => typeof path === 'string' && /p\d+\//.test(path);
+
+/**
  * Turns a recorded entry into the outcome a Resolver must return, snapshotted so a replayed step that
- * mutates its result cannot rewrite the trace. An entry is an error when it has `threw`, or an `error`
- * key, which is how older and hand-written traces say it.
+ * mutates its result cannot rewrite the trace.
  *
  * @param {TraceEntry} entry
  * @returns {ReplayOutcome}
  */
 const entryToOutcome = (entry) =>
-    entry.threw === true || 'error' in entry
-        ? { error: reviveError(snapshot(entry.error)) }
-        : { result: snapshot(entry.result) };
+    entryThrew(entry) ? { error: reviveError(snapshot(entry.error)) } : { result: snapshot(entry.result) };
 
 /**
  * Whether an entry is a Parallel's recorded decision rather than a Command's result. A Parallel's path
@@ -1308,7 +1381,7 @@ const fromTrace = (traceLog, options = {}) => {
         return entryToOutcome(entry);
     };
 
-    if (entries.length > 0 && entries.every((e) => typeof e.path === 'string')) {
+    if (entries.length > 0 && entries.every(hasPath)) {
         const byPath = new Map(entries.map((e) => [e.path, e]));
         // Paths are unique by construction, so a collision means a hand-built trace or a bug, and keeping
         // either entry would hand a branch the wrong result.
@@ -1355,7 +1428,7 @@ const fromTrace = (traceLog, options = {}) => {
         if (step.type === 'Parallel') return undefined;
         // Positional matching pairs steps by completion order, which cannot tell Parallel branches apart.
         // Refusing beats a result that is right only when the replay finishes in production's order.
-        if (typeof step.path === 'string' && /p\d+\//.test(step.path)) {
+        if (isInsideParallel(step.path)) {
             throw replayError(
                 `Trace carries no paths, so '${step.name}' inside a Parallel cannot be matched positionally.`,
                 { command: step.name, path: step.path }
@@ -1568,7 +1641,7 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
 
     // Timings are looked up by path, whatever order branches finished in, or by position for a trace
     // with no paths, which is how such a trace is matched anyway.
-    const byPath = new Map(trace.filter((e) => typeof e.path === 'string').map((e) => [e.path, e]));
+    const byPath = new Map(trace.filter(hasPath).map((e) => [e.path, e]));
     const timing = (/** @type {ReplayStep} */ step) => {
         const recorded = byPath.get(step.path) ?? trace[step.index];
         return typeof recorded?.durationMs === 'number' ? ` in ${recorded.durationMs}ms` : '';
@@ -1594,9 +1667,7 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
     const haltedByReplay = result.type === 'Failure' && /^(TimeParadox|ReplayError)$/.test(result.error?.name);
     if (unreached.length > 0 && !haltedByReplay) {
         // Named, not just counted: the step a fix stopped issuing is usually the one under suspicion.
-        const names = unreached.map((e) =>
-            typeof e.path === 'string' ? `${e.command} (path '${e.path}')` : e.command
-        );
+        const names = unreached.map((e) => (hasPath(e) ? `${e.command} (path '${e.path}')` : e.command));
         const count = unreached.length === 1 ? '1 recorded step was' : `${unreached.length} recorded steps were`;
         log(`Warning: ${count} never reached: ${names.join(', ')}. The flow diverged.`);
     }
