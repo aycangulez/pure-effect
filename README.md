@@ -9,7 +9,7 @@
 - Inject context without touching function signatures
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks
-- Zero dependencies, about 5 KB minified and gzipped
+- Zero dependencies, less than 6 KB minified and gzipped
 - Works in JavaScript and TypeScript (full generics, bundled `.d.ts`)
 
 ## Table of Contents
@@ -395,7 +395,7 @@ const fetchProfileUncancellable = (userId) => Command(() => fetch(`/users/${user
 
 Outside a `Parallel`, the function is called with no arguments. A `Retry` inside a cancelled branch stops retrying.
 
-Which branch failed first and cancelled the others depends on timing, so it is recorded with the trace. A replay of a cancelled `Parallel` returns the same failure production did, and stops each other branch where production stopped it, rather than letting whichever branch the replay reaches first decide. If the branch that cancelled the others no longer fails, the replay raises a `TimeParadox` naming it.
+Which branch failed first and cancelled the others depends on timing, so it is recorded with the trace. A replay of a cancelled `Parallel` returns the same failure production did, and stops each other branch where production stopped it, rather than letting whichever branch the replay reaches first decide. If the branch that cancelled the others no longer fails, or the `Parallel` no longer has that branch, the replay raises a `TimeParadox` naming it.
 
 ## Composing Larger Flows
 

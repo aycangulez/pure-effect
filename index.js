@@ -825,6 +825,20 @@ const runEffect =
                      */
                     const runBranches = async (recorded) => {
                         ran = true;
+                        // A recorded decision naming a branch past the end of this Parallel means the shape
+                        // changed since the recording. Falling back to timing would let whichever remaining
+                        // branch the replay reaches first decide, which is the wrong answer this fixed. A
+                        // negative branch is not a decision at all, since none is ever recorded, so it replays
+                        // by timing like anything else that is not one.
+                        const recordedBranch = recorded?.cancelled === true ? recorded.branch : undefined;
+                        if (Number.isInteger(recordedBranch) && recordedBranch >= effects.length) {
+                            const count = effects.length === 1 ? '1 branch' : `${effects.length} branches`;
+                            throw replayError(
+                                `Time paradox at path '${branchPath}': the recorded run was cancelled by branch ` +
+                                    `${recordedBranch}, but this Parallel has ${count}.`,
+                                { name: 'TimeParadox', path: branchPath, branch: recordedBranch }
+                            );
+                        }
                         const forced = asDecision(recorded, effects.length);
                         const reproducing = forced !== undefined && forced.cancelled;
                         // One scope per Parallel, linked to the enclosing one so cancellation nests.
