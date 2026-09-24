@@ -3694,6 +3694,31 @@ describe('Failure provenance', function () {
         assert.equal(faults, 3, 'an I/O fault inside a branch is still a fault');
     });
 
+    it('should treat a settled outcome a step returns as an abort, whatever the input', async function () {
+        // A settled Parallel hands `next` plain Failures, so returning one is a step returning a Failure.
+        // Provenance used to ride on the object as a hidden mark that `chain` dropped only when the
+        // pipeline had an input, so the same flow retried or not depending on that.
+        for (const input of [undefined, 'in']) {
+            let calls = 0;
+            const flow = effectPipe(
+                () =>
+                    Parallel(
+                        [
+                            Command(function cmdThrows() {
+                                calls++;
+                                return Promise.reject(new Error('down'));
+                            })
+                        ],
+                        { settled: true }
+                    ),
+                (/** @type {any[]} */ outcomes) => outcomes[0]
+            );
+            const result = await runEffect(Retry(flow(input), { attempts: 2, delay: 0 }));
+            assert.equal(calls, 1, `not retried with input ${input}`);
+            assert.equal(/** @type {any} */ (result).error.message, 'down', 'and not wrapped as an exhaustion');
+        }
+    });
+
     it('should treat an inner exhaustion as a fault so nested Retry still retries', async function () {
         let calls = 0;
         const inner = () =>
@@ -3725,9 +3750,9 @@ describe('Failure provenance', function () {
         assert.equal(/** @type {any} */ (result).error.retryExhausted, true, 'the recorded error replays as a fault');
     });
 
-    it('should keep the mark out of every comparison and serialization', async function () {
-        // The mark is internal and non-enumerable, so a test asserting on a Failure, a trace, and a
-        // caller reading the outcome all see exactly what they saw before it existed.
+    it('should hand the caller a plain Failure for an I/O fault', async function () {
+        // Provenance lives only inside the interpreter, so a fault and an abort reach the caller as the
+        // same three-key Failure and compare equal to one written by hand.
         const thrown = await runEffect(
             effectPipe(() =>
                 Command(function cmdThrows() {

@@ -373,6 +373,8 @@ Parallel(work, (outcomes) => Success(outcomes.map((o) => (o.type === 'Success' ?
 
 Logging the outcomes as they are would include the flow's input, which for a registration or login contains credentials.
 
+The outcomes are plain `Success` and `Failure` objects. Returning one of them from `next` is the same as returning any other `Failure`: the flow stops, and `Retry` does not run it again.
+
 Bugs in the flow are not collected. An `EffectTypeError`, thrown for a malformed flow, and an error thrown by a `next` function or a pure step both still escape a settled `Parallel`, after the other branches are cancelled.
 
 `limit` caps how many branches run at once; the rest start as others finish. Results and recorded paths stay in array order, so a limit changes only the pacing, and a trace recorded with a limit replays the same without one. A `limit` that is not a positive integer throws a `TypeError`.

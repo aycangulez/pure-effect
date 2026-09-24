@@ -217,21 +217,26 @@ const harnessError = Symbol('pure-effect.harnessError');
 const asHarnessError = (error) => Object.defineProperty(error, harnessError, { value: true });
 
 /**
- * Marks a `Failure` as an I/O fault: the Command's function threw rather than the flow deciding to
- * stop. One failure channel carries both, and without the distinction `Retry` could not tell "the
- * socket died, try again" from "this email is already taken", so it re-ran a lookup four times for an
- * answer that could not change, buried the domain error under `retryExhausted`, and let `onExhausted`
- * answer a deliberate abort. A `Failure` a step returned carries no mark and is an abort, which is the
- * right default for one written by hand or rebuilt by a caller. Non-enumerable, so it never reaches a
- * comparison, a trace, or a caller reading the outcome.
+ * An I/O fault: a Command's function threw, or a `Retry` ran out of attempts, rather than the flow
+ * deciding to stop. `Retry` acts on this and not on a `Failure` a step returned, which is an abort.
+ * Internal: only `execute` returns one, and it becomes a plain `Failure` wherever it would reach user
+ * code, at the `runEffect` boundary and in a settled `Parallel`'s outcomes. So whatever a step returns
+ * is an abort, and no object a caller holds carries provenance it could keep or lose by accident.
+ * @typedef {{ type: 'IoFault', error: any, initialInput?: any }} IoFaultState
  */
-const ioFault = Symbol('pure-effect.ioFault');
 
 /**
- * @param {FailureState} failure
- * @returns {FailureState}
+ * @param {any} error
+ * @param {any} [initialInput]
+ * @returns {IoFaultState}
  */
-const asIoFault = (failure) => Object.defineProperty(failure, ioFault, { value: true });
+const IoFault = (error, initialInput) => ({ type: 'IoFault', error, initialInput });
+
+/**
+ * @param {SuccessState | FailureState | IoFaultState} state
+ * @returns {SuccessState | FailureState}
+ */
+const asOutcome = (state) => (state.type === 'IoFault' ? Failure(state.error, state.initialInput) : state);
 
 /**
  * Checks that a value is an Effect, and explains the mistake when it is not.
@@ -654,7 +659,7 @@ const runEffect =
          *        attempt opens its own prefix, so a Command's full path depends only on the shape of the
          *        tree and not on the order branches happen to finish in. That is what lets a replay line
          *        a recorded step up with the step that asked for it.
-         * @returns {Promise<SuccessState | FailureState>}
+         * @returns {Promise<SuccessState | FailureState | IoFaultState>}
          */
         async function execute(eff, signal, path = '') {
             let step = 0;
@@ -707,14 +712,16 @@ const runEffect =
                         // An abort is the flow deciding, not the I/O failing, so there is nothing to
                         // try again and nothing for a fallback to answer. It leaves unwrapped: the
                         // exhaustion shape would be a claim about retrying that never happened.
-                        if (!(/** @type {any} */ (result)[ioFault])) return result;
+                        if (result.type !== 'IoFault') return result;
                         lastError = result.error;
                     }
 
                     if (!succeeded) {
                         const exhausted = { retryExhausted: true, lastError, attempts };
                         const { onExhausted } = opts;
-                        if (typeof onExhausted !== 'function') return asIoFault(Failure(exhausted, eff.initialInput));
+                        // An exhaustion came from I/O, so it is a fault too, which is what keeps an
+                        // enclosing Retry retrying this one.
+                        if (typeof onExhausted !== 'function') return IoFault(exhausted, eff.initialInput);
                         // A cancelled branch must not start its fallback, for the same reason it starts
                         // no further Commands: recovery must not resurrect work a sibling's failure ended.
                         if (signal?.aborted) return Failure(parallelCancelled(), eff.initialInput);
@@ -727,7 +734,7 @@ const runEffect =
                         );
                         // A failing fallback propagates as-is: the flow's last word was the fallback's
                         // error, not the exhaustion it was already told about.
-                        if (fallback.type === 'Failure') return fallback;
+                        if (fallback.type !== 'Success') return fallback;
                         eff = retryNext(fallback.value);
                     }
                     continue;
@@ -755,7 +762,7 @@ const runEffect =
                         else signal.addEventListener('abort', relay, { once: true });
                     }
 
-                    /** @type {(SuccessState | FailureState)[]} */
+                    /** @type {(SuccessState | FailureState | IoFaultState)[]} */
                     const results = new Array(eff.effects.length);
                     // Which branch failed on its own account rather than because it was cancelled.
                     const triggered = new Array(eff.effects.length).fill(false);
@@ -781,7 +788,7 @@ const runEffect =
                                 }
                                 results[i] = result;
                                 // Read-then-abort is atomic here, so exactly one branch is the trigger.
-                                if (result.type === 'Failure' && !settled && !branchSignal?.aborted) {
+                                if (result.type !== 'Success' && !settled && !branchSignal?.aborted) {
                                     triggered[i] = true;
                                     scope?.abort();
                                 }
@@ -795,15 +802,16 @@ const runEffect =
                     const firstThrown = thrown.find(Boolean);
                     if (firstThrown) throw firstThrown.error;
 
-                    // Settled hands the outcomes on as they are. A branch that failed is data here, so
-                    // `next` runs and the Parallel itself never fails on a branch's account.
+                    // Settled hands the outcomes on as plain Success and Failure nodes. A branch that
+                    // failed is data here, so `next` runs and the Parallel itself never fails on a
+                    // branch's account; and a Failure `next` returns is an abort like any other.
                     if (settled) {
-                        eff = eff.next(results);
+                        eff = eff.next(results.map(asOutcome));
                         continue;
                     }
 
                     const trigger = triggered.indexOf(true);
-                    const failure = trigger >= 0 ? results[trigger] : results.find((r) => r.type === 'Failure');
+                    const failure = trigger >= 0 ? results[trigger] : results.find((r) => r.type !== 'Success');
                     if (failure) return failure;
                     eff = eff.next(results.map((r) => /** @type {SuccessState} */ (r).value));
                     continue;
@@ -831,7 +839,7 @@ const runEffect =
                     result = await localStepRunner(cmdName, 'Command', op, cmdPath);
                 } catch (e) {
                     if (e && /** @type {any} */ (e)[harnessError]) throw e;
-                    return asIoFault(Failure(e, initialInput));
+                    return IoFault(e, initialInput);
                 }
                 // Outside both catches: `next`, and every pure step it reaches up to the next Command, is
                 // code rather than I/O, so a throw there is a bug and rejects the run like a throw from
@@ -847,10 +855,11 @@ const runEffect =
         // back. `chain` stamps only what passes through the continuations it wraps, and those subtrees
         // are executed directly rather than reached through a continuation, so their Failures arrive
         // carrying the subtree's own input or none. Restamping the outcome with the root's input is
-        // what makes "a Failure carries the input of the flow that was called" true at any depth.
+        // what makes "a Failure carries the input of the flow that was called" true at any depth. An I/O
+        // fault becomes a plain Failure here too, since this is where it would first reach the caller.
         const rootInput = effect?.initialInput;
         const run = async () => {
-            const result = await execute(effect);
+            const result = asOutcome(await execute(effect));
             return result.type === 'Failure' && rootInput !== undefined ? Failure(result.error, rootInput) : result;
         };
         return localRunWrapper(effect, run, context?.flowName || '');
