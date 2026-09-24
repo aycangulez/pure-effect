@@ -820,9 +820,26 @@ const runEffect =
                 const initialInput = eff.initialInput;
                 const cmdPath = `${path}${step++}`;
                 const cmd = eff.cmd;
-                // The signal reaches the thunk only inside a Parallel, so a thunk written to take a
-                // parameter is not handed an argument it never expected anywhere else.
-                const op = signal ? () => cmd(signal) : cmd;
+                // Whether the Command's function itself succeeded. That is what tells a throw from the step
+                // runner apart: the function failing is an I/O fault, while a hook failing after the function
+                // returned is a bug, and retrying it would repeat work that is already done.
+                let succeeded = false;
+                // The signal reaches the function only inside a Parallel, so a function written to take a
+                // parameter is not handed an argument it never expected anywhere else. A synchronous
+                // function's value comes back as it is rather than in a promise, so a hook calling `op()`
+                // sees what it always saw.
+                const op = () => {
+                    succeeded = false;
+                    const value = signal ? cmd(signal) : cmd();
+                    if (!value || typeof value.then !== 'function') {
+                        succeeded = true;
+                        return value;
+                    }
+                    return value.then((/** @type {any} */ v) => {
+                        succeeded = true;
+                        return v;
+                    });
+                };
                 // Three separate regions, because a throw means something different in each. An
                 // interceptor that throws is vetoing the Command, which is the flow being stopped rather
                 // than the I/O failing, so it is an abort and `Retry` passes it on. Only a throw from the
@@ -839,6 +856,10 @@ const runEffect =
                     result = await localStepRunner(cmdName, 'Command', op, cmdPath);
                 } catch (e) {
                     if (e && /** @type {any} */ (e)[harnessError]) throw e;
+                    // The function returned and a hook threw afterwards: a bug in the hook, rejected like a
+                    // throw from `next`. A hook that throws without calling `op` is still a fault, since that
+                    // is how replay reports a recorded error.
+                    if (succeeded) throw e;
                     return IoFault(e, initialInput);
                 }
                 // Outside both catches: `next`, and every pure step it reaches up to the next Command, is
@@ -1125,10 +1146,15 @@ const recordEffect = async (flowFn, initialInput, options = {}) => {
 /**
  * Turns a recorded entry into the outcome a Resolver must return.
  *
+ * The recorded value is snapshotted on the way out, as it was on the way in. Handing the flow the
+ * entry's own object let a replayed step that mutates its result rewrite the trace, so replaying the
+ * same trace twice gave two different answers.
+ *
  * @param {TraceEntry} entry
  * @returns {ReplayOutcome}
  */
-const entryToOutcome = (entry) => ('error' in entry ? { error: reviveError(entry.error) } : { result: entry.result });
+const entryToOutcome = (entry) =>
+    'error' in entry ? { error: reviveError(snapshot(entry.error)) } : { result: snapshot(entry.result) };
 
 /**
  * Builds a Resolver for the reference trace format. Internal: `replayEffect` calls this

@@ -2269,6 +2269,40 @@ describe('Recorded values are snapshots', function () {
         assert.equal(result.type, 'Success', 'an uncloneable result must not fail the run');
         assert.equal(/** @type {any} */ (rec.entries[0].result).ok, true, 'and the entry is still recorded');
     });
+
+    it('should not let a replayed flow rewrite the trace it replays', async function () {
+        const flow = () =>
+            Command(
+                function cmdFetchCart() {
+                    return { items: ['a', 'b'] };
+                },
+                (/** @type {any} */ cart) => {
+                    cart.items.push('c');
+                    return Success(cart.items.length);
+                }
+            );
+        const { trace } = await recordEffect(flow, null);
+        assert.deepEqual(trace.trace[0].result, { items: ['a', 'b'] }, 'recording snapshots the result');
+
+        const first = await replayEffect(flow(), trace);
+        const second = await replayEffect(flow(), trace);
+        assert.deepEqual(first.result, Success(3));
+        assert.deepEqual(second.result, Success(3), 'a second replay sees what production saw');
+        assert.deepEqual(trace.trace[0].result, { items: ['a', 'b'] }, 'and the trace is unchanged');
+    });
+
+    it('should not let a caller rewrite a recorded error through a replayed Failure', async function () {
+        const flow = () =>
+            Command(function cmdCallGateway() {
+                return Promise.reject(Object.assign(new Error('503'), { response: { status: 503 } }));
+            });
+        const { trace } = await recordEffect(flow, null);
+
+        const first = await replayEffect(flow(), trace);
+        /** @type {any} */ (first.result).error.response.status = 200;
+        const second = await replayEffect(flow(), trace);
+        assert.equal(/** @type {any} */ (second.result).error.response.status, 503);
+    });
 });
 
 describe('initialInput stamping', function () {
@@ -3909,5 +3943,94 @@ describe('Where a throw comes from', function () {
         );
         assert.equal(/** @type {any} */ (result).error.retryExhausted, true);
         assert.equal(calls, 3);
+    });
+
+    it('should reject when an onStep hook throws after the Command succeeded, and not run it again', async function () {
+        // A telemetry hook whose exporter fails once the Command has returned. The work is done, so this
+        // is a bug in the hook, and retrying it charged the card once per attempt.
+        let charges = 0;
+        const exporterFull = new Error('exporter queue full');
+        configureEffect({
+            onStep: async (name, type, op) => {
+                await op();
+                throw exporterFull;
+            }
+        });
+        const flow = Retry(
+            Command(function cmdCharge() {
+                charges++;
+                return { charged: true };
+            }),
+            { attempts: 2, delay: 0, onExhausted: () => Success({ charged: false }) }
+        );
+        await assert.rejects(runEffect(flow), (e) => e === exporterFull);
+        assert.equal(charges, 1, 'a Command that succeeded is not repeated for a hook that failed after it');
+    });
+
+    it('should still retry an onStep hook that throws without calling op', async function () {
+        // How replay reports a recorded error, and how a circuit breaker written as a hook refuses a call.
+        let refusals = 0;
+        let calls = 0;
+        configureEffect({
+            onStep: async () => {
+                refusals++;
+                throw new Error('circuit open');
+            }
+        });
+        const result = await runEffect(
+            Retry(
+                Command(function cmdWork() {
+                    calls++;
+                    return 'ok';
+                }),
+                { attempts: 2, delay: 0 }
+            )
+        );
+        assert.equal(/** @type {any} */ (result).error.retryExhausted, true);
+        assert.equal(refusals, 3);
+        assert.equal(calls, 0);
+    });
+
+    it('should still retry when a hook rethrows the Command error as a different error', async function () {
+        let calls = 0;
+        configureEffect({
+            onStep: async (name, type, op) => {
+                try {
+                    return await op();
+                } catch (e) {
+                    throw new Error(`${name} failed`, { cause: e });
+                }
+            }
+        });
+        const result = await runEffect(
+            Retry(
+                Command(function cmdFlaky() {
+                    calls++;
+                    throw new Error('socket reset');
+                }),
+                { attempts: 2, delay: 0 }
+            )
+        );
+        assert.equal(calls, 3, 'the Command failed, so the wrapped error is still an I/O fault');
+        assert.equal(/** @type {any} */ (result).error.lastError.message, 'cmdFlaky failed');
+    });
+
+    it('should hand a hook the value of a synchronous Command without a promise', async function () {
+        /** @type {any[]} */
+        const seen = [];
+        configureEffect({
+            onStep: async (name, type, op) => {
+                const value = op();
+                seen.push(value);
+                return value;
+            }
+        });
+        const result = await runEffect(
+            Command(function cmdSync() {
+                return 42;
+            })
+        );
+        assert.deepEqual(result, Success(42));
+        assert.deepEqual(seen, [42], 'op() returns the value itself for a synchronous function');
     });
 });
