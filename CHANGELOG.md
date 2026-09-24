@@ -6,6 +6,7 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 
 ### Added
 
+- **`effectPipe` is typed for up to 20 steps.** It was 8, and a ninth step was a compile error. A pipeline is itself a step, so a longer one still nests: `effectPipe(effectPipe(s1, s2), effectPipe(s3, s4))`.
 - **`Parallel` takes options: `limit` and `settled`.** `Parallel(effects, { limit: 5 })` keeps at most five branches in flight, for a dependency that rate limits; results and recorded paths stay in array order, so a limit changes pacing and nothing else. `Parallel(effects, { settled: true })` runs every branch to completion and hands `next` one outcome per branch, `Success` or `Failure`, in array order, so a batch survives one bad record instead of being cancelled mid-flow by it. An `EffectTypeError` still escapes a settled `Parallel`, because a malformed flow is a bug rather than a branch outcome. The second argument is `next` or the options, whichever it looks like, so existing calls are untouched and neither form needs a placeholder.
 
 ### Changed

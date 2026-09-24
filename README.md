@@ -514,6 +514,8 @@ if (result.type === 'Failure') {
 
 Value types are checked through the pipeline too, so a step that reads a field the previous step does not return is a compile error. This only works while every step uses the value it receives. A step written as `() => doSomething(outer)` ignores it, and the types stop being checked at that point.
 
+`effectPipe` is typed for up to 20 steps. A pipeline is itself a step, so a longer one nests, which is usually easier to read anyway: `effectPipe(effectPipe(s1, s2), effectPipe(s3, s4))`.
+
 ### Typed context with `Ask`
 
 `Effect<T, E, Ctx>` carries a third type parameter for the context object:

@@ -222,6 +222,88 @@ expectType<Effect<SavedUser, ValidationError | DbError>>(typedFlow({ email: 'a@b
 const typedResult = await runEffect(typedFlow({ email: 'a@b.com', password: 'secret123' }));
 expectType<SuccessState<SavedUser> | FailureState<ValidationError | DbError>>(typedResult);
 
+// --- long pipelines: typed for up to 20 steps, the same ceiling as Effect-TS ---
+
+const stepWith =
+    <E extends string>(error: E) =>
+    (n: number): Effect<number, E, AppCtx> =>
+        n < 0 ? Failure(error) : Success(n + 1);
+
+// Nine steps, past the old ceiling of eight. The last step is inline and unannotated, and still typed.
+const nineSteps = effectPipe(
+    stepWith('e1'),
+    stepWith('e2'),
+    stepWith('e3'),
+    stepWith('e4'),
+    stepWith('e5'),
+    stepWith('e6'),
+    stepWith('e7'),
+    stepWith('e8'),
+    (n): Effect<string, 'e9', AppCtx> => {
+        expectType<number>(n);
+        return Success(String(n));
+    }
+);
+expectType<Effect<string, 'e1' | 'e2' | 'e3' | 'e4' | 'e5' | 'e6' | 'e7' | 'e8' | 'e9', AppCtx>>(nineSteps(0));
+
+// Twenty steps: the value, every step's error, and the context all reach the end.
+const twentySteps = effectPipe(
+    stepWith('e1'),
+    stepWith('e2'),
+    stepWith('e3'),
+    stepWith('e4'),
+    stepWith('e5'),
+    stepWith('e6'),
+    stepWith('e7'),
+    stepWith('e8'),
+    stepWith('e9'),
+    stepWith('e10'),
+    stepWith('e11'),
+    stepWith('e12'),
+    stepWith('e13'),
+    stepWith('e14'),
+    stepWith('e15'),
+    stepWith('e16'),
+    stepWith('e17'),
+    stepWith('e18'),
+    stepWith('e19'),
+    (n): Effect<{ total: number }, 'e20', AppCtx> => {
+        expectType<number>(n);
+        return Success({ total: n });
+    }
+);
+type TwentyErrors =
+    | 'e1'
+    | 'e2'
+    | 'e3'
+    | 'e4'
+    | 'e5'
+    | 'e6'
+    | 'e7'
+    | 'e8'
+    | 'e9'
+    | 'e10'
+    | 'e11'
+    | 'e12'
+    | 'e13'
+    | 'e14'
+    | 'e15'
+    | 'e16'
+    | 'e17'
+    | 'e18'
+    | 'e19'
+    | 'e20';
+expectType<Effect<{ total: number }, TwentyErrors, AppCtx>>(twentySteps(0));
+
+// Twenty-one is past the ceiling. A pipeline is itself a step, so a longer one nests.
+const step = stepWith('e');
+const eleven = [step, step, step, step, step, step, step, step, step, step, step] as const;
+const ten = [step, step, step, step, step, step, step, step, step, step] as const;
+// @ts-expect-error typed for up to 20 steps; nest pipelines for more
+effectPipe(...eleven, ...ten);
+const nested = effectPipe(effectPipe(...eleven), effectPipe(...ten));
+expectType<Effect<number, 'e', AppCtx>>(nested(0));
+
 // --- Parallel ---
 
 // Values tuple is correctly typed
