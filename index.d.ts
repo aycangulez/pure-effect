@@ -57,14 +57,21 @@ export type RetryOptions = {
 export type RetryState<T, E = unknown, Ctx = unknown> = {
     type: 'Retry';
     effect: Effect<T, any, Ctx>;
-    options: RetryOptions & { onExhausted?: (error: RetryExhaustedError<any>) => Effect<T, any, Ctx> };
+    options: RetryOptions & { onExhausted?: (error: RetryExhaustedError) => Effect<T, any, Ctx> };
     next(value: T): Effect<T, E, Ctx>;
     initialInput?: unknown;
 };
 
-export type RetryExhaustedError<E = unknown> = {
+/**
+ * The error a `Retry` fails with once every attempt has hit an I/O fault. `lastError` is what the last
+ * attempt threw: a Command's function throwing, or a nested `Retry` running out. It is never a `Failure`
+ * a step returned, since that is an abort and is not retried, so the wrapped tree's error type cannot
+ * reach it. Nothing declares what a function throws, so `Retry` leaves `Thrown` as `unknown`; pass it
+ * only to annotate a value whose thrown type you already know.
+ */
+export type RetryExhaustedError<Thrown = unknown> = {
     retryExhausted: true;
-    lastError: E;
+    lastError: Thrown;
     attempts: number;
 };
 
@@ -135,19 +142,19 @@ export declare function Ask<T, E = unknown, Ctx = unknown>(
  */
 export declare function Retry<T, E = unknown, E2 = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
-    options: RetryOptions & { onExhausted: (error: RetryExhaustedError<E>) => Effect<T, E2, Ctx> }
+    options: RetryOptions & { onExhausted: (error: RetryExhaustedError) => Effect<T, E2, Ctx> }
 ): RetryState<T, E | E2, Ctx>;
 
 /**
  * Without `onExhausted`, an I/O fault the retry loop cannot get past arrives as
- * `Failure({ retryExhausted: true, lastError, attempts })` rather than the inner error itself, so
- * `result.error.lastError` is where that `E` survives. An abort the wrapped tree returned is not
- * retried and is not wrapped, so `E` also reaches the pipeline as itself.
+ * `Failure({ retryExhausted: true, lastError, attempts })`, with whatever was thrown as `lastError`.
+ * An abort the wrapped tree returned is not retried and is not wrapped, so `E` reaches the pipeline
+ * as itself and never as `lastError`.
  */
 export declare function Retry<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     options?: RetryOptions
-): RetryState<T, E | RetryExhaustedError<E>, Ctx>;
+): RetryState<T, E | RetryExhaustedError, Ctx>;
 
 /**
  * `next` is optional and defaults to `(values) => Success(values)`, same as `Command`'s default,

@@ -320,7 +320,7 @@ When every attempt fails, `runEffect` returns a `Failure` with this error:
 { retryExhausted: true, lastError: <the last error>, attempts: 3 }
 ```
 
-In TypeScript, a `Retry` adds `RetryExhaustedError<E>` to the pipeline's error union, not the inner `E`. The inner error type is available as `result.error.lastError`.
+In TypeScript, a `Retry` adds `RetryExhaustedError` to the pipeline's error union, next to the error type of the steps it wraps, since a `Failure` those steps return passes through unchanged. `lastError` is typed `unknown`: it is whatever the Command's function threw, and nothing in the types says what that is, so check it before using it, for example with `instanceof Error`.
 
 **Use `onExhausted` to fall back when every attempt fails.** The fallback runs instead of returning the `Failure`. If it succeeds, its value continues down the pipeline. If it fails, its own `Failure` is returned as is:
 
@@ -332,7 +332,7 @@ const fetchPrice = (sku) =>
     });
 ```
 
-Fallback steps are recorded, so a replay repeats the fallback too. A fallback never starts in a `Parallel` branch that has already been cancelled. With `onExhausted` set, the `Retry` adds the fallback's error type to the TypeScript error union instead of `RetryExhaustedError<E>`.
+Fallback steps are recorded, so a replay repeats the fallback too. A fallback never starts in a `Parallel` branch that has already been cancelled. With `onExhausted` set, the `Retry` adds the fallback's error type to the TypeScript error union instead of `RetryExhaustedError`.
 
 Every attempt is recorded, so a replay repeats the same sequence of failures, without the delays.
 

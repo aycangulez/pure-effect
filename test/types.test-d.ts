@@ -148,11 +148,11 @@ const innerCmd = Command(
 // abort the wrapped tree returned, which is not retried and leaves unwrapped, and the exhaustion
 // failure that follows an I/O fault the loop could not get past.
 const retried = Retry(innerCmd, { attempts: 3 });
-expectType<RetryState<number, unknown | RetryExhaustedError<unknown>>>(retried);
+expectType<RetryState<number, unknown | RetryExhaustedError>>(retried);
 
 // Retry without options is valid
 const retriedNoOpts = Retry(innerCmd);
-expectType<RetryState<number, unknown | RetryExhaustedError<unknown>>>(retriedNoOpts);
+expectType<RetryState<number, unknown | RetryExhaustedError>>(retriedNoOpts);
 
 // Retry in effectPipe preserves type flow
 const retryFlow = effectPipe((input: User) =>
@@ -164,26 +164,29 @@ const retryFlow = effectPipe((input: User) =>
         { attempts: 2 }
     )
 );
-expectType<Effect<SavedUser, unknown | RetryExhaustedError<unknown>>>(
-    retryFlow({ email: 'a@b.com', password: 'secret123' })
-);
+expectType<Effect<SavedUser, unknown | RetryExhaustedError>>(retryFlow({ email: 'a@b.com', password: 'secret123' }));
 
-// The inner error type survives inside the exhaustion failure, so lastError is typed
+// The wrapped tree's error type is an abort, which is never retried, so it leaves as itself and
+// cannot be what lastError holds: that is only ever a thrown value, which nothing types.
 const retriedTyped = Retry(Success(1) as Effect<number, 'net_down'>);
-expectType<RetryState<number, 'net_down' | RetryExhaustedError<'net_down'>>>(retriedTyped);
+expectType<RetryState<number, 'net_down' | RetryExhaustedError>>(retriedTyped);
 
 const retryResult = await runEffect(Retry(Success(1) as Effect<number, 'flaky'>, { attempts: 1 }));
 if (retryResult.type === 'Failure') {
-    expectType<'flaky' | RetryExhaustedError<'flaky'>>(retryResult.error);
+    expectType<'flaky' | RetryExhaustedError>(retryResult.error);
     // An abort arrives as itself, so the union has to be narrowed before `lastError` is there.
-    if (typeof retryResult.error === 'object') expectType<'flaky'>(retryResult.error.lastError);
+    if (typeof retryResult.error === 'object') {
+        expectType<unknown>(retryResult.error.lastError);
+        // @ts-expect-error lastError is what a Command's function threw, never the wrapped tree's abort type
+        const abortAsLastError: 'flaky' = retryResult.error.lastError;
+    }
 }
 
 // onExhausted consumes the exhaustion, so the fallback's error type is what remains
 const recovered = Retry(Success(1) as Effect<number, 'flaky'>, {
     attempts: 1,
     onExhausted: (err) => {
-        expectType<RetryExhaustedError<'flaky'>>(err);
+        expectType<RetryExhaustedError>(err);
         return Success(0) as Effect<number, 'cache_miss'>;
     }
 });
@@ -198,7 +201,8 @@ if (recoveredResult.type === 'Failure') {
 // @ts-expect-error retry options, onExhausted included, are per-use rather than configured
 configureEffect({ retry: { attempts: 2, onExhausted: () => Success(1) } });
 
-// RetryExhaustedError shape is usable for narrowing exhaustion failures
+// RetryExhaustedError shape is usable for narrowing exhaustion failures, and its parameter annotates a
+// thrown type the caller already knows
 const exhaustedErr: RetryExhaustedError<Error> = {
     retryExhausted: true,
     lastError: new Error('boom'),
