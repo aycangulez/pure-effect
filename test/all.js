@@ -4590,7 +4590,27 @@ describe('Replaying a cancelled Parallel', function () {
         configureEffect({
             onStep: async (name, type, op) => (type === 'Parallel' ? 'skipped' : op())
         });
-        await assert.rejects(runEffect(Parallel([Success(1)])), (e) => e instanceof TypeError && /op/.test(e.message));
+        await assert.rejects(
+            runEffect(Parallel([Success(1)])),
+            (e) => e instanceof TypeError && /onStep hook returned without/.test(e.message)
+        );
+    });
+
+    it('should reject when a hook swallows what op threw for a Parallel, rather than continue with no results', async function () {
+        // A decision naming a branch the Parallel does not have makes `op` throw a TimeParadox.
+        /** @type {import('../index.js').StepRunner} */
+        const swallowing = async (name, type, op) => {
+            if (type !== 'Parallel') return op();
+            try {
+                return await op({ cancelled: true, branch: 5 });
+            } catch {
+                return 'swallowed';
+            }
+        };
+        await assert.rejects(
+            runEffect(Parallel([Success(1), Success(2)]), {}, { onStep: swallowing }),
+            (e) => e instanceof TypeError && /onStep hook returned without/.test(e.message)
+        );
     });
 
     it('should let a Resolver supply the decision, and ignore one that is not a decision', async function () {
