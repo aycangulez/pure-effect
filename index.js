@@ -192,13 +192,15 @@ const describeValue = (value) =>
         ? 'undefined, which usually means a missing return'
         : value === null
           ? 'null'
-          : typeof value === 'function'
-            ? 'a function, which usually means a flow was passed without being called with its input'
-            : typeof value === 'object'
-              ? typeof value.type === 'string'
-                  ? `an object with an unrecognised type '${value.type}'`
-                  : 'a plain object'
-              : `the ${typeof value} ${JSON.stringify(value)}`;
+          : value instanceof Promise
+            ? 'a Promise, which usually means an async function'
+            : typeof value === 'function'
+              ? 'a function, which usually means a flow was passed without being called with its input'
+              : typeof value === 'object'
+                ? typeof value.type === 'string'
+                    ? `an object with an unrecognised type '${value.type}'`
+                    : 'a plain object'
+                : `the ${typeof value} ${JSON.stringify(value)}`;
 
 /**
  * Marks an error as the harness failing rather than the flow. The interpreter rethrows anything
@@ -248,16 +250,24 @@ const asOutcome = (state) => (state.type === 'IoFault' ? Failure(state.error, st
  * @param {string} source - What produced the value, named where it is known
  * @returns {Error}
  */
-const effectTypeError = (value, source) =>
-    asHarnessError(
+const effectTypeError = (value, source) => {
+    const isPromise = value instanceof Promise;
+    // This error already reports the bug, so a rejection of the same Promise must not also crash the
+    // process as unhandled after the caller has caught it. Only a native Promise, which is what an async
+    // function returns: calling `then` on a query builder from Knex or Mongoose runs the query.
+    if (isPromise) value.catch(() => {});
+    return asHarnessError(
         Object.assign(
             new Error(
                 `${source} returned ${describeValue(value)}. Return Success, Failure, Command, Ask, Retry, or Parallel: ` +
-                    'a plain value has to be wrapped, as in Success(value).'
+                    (isPromise
+                        ? 'a step cannot be async, so do the awaited work in a Command and continue in its next.'
+                        : 'a plain value has to be wrapped, as in Success(value).')
             ),
             { name: 'EffectTypeError' }
         )
     );
+};
 
 /**
  * @param {any} value

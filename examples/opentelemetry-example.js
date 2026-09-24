@@ -23,10 +23,11 @@ import { configureEffect } from '../index.js';
  * the one place they cannot be redacted after the fact, and an initial input routinely holds a
  * password, a token, or a card number.
  *
- * These hooks use the raw `onStep` and `onRun` rather than `observe`, because a span has to wrap
- * `op`: `startActiveSpan` is what makes each Command span a child of the run's span. An integration
- * that only watches, such as metrics or logging, should use `observe` instead and cannot break a
- * flow by throwing.
+ * A span has to wrap `op`: `startActiveSpan` is what makes each Command span a child of the run's
+ * span. Anything these hooks throw reaches the flow. A throw after `op` succeeded rejects the run
+ * without running the Command again, one before `op` is called counts as the Command failing, and
+ * one from `onRun` rejects the run. An integration that only watches, such as metrics or logging,
+ * should catch its own errors so it cannot change a run's outcome.
  */
 
 /**

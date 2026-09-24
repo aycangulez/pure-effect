@@ -2905,6 +2905,66 @@ describe('Malformed flows', function () {
         assert.equal(result.type, 'Failure', 'domain failures are unaffected by the new guard');
         assert.equal(/** @type {Error} */ (errorOf(result)).message, 'boom');
     });
+
+    it('should call an async step what it is, rather than asking for Success', async function () {
+        // An async function returns a Promise even when its body returns Success, so "wrap it in
+        // Success" was advice the developer had already followed.
+        const e = await errorFrom(() =>
+            effectPipe(
+                /** @type {any} */ (
+                    async function loadDefaults(/** @type {any} */ x) {
+                        return Success(x);
+                    }
+                )
+            )({})
+        );
+        assert.equal(e?.name, 'EffectTypeError');
+        assert.match(e.message, /Step 'loadDefaults' returned a Promise, which usually means an async function/);
+        assert.match(e.message, /Command/, 'the message says where the awaited work belongs');
+        assert.doesNotMatch(e.message, /Success\(value\)/);
+    });
+
+    it('should call an async Command next what it is', async function () {
+        const e = await errorFrom(() =>
+            runEffect(
+                effectPipe(() =>
+                    Command(
+                        function cmdFind() {
+                            return 1;
+                        },
+                        /** @type {any} */ (async (/** @type {any} */ r) => Success(r))
+                    )
+                )({})
+            )
+        );
+        assert.equal(e?.name, 'EffectTypeError');
+        assert.match(e.message, /A continuation returned a Promise/);
+    });
+
+    it('should not leave a throwing async step as an unhandled rejection', async function () {
+        // The EffectTypeError reports the bug. The step's own Promise rejecting with nothing attached
+        // used to crash the process on top of it, after the caller had already caught the error.
+        /** @type {unknown[]} */
+        const unhandled = [];
+        const onUnhandled = (/** @type {unknown} */ reason) => unhandled.push(reason);
+        process.on('unhandledRejection', onUnhandled);
+        try {
+            const e = await errorFrom(() =>
+                effectPipe(
+                    /** @type {any} */ (
+                        async function validate() {
+                            throw new Error('email required');
+                        }
+                    )
+                )({})
+            );
+            assert.equal(e?.name, 'EffectTypeError');
+            await new Promise((resolve) => setTimeout(resolve, 20));
+        } finally {
+            process.off('unhandledRejection', onUnhandled);
+        }
+        assert.deepEqual(unhandled, []);
+    });
 });
 
 describe('Parallel cancellation', function () {

@@ -463,7 +463,10 @@ Rule of thumb: if you would handle it, return it as a value; if you would only r
 // Handled as data: one call, and `next` decides what the miss means.
 Command(
     function cmdFetchPrice() {
-        return pricing.get(sku).then((price) => ({ ok: true, price }));
+        return pricing
+            .get(sku)
+            .then((price) => ({ ok: true, price }))
+            .catch((error) => ({ ok: false, code: error.code, message: error.message }));
     },
     (r) => (r.ok ? Success(r.price) : fetchCachedPrice(sku))
 );
@@ -629,7 +632,7 @@ Step 'validateRegistration' returned a plain object. Return Success, Failure, Co
 Retry, or Parallel: a plain value has to be wrapped, as in Success(value).
 ```
 
-The same check catches a missing `return`, a Command's next function returning a plain value, and `runEffect(flow)` where `runEffect(flow(input))` was meant. A Command whose function throws is still a `Failure`. A throw from a `next` function or a pure step is also a bug, and `runEffect` rejects with the error as thrown.
+The same check catches a missing `return`, a Command's next function returning a plain value, a step or next function written as `async` (it returns a Promise, so do the awaited work in a Command instead), and `runEffect(flow)` where `runEffect(flow(input))` was meant. A Command whose function throws is still a `Failure`. A throw from a `next` function or a pure step is also a bug, and `runEffect` rejects with the error as thrown.
 
 #### `configureEffect(...configs)`
 
