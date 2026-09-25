@@ -853,11 +853,10 @@ const interpret =
         }
 
         /**
-         * Runs a Parallel's branches and decides which branch, if any, cancelled the others. A replay passes
-         * the recorded decision in, and a cancelled one is reproduced rather than recomputed: nothing aborts,
-         * each branch runs its recorded steps and stops where its recording stops, and the recorded branch's
-         * failure is the result. A branch that throws is a trigger too, and its error is returned rather than
-         * thrown, so the step still returns the decision.
+         * Runs a Parallel's branches and decides which branch, if any, cancelled the others. In a live run
+         * timing decides it, which is why the decision is recorded. A recorded cancellation passed in by a
+         * replay is reproduced rather than recomputed: no branch cancels another, each runs its recorded steps
+         * and stops where its recording stops, and the recorded branch's failure is the result.
          *
          * @param {Effect[]} effects
          * @param {ParallelOptions} options
@@ -882,53 +881,20 @@ const interpret =
             }
             const forced = asDecision(recorded, effects.length);
             const reproducing = forced !== undefined && forced.cancelled;
-            const { scope, unlink } = linkedScope(signal);
-            const branchSignal = scope?.signal;
-
-            /** @type {(SuccessState | FailureState | IoFaultState)[]} */
-            const results = new Array(effects.length);
-            // Which branch failed on its own account rather than because it was cancelled.
-            const triggered = new Array(effects.length).fill(false);
-            // A branch that throws cancels its siblings like a failing one, under `settled` too, since the run
-            // rejects either way. The error is held rather than rethrown, so every branch still settles and no
-            // `limit` worker stops early.
-            /** @type {{ error: unknown }[]} */
-            const thrown = new Array(effects.length);
-            try {
-                // Awaits every branch, so no cancelled work runs on unobserved after the Parallel returns.
-                await runBounded(
-                    effects.map((e, i) => async () => {
-                        let result;
-                        try {
-                            result = await execute(e, branchSignal, `${branchPath}${i}/`);
-                        } catch (error) {
-                            thrown[i] = { error };
-                            if (reproducing) return;
-                            if (!branchSignal?.aborted) triggered[i] = true;
-                            scope?.abort();
-                            return;
-                        }
-                        results[i] = result;
-                        // Read-then-abort is atomic here, so exactly one branch is the trigger. Under `settled` a
-                        // failing branch cancels nothing, though an enclosing Parallel can still cancel this one.
-                        const cancels = !settled && !reproducing && !branchSignal?.aborted;
-                        if (result.type !== 'Success' && cancels) {
-                            triggered[i] = true;
-                            scope?.abort();
-                        }
-                    }),
-                    limit
-                );
-            } finally {
-                unlink();
-            }
-            // The first by array order, since every branch has settled by now.
-            const firstThrown = thrown.find(Boolean);
-
-            if (forced !== undefined && forced.cancelled) {
+            // Live, a throw cancels the others, and so does a failure unless `settled`; the run rejects on a throw
+            // either way, and an enclosing Parallel can still cancel this one. Reproducing, nothing cancels, since
+            // the recording already says where each branch stops.
+            const { results, thrown, trigger, cancelled } = await settleBranches(
+                effects,
+                limit,
+                signal,
+                branchPath,
+                reproducing ? () => false : (threw, result) => threw || (!settled && result.type !== 'Success')
+            );
+            if (reproducing) {
                 // A branch that threw has no result to check, and its throw is what is rethrown.
                 const recordedTriggerSucceeded =
-                    !firstThrown && forced.branch !== null && results[forced.branch].type === 'Success';
+                    !thrown && forced.branch !== null && results[forced.branch].type === 'Success';
                 if (recordedTriggerSucceeded) {
                     throw replayError(
                         `Time paradox at path '${branchPath}': the recorded run was cancelled by ` +
@@ -936,17 +902,72 @@ const interpret =
                         { name: 'TimeParadox', path: branchPath, branch: forced.branch }
                     );
                 }
-                return { results, decision: forced, thrown: firstThrown };
+                return { results, decision: forced, thrown };
             }
-            const trigger = triggered.indexOf(true);
             /** @type {ParallelDecision} */
             const decision =
                 trigger >= 0
                     ? { cancelled: true, branch: trigger }
-                    : branchSignal?.aborted
+                    : cancelled
                       ? { cancelled: true, branch: null }
                       : { cancelled: false };
-            return { results, decision, thrown: firstThrown };
+            return { results, decision, thrown };
+        }
+
+        /**
+         * Runs every branch to completion, at most `limit` at once, under one cancellation scope linked to the
+         * enclosing one. A branch that settles in a way `cancelsOthers` accepts cancels the rest, and the first
+         * to do so is the trigger.
+         *
+         * @param {Effect[]} effects
+         * @param {number | undefined} limit
+         * @param {AbortSignal | undefined} signal
+         * @param {string} branchPath
+         * @param {(threw: boolean, result: SuccessState | FailureState | IoFaultState) => boolean} cancelsOthers
+         * @returns {Promise<{
+         *   results: (SuccessState | FailureState | IoFaultState)[],
+         *   thrown: { error: unknown } | undefined,
+         *   trigger: number,
+         *   cancelled: boolean
+         * }>}
+         */
+        async function settleBranches(effects, limit, signal, branchPath, cancelsOthers) {
+            const { scope, unlink } = linkedScope(signal);
+            /** @type {(SuccessState | FailureState | IoFaultState)[]} */
+            const results = new Array(effects.length);
+            // Held rather than rethrown, so every branch still settles and no `limit` worker stops early.
+            /** @type {{ error: unknown }[]} */
+            const thrown = new Array(effects.length);
+            // Which branch cancelled the others on its own account rather than because it was cancelled.
+            const triggered = new Array(effects.length).fill(false);
+            const settle = async (/** @type {Effect} */ branch, /** @type {number} */ i) => {
+                try {
+                    results[i] = await execute(branch, scope?.signal, `${branchPath}${i}/`);
+                } catch (error) {
+                    thrown[i] = { error };
+                }
+                // Read-then-abort is atomic here, so exactly one branch is the trigger.
+                if (cancelsOthers(thrown[i] !== undefined, results[i])) {
+                    if (!scope?.signal.aborted) triggered[i] = true;
+                    scope?.abort();
+                }
+            };
+            try {
+                // Awaits every branch, so no cancelled work runs on unobserved after the Parallel returns.
+                await runBounded(
+                    effects.map((branch, i) => () => settle(branch, i)),
+                    limit
+                );
+            } finally {
+                unlink();
+            }
+            return {
+                results,
+                // The first by array order, since every branch has settled by now.
+                thrown: thrown.find(Boolean),
+                trigger: triggered.indexOf(true),
+                cancelled: Boolean(scope?.signal.aborted)
+            };
         }
 
         /**
