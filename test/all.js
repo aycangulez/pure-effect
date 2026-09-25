@@ -1281,6 +1281,28 @@ describe('Recording and replay', function () {
         assert.deepEqual(calls, { read: 0, write: 0 });
     });
 
+    it('should warn that a step a trace does not hold may be one production vetoed', async function () {
+        // A Command an onBeforeCommand hook vetoed never reaches onStep, so the trace holds nothing for it.
+        // The message once said only to pass onMissing: 'execute', which runs the I/O production refused.
+        configureEffect({
+            onBeforeCommand: () => {
+                throw new Error('Rate limit exceeded');
+            }
+        });
+        const recorded = makeFlow();
+        const { result, trace } = await recordEffect(recorded.flow, { id: 'x' });
+        configureEffect();
+        assert.equal(result.type, 'Failure');
+        assert.deepEqual(trace.trace, []);
+
+        const { flow, calls } = makeFlow();
+        const { result: replayed } = await replayEffect(flow({ id: 'x' }), trace);
+        const error = /** @type {Error} */ (errorOf(replayed));
+        assert.match(error.message, /onBeforeCommand hook vetoed/);
+        assert.match(error.message, /only when the trace was cut short/);
+        assert.deepEqual(calls, { read: 0, write: 0 });
+    });
+
     it('should give a trace without paths a live tail under onMissing: execute', async function () {
         const { flow, calls } = makeFlow();
         const legacy = { trace: [{ command: 'cmdRead', result: { row: 'FROM_TRACE' } }] };

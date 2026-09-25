@@ -4,6 +4,10 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Changed
+
+- **A replay that refuses to run an unrecorded step no longer recommends `onMissing: 'execute'` without a warning.** The message said to pass it, but a step with no entry may be one production never ran: a Command that an `onBeforeCommand` hook vetoed leaves no entry, so following that advice while replaying a rate-limited run performed the I/O the limiter had refused and replayed as `Success`. The message now says so, and names the option for a trace that was cut short, as by `maxEntries`.
+
 ### Fixed
 
 - **`Parallel` keeps its options when `next` is passed as `undefined` or `null`.** The options were read from the second argument whenever it was not a function, so a call that forwarded an absent `next`, as in `Parallel(branches, config.summarize, { limit: 5, settled: true })`, lost them silently: every branch started at once, and one failing branch cancelled the rest of the batch instead of reaching `next` as an outcome. A skipped `next` now leaves the options third, where the documented signature `Parallel(effects, next?, options?)` puts them.

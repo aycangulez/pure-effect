@@ -1566,9 +1566,13 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
         if (outcome === undefined) {
             if (onMissing !== 'execute') {
                 const what = missing ? missing(step) : `No recorded outcome for '${name}' at step ${step.index}`;
+                // The option is named with its one safe use, since a step with no entry may be one production
+                // never ran, and running it live would do I/O production refused.
                 throw replayError(
-                    `${what}; refusing to run the real Command. ` +
-                        `Pass onMissing: 'execute' to allow live I/O for unrecorded steps.`,
+                    `${what}; refusing to run the real Command. Production may never have run it: a Command ` +
+                        'an onBeforeCommand hook vetoed leaves no entry, and neither does a step added since the ' +
+                        "recording. Pass onMissing: 'execute' to run unrecorded steps live only when the trace was " +
+                        'cut short, as by maxEntries.',
                     { command: name, index: step.index, path }
                 );
             }
