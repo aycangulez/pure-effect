@@ -4373,6 +4373,28 @@ describe('Parallel limit and settled', function () {
         assert.deepEqual(result, Success(3));
     });
 
+    it('should still read the options when next is passed as undefined or null', async function () {
+        // A caller forwarding an absent next keeps its options. They were dropped, so a batch ran with no
+        // limit and one failing branch cancelled the rest.
+        for (const next of [undefined, null]) {
+            const meter = { inFlight: 0, peak: 0 };
+            const effects = [
+                tracked(meter, 'a'),
+                Command(function cmdBoom() {
+                    return Promise.reject(new Error('boom'));
+                }),
+                tracked(meter, 'c'),
+                tracked(meter, 'd')
+            ];
+            const result = await runEffect(Parallel(effects, /** @type {any} */ (next), { limit: 2, settled: true }));
+            assert.equal(meter.peak, 2, `the limit should hold with next ${next}`);
+            assert.deepEqual(
+                /** @type {any} */ (result).value.map((/** @type {any} */ o) => o.type),
+                ['Success', 'Failure', 'Success', 'Success']
+            );
+        }
+    });
+
     it('should leave the existing two-argument forms alone', async function () {
         assert.deepEqual(await runEffect(Parallel([Success(1), Success(2)])), Success([1, 2]));
         assert.deepEqual(

@@ -154,22 +154,25 @@ const Retry = (effect, options = {}) => ({
  * order either way.
  *
  * The second argument is the `next` function or the options, whichever it looks like, so
- * `Parallel(effects, { limit: 5 })` needs no placeholder.
+ * `Parallel(effects, { limit: 5 })` needs no placeholder. `undefined` or `null` there is a skipped `next`,
+ * so `Parallel(effects, undefined, { limit: 5 })` still reads the options.
  *
  * @param {Effect[]} effects - Array of Effect trees to run concurrently
- * @param {((values: any[]) => Effect) | ParallelOptions} [nextOrOptions] - Receives array of success
+ * @param {((values: any[]) => Effect) | ParallelOptions | null} [nextOrOptions] - Receives array of success
  *        values in order and returns the next Effect, or the options. `next` defaults to
  *        `(values) => Success(values)`, same as `Command`'s default.
- * @param {ParallelOptions} [maybeOptions] - Options, when `next` was given
+ * @param {ParallelOptions} [maybeOptions] - Options, when `next` was given or skipped
  * @returns {ParallelState}
  */
 const Parallel = (effects, nextOrOptions, maybeOptions) => {
     const hasNext = typeof nextOrOptions === 'function';
+    // A caller forwarding an absent `next` still passes its options third, as the signature reads.
+    const nextSkipped = nextOrOptions == null;
     return {
         type: 'Parallel',
         effects,
         next: hasNext ? nextOrOptions : (/** @type {any[]} */ values) => Success(values),
-        options: (hasNext ? maybeOptions : nextOrOptions) ?? {}
+        options: (hasNext || nextSkipped ? maybeOptions : nextOrOptions) ?? {}
     };
 };
 

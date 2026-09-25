@@ -2,6 +2,12 @@
 
 All notable changes to pure-effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
+## [Unreleased]
+
+### Fixed
+
+- **`Parallel` keeps its options when `next` is passed as `undefined` or `null`.** The options were read from the second argument whenever it was not a function, so a call that forwarded an absent `next`, as in `Parallel(branches, config.summarize, { limit: 5, settled: true })`, lost them silently: every branch started at once, and one failing branch cancelled the rest of the batch instead of reaching `next` as an outcome. A skipped `next` now leaves the options third, where the documented signature `Parallel(effects, next?, options?)` puts them.
+
 ## [0.14.0] - 2026-09-24
 
 ### Added
@@ -175,6 +181,7 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 
 - Initial release: `Success`, `Failure`, `Command`, `effectPipe`, and `runEffect`.
 
+[Unreleased]: https://github.com/aycangulez/pure-effect/compare/v0.14.0...HEAD
 [0.14.0]: https://github.com/aycangulez/pure-effect/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/aycangulez/pure-effect/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/aycangulez/pure-effect/compare/v0.11.0...v0.12.0
