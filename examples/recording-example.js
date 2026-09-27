@@ -35,6 +35,9 @@ import { configureEffect, recorder, Failure } from '../index.js';
  *           threw, is offered as a Failure carrying the thrown error, so the default keeps it.
  * @property {(error: unknown, flowName?: string) => void} [onSinkError] - Receives an error thrown by `keep`
  *           or `sink`, which would otherwise have replaced the run's outcome. Defaults to `console.error`.
+ * @property {(message: string, flowName?: string) => void} [onWarning] - Receives a warning about a trace that
+ *           will not replay as recorded: one whose flow carried no input, reported once per flow. Defaults to
+ *           `console.warn`.
  */
 
 /**
@@ -54,10 +57,13 @@ export function recordingHooks(options = {}) {
         maxEntries = 500,
         stack,
         keep = (result) => result.type === 'Failure',
-        onSinkError = (error, flowName) => console.error(`Recording failed for '${flowName || 'flow'}':`, error)
+        onSinkError = (error, flowName) => console.error(`Recording failed for '${flowName || 'flow'}':`, error),
+        onWarning = (message) => console.warn(message)
     } = options;
     /** @type {AsyncLocalStorage<RecordingStore>} */
     const scope = new AsyncLocalStorage();
+    /** Flows already warned about, so a warning comes once per flow rather than once per run. */
+    const warned = new Set();
 
     /**
      * One recorder per run, held in async-local scope so `onStep` can find the right one without a
@@ -91,6 +97,16 @@ export function recordingHooks(options = {}) {
             // value such as an HTTP client's error, so a failure is reported rather than returned.
             try {
                 if (keep(result)) {
+                    // Said when the first such trace is kept, before an incident needs a replay it cannot give.
+                    if (effect.initialInput === undefined && !warned.has(flowName)) {
+                        warned.add(flowName);
+                        onWarning(
+                            `Recording '${flowName || 'flow'}': the flow carries no input, so its traces hold none ` +
+                                'and timeTravel rebuilds it from undefined. Build the outermost flow with effectPipe, ' +
+                                'even as a one-step pipeline.',
+                            flowName
+                        );
+                    }
                     const { dropped, trace } = rec.toTrace();
                     await sink({ ...head, dropped, trace });
                 }

@@ -79,19 +79,34 @@ const Failure = (error, initialInput) => ({
  *
  * @param {(signal?: AbortSignal) => Promise<any>|any} cmd - The side-effect function to execute. Inside a
  *        `Parallel` branch it receives an `AbortSignal` that fires when a sibling branch fails, so I/O that
- *        accepts one can be cancelled in flight. Outside a `Parallel` no argument is passed.
+ *        accepts one can be cancelled in flight. Outside a `Parallel` no argument is passed. The signal is the
+ *        first argument, so wrap a function that takes an optional one, as in `() => nanoid()`.
  * @param {(result: any) => Effect} [next] - Receives the result of `cmd` and returns the next Effect.
- *        Defaults to `(result) => Success(result)`, which is what most Commands want.
+ *        Defaults to `(result) => Success(result)`, which is what most Commands want; `null` counts as omitted.
  * @param {CommandMeta} [meta] - Optional metadata, passed to `onBeforeCommand`. A string `meta.name`
  *        becomes this Command's identity for traces, replay matching, and telemetry spans.
  * @returns {CommandState}
  */
-const Command = (cmd, next = (/** @type {any} */ result) => Success(result), meta) => ({
-    type: 'Command',
-    cmd,
-    next,
-    meta
-});
+const Command = (cmd, next, meta) => {
+    // Checked as the flow is built, so a mistake is reported before the I/O it would have run.
+    if (typeof cmd !== 'function') {
+        throw malformed(
+            /** @type {any} */ (cmd) instanceof Promise
+                ? 'Command expects a function, got a Promise.'
+                : `Command expects the function that does the I/O, got ${describeArgument(cmd)}.`,
+            cmd
+        );
+    }
+    if (next != null && typeof next !== 'function') {
+        throw malformed(
+            isOptionsObject(next)
+                ? "Command's second argument is next, and meta goes third: Command(fn, undefined, { name: 'chargeCard' })."
+                : `Command's next must be a function, got ${describeArgument(next)}.`,
+            next
+        );
+    }
+    return { type: 'Command', cmd, next: next ?? ((/** @type {any} */ result) => Success(result)), meta };
+};
 
 /**
  * The name a Command is known by: what a trace records, what replay matches on, and what a
@@ -111,7 +126,12 @@ const commandName = (eff) => {
  * @param {(context: any) => Effect} next - Receives the context and returns the next Effect
  * @returns {AskState}
  */
-const Ask = (next) => ({ type: 'Ask', next });
+const Ask = (next) => {
+    if (typeof next !== 'function') {
+        throw malformed(`Ask expects a function that receives the context, got ${describeArgument(next)}.`, next);
+    }
+    return { type: 'Ask', next };
+};
 
 /**
  * Wraps an Effect tree with retry-on-failure semantics.
@@ -122,22 +142,26 @@ const Ask = (next) => ({ type: 'Ask', next });
  * every Command in it is idempotent.
  *
  * @param {Effect} effect - The inner Effect tree to retry
- * @param {Object} [options] - Retry options, merged over the library defaults at runtime
- * @param {number} [options.attempts] - Max retries (not counting first try)
- * @param {number} [options.delay] - Ms before first retry
- * @param {number} [options.backoff] - Multiplier applied to delay on each subsequent retry
+ * @param {Object} [options] - Retry options, merged over the library defaults at runtime. An option set to
+ *        `undefined` keeps its default, as an absent config key does.
+ * @param {number} [options.attempts] - Max retries (not counting first try), a positive integer
+ * @param {number} [options.delay] - Ms before first retry, a finite number of 0 or more
+ * @param {number} [options.backoff] - Multiplier applied to delay on each subsequent retry, a finite number
+ *        of 0 or more
  * @param {(error: any) => Effect} [options.onExhausted] - Runs a fallback Effect when every attempt has
  *        failed, receiving `{ retryExhausted, lastError, attempts }`. The fallback's success feeds `next`
  *        exactly as the primary's would have; its failure propagates unwrapped. A fallback never starts
  *        in a `Parallel` branch a sibling has cancelled.
  * @returns {RetryState}
  */
-const Retry = (effect, options = {}) => ({
-    type: 'Retry',
-    effect,
-    options,
-    next: (value) => Success(value)
-});
+const Retry = (effect, options) => {
+    if (!isEffect(effect)) throw malformed(`Retry expects the Effect to run, got ${describeValue(effect)}.`, effect);
+    if (options != null && !isOptionsObject(options)) {
+        const hint = typeof options === 'number' ? `: write Retry(effect, { attempts: ${options} })` : '';
+        throw malformed(`Retry's options must be an object, got ${describeArgument(options)}${hint}.`, options);
+    }
+    return { type: 'Retry', effect, options: options ?? {}, next: (value) => Success(value) };
+};
 
 /**
  * Runs multiple Effect trees concurrently. The first branch to fail cancels its siblings, and that
@@ -165,14 +189,28 @@ const Retry = (effect, options = {}) => ({
  * @returns {ParallelState}
  */
 const Parallel = (effects, nextOrOptions, maybeOptions) => {
+    if (!Array.isArray(effects)) {
+        throw malformed(`Parallel expects an array of Effects, got ${describeArgument(effects)}.`, effects);
+    }
+    effects.forEach((branch, i) => {
+        if (!isEffect(branch)) throw malformed(`Parallel's branch ${i} is ${describeValue(branch)}.`, branch);
+    });
     const hasNext = typeof nextOrOptions === 'function';
     // A caller forwarding an absent `next` still passes its options third, as the signature reads.
     const nextSkipped = nextOrOptions == null;
+    if (!hasNext && !nextSkipped && !isOptionsObject(nextOrOptions)) {
+        const got = describeArgument(nextOrOptions);
+        throw malformed(`Parallel's second argument must be next or the options, got ${got}.`, nextOrOptions);
+    }
+    const options = hasNext || nextSkipped ? maybeOptions : nextOrOptions;
+    if (options != null && !isOptionsObject(options)) {
+        throw malformed(`Parallel's options must be an object, got ${describeArgument(options)}.`, options);
+    }
     return {
         type: 'Parallel',
         effects,
         next: hasNext ? nextOrOptions : (/** @type {any[]} */ values) => Success(values),
-        options: (hasNext || nextSkipped ? maybeOptions : nextOrOptions) ?? {}
+        options: options ?? {}
     };
 };
 
@@ -190,6 +228,19 @@ const isObject = (value) => value !== null && typeof value === 'object';
 const isPositiveInteger = (value) => Number.isInteger(value) && value >= 1;
 
 /**
+ * @param {any} value
+ * @returns {boolean}
+ */
+const isFiniteNonNegative = (value) => Number.isFinite(value) && value >= 0;
+
+/**
+ * An object that can hold options or meta: not an array, and not an Effect passed in the wrong place.
+ * @param {any} value
+ * @returns {boolean}
+ */
+const isOptionsObject = (value) => isObject(value) && !Array.isArray(value) && !isEffect(value);
+
+/**
  * Describes a value for an error message, leading with the mistake it most likely is.
  * @param {any} value
  * @returns {string}
@@ -200,10 +251,22 @@ const describeValue = (value) => {
     if (value instanceof Promise) return 'a Promise, which usually means an async function';
     if (typeof value === 'function')
         return 'a function, which usually means a flow was passed without being called with its input';
-    if (typeof value !== 'object') return `the ${typeof value} ${JSON.stringify(value)}`;
+    // `String`, since `JSON.stringify` prints NaN and Infinity as null and throws on a BigInt.
+    if (typeof value !== 'object') {
+        return `the ${typeof value} ${typeof value === 'string' ? JSON.stringify(value) : String(value)}`;
+    }
     if (typeof value.type === 'string') return `an object with an unrecognised type '${value.type}'`;
     return 'a plain object';
 };
+
+/**
+ * Describes a constructor's argument for an error message. A missing one is usually a misspelt name
+ * rather than a missing return, and an Effect in the wrong place is named by its type.
+ * @param {any} value
+ * @returns {string}
+ */
+const describeArgument = (value) =>
+    value === undefined ? 'undefined' : isEffect(value) ? `an Effect of type '${value.type}'` : describeValue(value);
 
 /**
  * Marks an error as the harness failing rather than the flow: a malformed flow, or a trace that cannot
@@ -249,30 +312,36 @@ const IoFault = (error, initialInput) => ({ type: 'IoFault', error, initialInput
 const asOutcome = (state) => (state.type === 'IoFault' ? Failure(state.error, state.initialInput) : state);
 
 /**
- * Builds the error for a value that is not an Effect, explaining the likely mistake. It is a harness
- * error: a malformed flow is a bug, so it is thrown rather than becoming a `Failure`.
+ * Builds an `EffectTypeError`, for a malformed flow: a step or continuation that returned something other
+ * than an Effect, or a constructor given an argument it cannot use. It is a harness error: a malformed flow
+ * is a bug, so it is thrown rather than becoming a `Failure`.
+ *
+ * @param {string} message
+ * @param {any} value - The malformed value
+ * @returns {Error}
+ */
+const malformed = (message, value) => {
+    // This error already reports the bug, so the Promise rejecting must not also crash the process as
+    // unhandled. Only a native Promise: calling `then` on a Knex or Mongoose query builder runs the query.
+    if (value instanceof Promise) value.catch(() => {});
+    return asHarnessError(Object.assign(new Error(message), { name: 'EffectTypeError' }));
+};
+
+/**
+ * Builds the error for a value that is not an Effect, explaining the likely mistake.
  *
  * @param {any} value
  * @param {string} source - What produced the value, named where it is known
  * @returns {Error}
  */
-const effectTypeError = (value, source) => {
-    const isPromise = value instanceof Promise;
-    // This error already reports the bug, so the Promise rejecting must not also crash the process as
-    // unhandled. Only a native Promise: calling `then` on a Knex or Mongoose query builder runs the query.
-    if (isPromise) value.catch(() => {});
-    return asHarnessError(
-        Object.assign(
-            new Error(
-                `${source} returned ${describeValue(value)}. Return Success, Failure, Command, Ask, Retry, or Parallel: ` +
-                    (isPromise
-                        ? 'a step cannot be async, so do the awaited work in a Command and continue in its next.'
-                        : 'a plain value has to be wrapped, as in Success(value).')
-            ),
-            { name: 'EffectTypeError' }
-        )
+const effectTypeError = (value, source) =>
+    malformed(
+        `${source} returned ${describeValue(value)}. Return Success, Failure, Command, Ask, Retry, or Parallel: ` +
+            (value instanceof Promise
+                ? 'a step cannot be async, so do the awaited work in a Command and continue in its next.'
+                : 'a plain value has to be wrapped, as in Success(value).'),
+        value
     );
-};
 
 /**
  * A Success or a Failure: a flow with nothing left to run.
@@ -356,6 +425,16 @@ const chain = (effect, fn, initialInput) => {
  * @returns {(start: any) => Effect} A function that accepts an initial input and returns the final Effect tree.
  */
 const effectPipe = (...fns) => {
+    // Checked where the pipeline is defined, so a misspelt import is named before any flow is built from it.
+    fns.forEach((fn, i) => {
+        if (typeof fn !== 'function') {
+            const got = describeArgument(fn);
+            throw malformed(
+                `effectPipe's step ${i + 1} is ${got}; each step is a function that returns an Effect.`,
+                fn
+            );
+        }
+    });
     return (start) => {
         const chainWithII = (/** @type {Effect} */ eff, /** @type {(v: any) => Effect} */ fn) => chain(eff, fn, start);
         const tree = fns.reduce(chainWithII, /** @type {Effect} */ (Success(start)));
@@ -771,7 +850,12 @@ const interpret =
          * @returns {Promise<SuccessState | FailureState | IoFaultState>}
          */
         async function runRetry(retry, signal, stepPath) {
-            const opts = { ...defaultRetryOptions, ...retry.options };
+            // An option set to `undefined` keeps its default, since that is how an absent config key arrives.
+            const given = Object.entries(retry.options ?? {}).filter(([, value]) => value !== undefined);
+            const opts = /** @type {typeof defaultRetryOptions & RetryState['options']} */ ({
+                ...defaultRetryOptions,
+                ...Object.fromEntries(given)
+            });
             const { attempts, onExhausted } = opts;
             // `0` is refused rather than meaning run once: it would make `onExhausted` a free catch.
             if (!isPositiveInteger(attempts))
@@ -780,6 +864,14 @@ const interpret =
                         `To handle an outcome without retrying, branch on it as data in the Command's ` +
                         `next, or isolate a failing branch with Parallel's settled option.`
                 );
+            // A wait that is NaN, negative or infinite used to be no wait at all, so a flapping dependency was
+            // called back to back.
+            for (const key of /** @type {const} */ (['delay', 'backoff'])) {
+                if (!isFiniteNonNegative(opts[key]))
+                    throw new TypeError(
+                        `Retry '${key}' must be a finite number of 0 or more, received ${describeValue(opts[key])}.`
+                    );
+            }
             let lastError;
             for (let attempt = 0; attempt <= attempts; attempt++) {
                 // Under `fastRetry` this waits for no time rather than skipping the wait, so branches replayed by
@@ -989,11 +1081,15 @@ const interpret =
             // Whether the function itself succeeded: a hook throwing after it did is a bug, and retrying would
             // repeat work already done.
             let succeeded = false;
-            // The signal is passed only inside a Parallel, so a function with a parameter is never handed one it
-            // did not expect. Async, so a hook always gets a promise, even from a synchronous function.
+            // What it returned, so a hook that loses it is caught.
+            /** @type {unknown} */
+            let value;
+            // The signal is passed only inside a Parallel. There it is still the first argument, so a function
+            // passed by name with an optional first parameter, `nanoid(size = 21)` say, takes the signal for it:
+            // a documented sharp edge. Async, so a hook always gets a promise, even from a synchronous function.
             const op = async () => {
                 succeeded = false;
-                const value = await (signal ? cmd(signal) : cmd());
+                value = await (signal ? cmd(signal) : cmd());
                 succeeded = true;
                 return value;
             };
@@ -1005,8 +1101,9 @@ const interpret =
             }
             // Again, since an interceptor can wait (a rate limiter, say) while a sibling fails.
             if (signal?.aborted) return cancelledBranch(initialInput);
+            let returned;
             try {
-                return Success(await localStepRunner(cmdName, 'Command', op, cmdPath));
+                returned = await localStepRunner(cmdName, 'Command', op, cmdPath);
             } catch (e) {
                 // A step production never ran, in a branch a Parallel cancelled: stop here, as production did.
                 if (hasMark(e, replayCut)) return cancelledBranch(initialInput);
@@ -1016,6 +1113,16 @@ const interpret =
                 if (succeeded) throw e;
                 return IoFault(e, initialInput);
             }
+            // A hook that awaited `op` and forgot to return its result: `next` would take the branch for a Command
+            // that returned nothing, while a recorder inside the hook kept the real value. Only `undefined` is
+            // refused, so a hook that returns a copy of the result still works.
+            if (returned === undefined && succeeded && value !== undefined) {
+                throw new TypeError(
+                    `An onStep hook called op for '${cmdName}' at path '${cmdPath}' and returned undefined, although ` +
+                        'the Command returned a value. A hook has to return what op returns.'
+                );
+            }
+            return Success(returned);
         }
 
         // Every outcome leaves through here, so this is where a Failure gets the root's input: one from a
@@ -1131,25 +1238,40 @@ const timeParadox = (step, recorded) =>
  *
  * @param {any} e - The thrown value
  * @param {boolean} [withStack] - Include the stack (off by default: noisy, leaks paths)
+ * @param {Set<Error>} [ancestors] - The errors whose `cause` or `errors` led here
  * @returns {any}
  */
-const serializeError = (e, withStack) => {
+const serializeError = (e, withStack, ancestors = new Set()) => {
     if (!(e instanceof Error)) return e;
     /** @type {any} */
     const out = { __error: true, name: e.name, message: e.message };
+    // A chain that comes back to an error it passed through is cut there, with the name and message only:
+    // following it overflowed the stack, and the recorder dropped the whole step. Only ancestors count, so an
+    // error that merely appears twice is carried in full both times.
+    if (ancestors.has(e)) return out;
+    ancestors.add(e);
     if (withStack) out.stack = e.stack;
     // `cause` is non-enumerable too, and it can itself be an Error, so it is carried recursively.
-    if ('cause' in e) out.cause = serializeError(e.cause, withStack);
+    if ('cause' in e) out.cause = serializeError(e.cause, withStack, ancestors);
     // So is an AggregateError's `errors`, which is where its detail lives. It goes under its own key so
     // revival can tell it from an enumerable `errors`, which is data and is copied below as it is.
     const errors = /** @type {any} */ (e).errors;
     const hasHiddenErrors = Array.isArray(errors) && !Object.prototype.propertyIsEnumerable.call(e, 'errors');
     if (hasHiddenErrors) {
-        out.__errors = errors.map((x) => serializeError(x, withStack));
+        out.__errors = errors.map((x) => serializeError(x, withStack, ancestors));
     }
-    for (const k of Object.keys(e)) out[k] = /** @type {any} */ (e)[k];
+    ancestors.delete(e);
+    // Assigning `name`, `message` or `cause`, as `e.name = 'TimeoutError'` or `e.cause = inner` does, makes it
+    // enumerable. It is carried above already, so it is listed for revival to restore as it was rather than
+    // copied again, where a raw cause would replace the serialized one and reach JSON as {}.
+    const shown = carriedKeys.filter((k) => Object.prototype.propertyIsEnumerable.call(e, k));
+    if (shown.length > 0) out.__enumerable = shown;
+    for (const k of Object.keys(e)) if (!carriedKeys.includes(k)) out[k] = /** @type {any} */ (e)[k];
     return out;
 };
+
+/** The keys `serializeError` carries whatever their enumerability, which a native Error sets as hidden. */
+const carriedKeys = ['name', 'message', 'cause'];
 
 /**
  * Rebuilds an Error from `serializeError` output. Non-Error values pass through, so a
@@ -1160,18 +1282,21 @@ const serializeError = (e, withStack) => {
 const reviveError = (v) => {
     if (!isObject(v) || v.__error !== true) return v;
     const e = new Error(v.message);
-    // `name`, `cause` and `errors` are defined non-enumerable, as on a native Error, so a revived error
-    // deep-equals the one the Command threw. Every other key was enumerable on the original.
-    const hidden = { enumerable: false, configurable: true, writable: true };
-    Object.defineProperty(e, 'name', { ...hidden, value: v.name });
-    // The marker is dropped, and `name` and `message` are already set.
-    const alreadyHandled = ['__error', 'name', 'message'];
+    // `name`, `message`, `cause` and `errors` are defined as the original had them, so a revived error
+    // deep-equals the one the Command threw: non-enumerable, as on a native Error, unless `__enumerable` lists
+    // them. Every other key was enumerable on the original.
+    const shown = Array.isArray(v.__enumerable) ? v.__enumerable : [];
+    const restore = (/** @type {string} */ key, /** @type {any} */ value) =>
+        Object.defineProperty(e, key, { enumerable: shown.includes(key), configurable: true, writable: true, value });
+    restore('name', v.name);
+    if (shown.includes('message')) restore('message', v.message);
+    // The markers are dropped, and `name` and `message` are already set.
+    const alreadyHandled = ['__error', '__enumerable', 'name', 'message'];
     for (const [k, val] of Object.entries(v)) {
         if (alreadyHandled.includes(k)) continue;
-        if (k === 'cause') Object.defineProperty(e, 'cause', { ...hidden, value: reviveError(val) });
-        else if (k === '__errors' && Array.isArray(val)) {
-            Object.defineProperty(e, 'errors', { ...hidden, value: val.map(reviveError) });
-        } else /** @type {any} */ (e)[k] = val;
+        if (k === 'cause') restore('cause', reviveError(val));
+        else if (k === '__errors' && Array.isArray(val)) restore('errors', val.map(reviveError));
+        else /** @type {any} */ (e)[k] = val;
     }
     return e;
 };
@@ -1254,8 +1379,9 @@ const snapshot = (value) => {
 
 /**
  * Builds an `onStep` hook that records what every Command returned, plus a packager
- * for the reference trace format. Pass `onStep` to `runEffect` as per-call config, or
- * to `configureEffect` to record globally.
+ * for the reference trace format. Pass `onStep` to `runEffect` as per-call config. A recorder holds the steps
+ * of every run it sees, so installed with `configureEffect` for a whole application it mixes requests into one
+ * trace with duplicate paths, which a replay refuses; examples/recording-example.js gives each run its own.
  *
  * @param {RecorderOptions} [options] - Redaction and size limits
  * @returns {{ onStep: StepRunner, entries: TraceEntry[], toTrace: (meta?: TraceMeta) => TraceLog }}
@@ -1326,8 +1452,8 @@ const recorder = (options = {}) => {
 
 /**
  * Runs a flow for real while recording every Command result, and returns both the
- * outcome and a replayable trace. Convenient in tests and scripts; in an application,
- * install `recorder().onStep` once via `configureEffect` instead of changing call sites.
+ * outcome and a replayable trace. Convenient in tests and scripts; to record an application without
+ * changing call sites, give each run its own recorder, as examples/recording-example.js does.
  *
  * @param {(input: any) => Effect} flowFn - Builds the Effect tree from its input
  * @param {any} initialInput - The value the flow is called with; stored so a replay can rebuild it
@@ -1632,6 +1758,14 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
 
     if (version && traceVersion && version !== traceVersion) {
         log(`Warning: trace was recorded at ${traceVersion}, replaying against ${version}.`);
+    }
+    // The flow is rebuilt from this input, and a recorder installed as a hook reads it off the flow, where only
+    // effectPipe puts it.
+    if (initialInput === undefined) {
+        log(
+            'Warning: the trace holds no initial input, so the flow is rebuilt from undefined. A recorder ' +
+                'installed as a hook finds the input only on a flow built with effectPipe.'
+        );
     }
     // Parallel decisions are not narrated as steps, so the header counts Commands to match the lines below.
     const commandCount = trace.filter((e) => !isDecisionEntry(e)).length;

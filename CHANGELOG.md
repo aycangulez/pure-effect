@@ -2,14 +2,23 @@
 
 All notable changes to pure-effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
-## [Unreleased]
+## [0.15.0] - 2026-09-27
+
+### Added
+
+- **`timeTravel` and the reference recording wiring warn about a trace with no input.** A recorder installed as a hook reads the input off the flow, where only `effectPipe` puts it, so a flow whose outermost node is a bare `Command`, `Ask`, `Retry` or `Parallel` recorded none, and `timeTravel` rebuilt it from `undefined` without saying so. `timeTravel` now logs a warning when a trace holds no `initialInput`, and `recordingHooks` reports the first kept trace of such a flow through a new `onWarning` option, once per flow, which defaults to `console.warn`.
 
 ### Changed
 
+- **The building blocks check their arguments when the flow is built.** `Command`, `Ask`, `Retry`, `Parallel` and `effectPipe` throw an `EffectTypeError` naming the mistake for an argument they cannot use, before any of the flow's I/O runs. `Command(db.findUser(email))` made the query while the flow was being built and then counted as an I/O fault, so a `Retry` around it ran it again and a replay repeated it; `Command(fn, { name })` ran the function, charging the card, before the run rejected with `effect.next is not a function`; and an `effectPipe` step that was `undefined` failed only when the flow reached it. A flow that passed such an argument now throws where it is built. A `null` next counts as omitted in `Command`, as it does in `Parallel`.
+- **An `onStep` hook that calls `op` and returns nothing makes the run reject.** A hook that awaited `op()` and forgot to return its result handed the flow `undefined` in place of the Command's value, so a metrics hook written that way turned an email that was taken into one that was free and saved a duplicate account, while a recorder installed inside it kept the real answer and the trace contradicted production. The run now rejects with a `TypeError` naming the Command when a hook returns `undefined` after the Command's function returned a value. A hook that returns a copy of the result, one that never calls `op`, as replay does, and one wrapping a Command that itself returned `undefined` are unaffected.
+- **`Retry` treats an option set to `undefined` as unset, and refuses a wait it cannot keep.** An undefined option overrode its default, so `attempts: config.attempts` with the key absent threw, and `backoff: undefined` made every wait after the first `NaN` milliseconds, which is no wait: a flapping dependency was called back to back. An undefined option now keeps its default, and a `delay` or `backoff` that is not a finite number of 0 or more throws a `TypeError` when the `Retry` runs, as `attempts` already did. A `Retry` given `delay: -1`, `NaN`, or a string such as `'250'` now throws instead of waiting no time.
 - **A replay that refuses to run an unrecorded step no longer recommends `onMissing: 'execute'` without a warning.** The message said to pass it, but a step with no entry may be one production never ran: a Command that an `onBeforeCommand` hook vetoed leaves no entry, so following that advice while replaying a rate-limited run performed the I/O the limiter had refused and replayed as `Success`. The message now says so, and names the option for a trace that was cut short, as by `maxEntries`.
 
 ### Fixed
 
+- **A Command whose error's `cause` chain loops back is recorded.** Serializing the error followed the cause forever, and the stack overflow was dropped with the recorder's other failures, so the step vanished from the trace, `dropped` still said 0, and the replay reported a missing entry instead of the failure. A chain that comes back to an error it passed through is now cut there, and the step is recorded like any other.
+- **An error whose `name` or `cause` was assigned replays as the same error.** `e.name = 'TimeoutError'` and `Object.assign(error, { name })` make `name` an own enumerable property, and revival always made it non-enumerable, so the README's check `assert.deepEqual(replayed, result)` failed on a plain `Error`. `e.cause = inner`, the idiom from before the `cause` option, lost the cause entirely: it was copied as the raw `Error`, which JSON stores as `{}`. Both now come back as the Command threw them.
 - **`Parallel` keeps its options when `next` is passed as `undefined` or `null`.** The options were read from the second argument whenever it was not a function, so a call that forwarded an absent `next`, as in `Parallel(branches, config.summarize, { limit: 5, settled: true })`, lost them silently: every branch started at once, and one failing branch cancelled the rest of the batch instead of reaching `next` as an outcome. A skipped `next` now leaves the options third, where the documented signature `Parallel(effects, next?, options?)` puts them.
 
 ## [0.14.0] - 2026-09-24
@@ -185,7 +194,7 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 
 - Initial release: `Success`, `Failure`, `Command`, `effectPipe`, and `runEffect`.
 
-[Unreleased]: https://github.com/aycangulez/pure-effect/compare/v0.14.0...HEAD
+[0.15.0]: https://github.com/aycangulez/pure-effect/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/aycangulez/pure-effect/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/aycangulez/pure-effect/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/aycangulez/pure-effect/compare/v0.11.0...v0.12.0

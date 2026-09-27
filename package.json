@@ -1,6 +1,6 @@
 {
     "name": "pure-effect",
-    "version": "0.14.0",
+    "version": "0.15.0",
     "description": "Records what your business logic did in production and replays it anywhere: time-travel debugging for JavaScript and TypeScript, with zero dependencies. Business logic is plain data you can test without mocks.",
     "keywords": [
         "effect",
