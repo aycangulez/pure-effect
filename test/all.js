@@ -599,6 +599,24 @@ describe('Recording and replay', function () {
         assert.ok(elapsed < 100, `replay skipped 200 ms + 400 ms of backoff (took ${elapsed} ms)`);
     });
 
+    it('should wait out the backoff when a replay passes fastRetry: false', async function () {
+        let calls = 0;
+        const flow = () =>
+            Retry(
+                Command(function cmdFlaky() {
+                    if (++calls === 1) throw new Error('once');
+                    return 'ok';
+                }),
+                { attempts: 1, delay: 120 }
+            );
+        const { trace } = await recordEffect(flow, null);
+        const start = Date.now();
+        const { result } = await replayEffect(flow(), trace, { fastRetry: false });
+        const elapsed = Date.now() - start;
+        assert.equal(valueOf(result), 'ok');
+        assert.ok(elapsed >= 100, `the replay waited the recorded delay (took ${elapsed} ms)`);
+    });
+
     it('should strip Retry delays inside a Parallel branch during replay', async function () {
         this.timeout(3000);
         let calls = 0;
@@ -985,6 +1003,43 @@ describe('Recording and replay', function () {
         assert.equal(error.cause.cause, 'ECONNRESET', 'a non-Error cause must pass through unchanged');
     });
 
+    it('should record an error whose cause chain loops back, cutting the loop where it returns', async function () {
+        // Serializing followed the cause forever, and the stack overflow was dropped with the recorder's other
+        // failures, so the step vanished from the trace and its replay reported a missing entry.
+        const inner = new Error('socket hang up');
+        const outer = new Error('request failed', { cause: inner });
+        inner.cause = outer;
+        const flow = (/** @type {any} */ input) =>
+            Command(function cmdRequest() {
+                return Promise.reject(outer);
+            });
+        const { trace } = await recordEffect(flow, { id: 'loop' });
+        assert.equal(trace.trace.length, 1, 'the step is recorded');
+        const { result: replayed } = await replayEffect(flow({ id: 'loop' }), JSON.parse(JSON.stringify(trace)));
+        const error = /** @type {any} */ (errorOf(replayed));
+        assert.equal(error.message, 'request failed');
+        assert.equal(error.cause.message, 'socket hang up');
+        assert.equal(error.cause.cause.message, 'request failed');
+        assert.equal(error.cause.cause.cause, undefined, 'the loop is cut where it comes back');
+    });
+
+    it('should carry an error that appears twice without a loop in full both times', async function () {
+        // Only an error's own ancestors cut the chain, so an error shared by two branches of an AggregateError
+        // keeps its cause in each.
+        const shared = new Error('shared', { cause: new Error('root') });
+        const flow = (/** @type {any} */ input) =>
+            Command(function cmdBoth() {
+                return Promise.reject(new AggregateError([shared, shared], 'both failed'));
+            });
+        const { trace } = await recordEffect(flow, { id: 'twice' });
+        const { result: replayed } = await replayEffect(flow({ id: 'twice' }), JSON.parse(JSON.stringify(trace)));
+        const errors = /** @type {any} */ (errorOf(replayed)).errors;
+        assert.deepEqual(
+            errors.map((/** @type {any} */ e) => e.cause.message),
+            ['root', 'root']
+        );
+    });
+
     it('should replay a thrown plain object as the same plain object', async function () {
         // Some clients reject with a plain object. It is not an Error, so it is stored and revived as it is.
         const flow = () =>
@@ -1151,7 +1206,48 @@ describe('Recording and replay', function () {
         const error = /** @type {any} */ (errorOf(replayed));
         assert.equal(error.name, 'GatewayError');
         assert.match(String(error), /^GatewayError: nope/);
-        assert.equal(JSON.stringify(error), '{}', 'name stays non-enumerable, as on a native Error');
+        // Object.assign made the original's name an own enumerable property, so the revived one is too.
+        assert.deepEqual(Object.keys(error), ['name']);
+    });
+
+    it('should revive a name or cause set as a property so the replay deep-equals the run', async function () {
+        // `e.name = 'TimeoutError'`, and `e.cause = inner` from before the cause option, make own enumerable
+        // properties. Revival made the name non-enumerable, so the README's deepEqual check failed on a plain
+        // Error, and the cause was copied as the raw Error, which JSON stored as {}.
+        const flow = (/** @type {any} */ input) =>
+            Command(function cmdUpstream() {
+                const e = new Error('upstream timed out');
+                e.name = 'TimeoutError';
+                e.cause = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+                return Promise.reject(e);
+            });
+        const { result, trace } = await recordEffect(flow, { id: 'assigned' });
+        const { result: replayed } = await replayEffect(flow({ id: 'assigned' }), JSON.parse(JSON.stringify(trace)));
+        assert.deepEqual(replayed, result);
+
+        const error = /** @type {any} */ (errorOf(replayed));
+        assert.deepEqual(Object.keys(error).sort(), Object.keys(/** @type {any} */ (errorOf(result))).sort());
+        assert.equal(error.cause.message, 'socket hang up');
+        assert.equal(error.cause.code, 'ECONNRESET');
+    });
+
+    it('should revive an assigned message as enumerable, and list nothing for a plain Error', async function () {
+        // `Object.assign(new Error(), { message })` makes the message an own enumerable property. A plain Error
+        // has none, so its stored form carries no list of them.
+        const thrown = [Object.assign(new Error(), { message: 'Not found', status: 404 }), new Error('plain')];
+        const flow = (/** @type {any} */ input) =>
+            Command(function cmdLookup() {
+                return Promise.reject(thrown[input.i]);
+            });
+        for (const i of [0, 1]) {
+            const { result, trace } = await recordEffect(flow, { i });
+            const stored = JSON.parse(JSON.stringify(trace));
+            const { result: replayed } = await replayEffect(flow({ i }), stored);
+            assert.deepEqual(replayed, result);
+            const keys = (/** @type {any} */ outcome) => Object.keys(errorOf(outcome)).sort();
+            assert.deepEqual(keys(replayed), keys(result));
+            assert.equal('__enumerable' in stored.trace[0].error, i === 0);
+        }
     });
 
     it('should reject a malformed trace as a ReplayError, not a TypeError', async function () {
@@ -1260,6 +1356,28 @@ describe('Recording and replay', function () {
         assert.equal(error.name, 'ReplayError');
         assert.match(error.message, /Trace has no step at path '1' for 'cmdWrite'/);
         assert.match(error.message, /onMissing: 'execute'/, 'the message says how to allow it');
+        assert.deepEqual(calls, { read: 0, write: 0 });
+    });
+
+    it('should warn that a step a trace does not hold may be one production vetoed', async function () {
+        // A Command an onBeforeCommand hook vetoed never reaches onStep, so the trace holds nothing for it.
+        // The message once said only to pass onMissing: 'execute', which runs the I/O production refused.
+        configureEffect({
+            onBeforeCommand: () => {
+                throw new Error('Rate limit exceeded');
+            }
+        });
+        const recorded = makeFlow();
+        const { result, trace } = await recordEffect(recorded.flow, { id: 'x' });
+        configureEffect();
+        assert.equal(result.type, 'Failure');
+        assert.deepEqual(trace.trace, []);
+
+        const { flow, calls } = makeFlow();
+        const { result: replayed } = await replayEffect(flow({ id: 'x' }), trace);
+        const error = /** @type {Error} */ (errorOf(replayed));
+        assert.match(error.message, /onBeforeCommand hook vetoed/);
+        assert.match(error.message, /only when the trace was cut short/);
         assert.deepEqual(calls, { read: 0, write: 0 });
     });
 
@@ -1479,6 +1597,22 @@ describe('Recording and replay', function () {
         assert.match(out, /1 recorded step was never reached: cmdWrite\. The flow diverged/);
     });
 
+    it("should name an unreached step's path when the trace carries paths", async function () {
+        const read = () =>
+            Command(function cmdRead() {
+                return { row: 1 };
+            });
+        const write = () =>
+            Command(function cmdWrite() {
+                return { written: 1 };
+            });
+        const { trace } = await recordEffect((/** @type {any} */ input) => effectPipe(read, write)(input), { id: 1 });
+        /** @type {string[]} */
+        const lines = [];
+        await timeTravel((/** @type {any} */ input) => effectPipe(read)(input), trace, { log: (l) => lines.push(l) });
+        assert.match(lines.join('\n'), /1 recorded step was never reached: cmdWrite \(path '1'\)\. The flow diverged/);
+    });
+
     it('should not warn about unreached steps when a TimeParadox already named the divergence', async function () {
         const a = makeFlow();
         const { trace } = await recordEffect(a.flow, { id: 'x1' });
@@ -1517,6 +1651,25 @@ describe('Recording and replay', function () {
             const saw = lines.some((l) => /^Warning: trace was recorded at/.test(l));
             assert.equal(saw, warned, `replaying against ${version}`);
         }
+    });
+
+    it('should warn in timeTravel when the trace holds no initial input', async function () {
+        // timeTravel rebuilds the flow from the recorded input, and a hook-based recorder finds one only on a
+        // flow built with effectPipe, so a bare Command's trace is rebuilt from undefined.
+        const bare = () =>
+            Command(function cmdRead() {
+                return 1;
+            });
+        /** @type {string[]} */
+        const lines = [];
+        const log = (/** @type {string} */ line) => void lines.push(line);
+        await timeTravel(bare, (await recordEffect(bare, undefined)).trace, { log });
+        assert.ok(lines.some((l) => /^Warning: the trace holds no initial input/.test(l)));
+
+        lines.length = 0;
+        const { flow } = makeFlow();
+        await timeTravel(flow, (await recordEffect(flow, { id: 'in' })).trace, { log });
+        assert.ok(!lines.some((l) => /no initial input/.test(l)));
     });
 
     it('should give Ask the recorded context in timeTravel, or the one it is handed', async function () {
@@ -1781,6 +1934,20 @@ describe('configureEffect merging', function () {
             ['a', 'checkout'],
             ['b', 'checkout']
         ]);
+    });
+
+    it('should pass onRun an empty flowName when the context names none', async function () {
+        /** @type {any[]} */
+        const seen = [];
+        configureEffect({
+            onRun: async (/** @type {any} */ effect, /** @type {any} */ op, /** @type {any} */ flowName) => {
+                seen.push(flowName);
+                return await op();
+            }
+        });
+        await runEffect(work('ok'));
+        await runEffect(work('ok'), {});
+        assert.deepEqual(seen, ['', '']);
     });
 
     it('should run every onBeforeCommand interceptor in order', async function () {
@@ -2297,6 +2464,27 @@ describe('examples/recording-example.js', function () {
             );
         assert.equal((await runEffect(ok({ id: 2 }))).type, 'Success');
         assert.deepEqual(written, []);
+    });
+
+    it('should warn once per flow when it keeps a trace whose flow carried no input', async function () {
+        // Only effectPipe puts the input on a flow, so a bare Command's traces hold none and timeTravel would
+        // rebuild the flow from undefined. Warning at the first kept trace says so before an incident needs it.
+        /** @type {[string, string | undefined][]} */
+        const warnings = [];
+        enableRecording({
+            keep: () => true,
+            onWarning: (message, flowName) => void warnings.push([message, flowName])
+        });
+        const read = () =>
+            Command(function cmdRead() {
+                return 1;
+            });
+        await runEffect(read(), { flowName: 'bare' });
+        await runEffect(read(), { flowName: 'bare' });
+        await runEffect(effectPipe(read)({ id: 1 }), { flowName: 'piped' });
+        assert.equal(warnings.length, 1);
+        assert.equal(warnings[0][1], 'bare');
+        assert.match(warnings[0][0], /effectPipe/);
     });
 
     it('should give concurrent runs separate traces', async function () {
@@ -2857,6 +3045,7 @@ describe('Recorded values are snapshots', function () {
             ok: true,
             tags: ['a'],
             none: [],
+            handlers: ['a', callback],
             note: null,
             when: new Date('2026-01-01T00:00:00Z'),
             logger,
@@ -2877,11 +3066,13 @@ describe('Recorded values are snapshots', function () {
         assert.equal(result.type, 'Success', 'an uncloneable result must not fail the run');
         row.ok = false;
         row.tags.push('b');
+        row.handlers.push('b');
         row.when.setFullYear(2030);
         options.retries = 2;
         const entry = /** @type {any} */ (rec.entries[0].result);
         assert.equal(entry.ok, true, 'a later mutation does not rewrite the entry');
         assert.deepEqual(entry.tags, ['a'], 'nested values are copied too');
+        assert.deepEqual(entry.handlers, ['a', callback], 'an array holding a function is copied around the function');
         assert.deepEqual(entry.none, []);
         assert.equal(entry.note, null);
         assert.ok(entry.when instanceof Date, 'an object that can be cloned on its own is cloned');
@@ -3526,6 +3717,16 @@ describe('Documented sharp edges', function () {
         assert.deepEqual(written, ['wrote'], 'an uninterruptible in-flight write still performed');
     });
 
+    it('should hand a Command function passed by name the signal as its first argument inside a Parallel', async function () {
+        // Pinned deliberately: inside a Parallel the function is called with its branch's AbortSignal, so one with
+        // an optional first parameter, as `nanoid(size = 21)` has, takes the signal for it. The README's
+        // Limitations entry says to wrap such a function.
+        const pageSize = /** @type {any} */ ((limit = 50) => (typeof limit === 'number' ? limit : 'a signal'));
+        assert.deepEqual(await runEffect(Command(pageSize)), Success(50));
+        assert.deepEqual(await runEffect(Parallel([Command(pageSize)])), Success(['a signal']));
+        assert.deepEqual(await runEffect(Parallel([Command(() => pageSize())])), Success([50]), 'wrapped, it works');
+    });
+
     it('should carry the initial input on every Failure', async function () {
         // Pinned deliberately: convenient for tests, and a PII surface for anything that logs the
         // whole Failure rather than its `error`.
@@ -3569,6 +3770,15 @@ describe('Malformed flows', function () {
         const e = await errorFrom(() => runEffect(effectPipe(/** @type {any} */ (lookupUser))({ id: 1 })));
         assert.equal(e?.name, 'EffectTypeError');
         assert.match(e.message, /Step 'lookupUser' returned null\./);
+    });
+
+    it('should name a type the library does not recognise', async function () {
+        function saveUser(/** @type {any} */ input) {
+            return { type: 'Sucess', value: input }; // a typo for Success
+        }
+        const e = await errorFrom(() => runEffect(effectPipe(/** @type {any} */ (saveUser))({ id: 1 })));
+        assert.equal(e?.name, 'EffectTypeError');
+        assert.match(e.message, /Step 'saveUser' returned an object with an unrecognised type 'Sucess'\./);
     });
 
     it('should call a missing return what it usually is', async function () {
@@ -3741,6 +3951,140 @@ describe('Malformed flows', function () {
             process.off('unhandledRejection', onUnhandled);
         }
         assert.deepEqual(unhandled, []);
+    });
+});
+
+describe('Constructor arguments', function () {
+    beforeEach(() => configureEffect());
+
+    /**
+     * The message of the EffectTypeError a constructor throws.
+     * @param {() => unknown} build
+     * @returns {string}
+     */
+    const messageFrom = (build) => {
+        try {
+            build();
+        } catch (e) {
+            const error = /** @type {any} */ (e);
+            assert.equal(error.name, 'EffectTypeError');
+            return String(error.message);
+        }
+        return assert.fail('expected the constructor to throw');
+    };
+
+    it('should refuse a Command handed a Promise', async function () {
+        // `Command(db.findUser(email))` runs the query when the flow is built, where recording never sees it
+        // and a replay repeats it. The Command then counted as an I/O fault and was retried.
+        /** @type {unknown[]} */
+        const unhandled = [];
+        const onUnhandled = (/** @type {unknown} */ reason) => unhandled.push(reason);
+        process.on('unhandledRejection', onUnhandled);
+        try {
+            const message = messageFrom(() => Command(/** @type {any} */ (Promise.reject(new Error('down')))));
+            assert.match(message, /Command expects a function, got a Promise/);
+            await new Promise((resolve) => setTimeout(resolve, 20));
+        } finally {
+            process.off('unhandledRejection', onUnhandled);
+        }
+        assert.deepEqual(unhandled, [], 'the reported Promise must not also crash the process');
+    });
+
+    it('should refuse a Command without a function', function () {
+        // A missing argument is named plainly: a misspelt import is likelier than a missing return.
+        assert.match(
+            messageFrom(() => Command(/** @type {any} */ (undefined))),
+            /Command expects .*, got undefined\.$/
+        );
+        assert.match(
+            messageFrom(() => Command(() => 1, /** @type {any} */ ('next'))),
+            /next must be a function/
+        );
+    });
+
+    it('should refuse meta in the place of next before the Command can run', function () {
+        // The Command used to run, charging the card, and the run then rejected with `effect.next is not a function`.
+        let charged = 0;
+        const message = messageFrom(() => Command(() => charged++, /** @type {any} */ ({ name: 'chargeCard' })));
+        assert.match(message, /Command\(fn, undefined, \{ name: 'chargeCard' \}\)/);
+        assert.equal(charged, 0);
+    });
+
+    it('should treat a null next as skipped, as it treats undefined', async function () {
+        const plain = Command(function cmdPlain() {
+            return 7;
+        }, /** @type {any} */ (null));
+        assert.deepEqual(await runEffect(plain), Success(7));
+    });
+
+    it('should refuse a Parallel given anything but an array of Effects', function () {
+        const map = /** @type {any} */ ({ user: Success(1) });
+        assert.match(
+            messageFrom(() => Parallel(map)),
+            /array of Effects, got a plain object/
+        );
+        assert.match(
+            messageFrom(() => Parallel(/** @type {any} */ (Success(1)))),
+            /array of Effects, got an Effect of type 'Success'/
+        );
+        assert.match(
+            messageFrom(() => Parallel([Success(1), /** @type {any} */ (undefined)])),
+            /branch 1 is undefined/
+        );
+        assert.match(
+            messageFrom(() => Parallel([Success(1)], /** @type {any} */ (5))),
+            /second argument .*the number 5/
+        );
+        assert.match(
+            messageFrom(() => Parallel([Success(1)], /** @type {any} */ (undefined), /** @type {any} */ (5))),
+            /options .*the number 5/
+        );
+    });
+
+    it('should refuse a Retry given the step instead of its Effect, or a bare number of attempts', function () {
+        const fetchPrice = () => Success(1);
+        assert.match(
+            messageFrom(() => Retry(/** @type {any} */ (fetchPrice))),
+            /without being called with its input/
+        );
+        assert.match(
+            messageFrom(() => Retry(Success(1), /** @type {any} */ (3))),
+            /Retry\(effect, \{ attempts: 3 \}\)/
+        );
+        assert.doesNotMatch(
+            messageFrom(() => Retry(Success(1), /** @type {any} */ ('fast'))),
+            /attempts/
+        );
+    });
+
+    it('should name the position of an effectPipe step that is not a function', function () {
+        const validate = (/** @type {any} */ input) => Success(input);
+        assert.match(
+            messageFrom(() => effectPipe(validate, /** @type {any} */ (undefined))),
+            /step 2 is undefined/
+        );
+    });
+
+    it('should refuse an Ask without a function', function () {
+        assert.match(
+            messageFrom(() => Ask(/** @type {any} */ (undefined))),
+            /Ask expects .*, got undefined/
+        );
+    });
+
+    it('should reject the run rather than retry when a Command function builds a malformed Command', async function () {
+        // The EffectTypeError is a harness error, so it is not taken for the I/O failing: no second attempt and
+        // no fallback.
+        let calls = 0;
+        const buildsBadly = Command(function cmdBuildsSubflow() {
+            calls++;
+            return Command(/** @type {any} */ (undefined));
+        });
+        const fallback = /** @type {any} */ (() => Success('fallback'));
+        await assert.rejects(() => runEffect(Retry(buildsBadly, { delay: 1, onExhausted: fallback })), {
+            name: 'EffectTypeError'
+        });
+        assert.equal(calls, 1);
     });
 });
 
@@ -4313,6 +4657,28 @@ describe('Parallel limit and settled', function () {
         assert.deepEqual(result, Success(3));
     });
 
+    it('should still read the options when next is passed as undefined or null', async function () {
+        // A caller forwarding an absent next keeps its options. They were dropped, so a batch ran with no
+        // limit and one failing branch cancelled the rest.
+        for (const next of [undefined, null]) {
+            const meter = { inFlight: 0, peak: 0 };
+            const effects = [
+                tracked(meter, 'a'),
+                Command(function cmdBoom() {
+                    return Promise.reject(new Error('boom'));
+                }),
+                tracked(meter, 'c'),
+                tracked(meter, 'd')
+            ];
+            const result = await runEffect(Parallel(effects, /** @type {any} */ (next), { limit: 2, settled: true }));
+            assert.equal(meter.peak, 2, `the limit should hold with next ${next}`);
+            assert.deepEqual(
+                /** @type {any} */ (result).value.map((/** @type {any} */ o) => o.type),
+                ['Success', 'Failure', 'Success', 'Success']
+            );
+        }
+    });
+
     it('should leave the existing two-argument forms alone', async function () {
         assert.deepEqual(await runEffect(Parallel([Success(1), Success(2)])), Success([1, 2]));
         assert.deepEqual(
@@ -4590,7 +4956,27 @@ describe('Replaying a cancelled Parallel', function () {
         configureEffect({
             onStep: async (name, type, op) => (type === 'Parallel' ? 'skipped' : op())
         });
-        await assert.rejects(runEffect(Parallel([Success(1)])), (e) => e instanceof TypeError && /op/.test(e.message));
+        await assert.rejects(
+            runEffect(Parallel([Success(1)])),
+            (e) => e instanceof TypeError && /onStep hook returned without/.test(e.message)
+        );
+    });
+
+    it('should reject when a hook swallows what op threw for a Parallel, rather than continue with no results', async function () {
+        // A decision naming a branch the Parallel does not have makes `op` throw a TimeParadox.
+        /** @type {import('../index.js').StepRunner} */
+        const swallowing = async (name, type, op) => {
+            if (type !== 'Parallel') return op();
+            try {
+                return await op({ cancelled: true, branch: 5 });
+            } catch {
+                return 'swallowed';
+            }
+        };
+        await assert.rejects(
+            runEffect(Parallel([Success(1), Success(2)]), {}, { onStep: swallowing }),
+            (e) => e instanceof TypeError && /onStep hook returned without/.test(e.message)
+        );
     });
 
     it('should let a Resolver supply the decision, and ignore one that is not a decision', async function () {
@@ -4612,6 +4998,19 @@ describe('Replaying a cancelled Parallel', function () {
         const notADecision = (/** @type {any} */ s) => ({ result: s.type === 'Parallel' ? 'no decision' : s.name });
         const { result: plain } = await replayEffect(Parallel([step('a', () => 1), step('b', () => 2)]), notADecision);
         assert.deepEqual(plain, Success(['a', 'b']));
+
+        // A branch that is not an index into the Parallel, such as a string from a trace edited by hand or a negative
+        // number, which is never recorded, is not a decision either.
+        for (const branch of ['0', -1]) {
+            const notAnIndex = (/** @type {any} */ s) => ({
+                result: s.type === 'Parallel' ? { cancelled: true, branch } : s.name
+            });
+            const { result: timed } = await replayEffect(
+                Parallel([step('a', () => 1), step('b', () => 2)]),
+                notAnIndex
+            );
+            assert.deepEqual(timed, Success(['a', 'b']), `branch ${JSON.stringify(branch)} is not a decision`);
+        }
     });
 
     it('should not redact a Parallel decision', async function () {
@@ -4822,6 +5221,35 @@ describe('Retry attempts and the removed global retry', function () {
         const result = await runEffect(Retry(counted(), { delay: 1 }));
         assert.equal(result.type, 'Failure');
         assert.equal(calls, 4, 'the default is three retries after the first try');
+    });
+
+    it('should treat an option passed as undefined as unset', async function () {
+        // A config key that is absent arrives as undefined, and it used to override the default: `attempts`
+        // threw, and `backoff` made every wait after the first NaN milliseconds, which is no wait at all.
+        /** @type {number[]} */
+        const stamps = [];
+        const timed = Command(function cmdTimed() {
+            stamps.push(performance.now());
+            return Promise.reject(new Error('down'));
+        });
+        const result = await runEffect(Retry(timed, { attempts: undefined, delay: 20, backoff: undefined }));
+        assert.equal(result.type, 'Failure');
+        assert.equal(stamps.length, 4, 'attempts keeps the default of three retries');
+        const waits = stamps.slice(1).map((stamp, i) => stamp - stamps[i]);
+        assert.ok(
+            waits.every((ms) => ms >= 15),
+            `backoff keeps the flat default, waits were ${waits}`
+        );
+    });
+
+    it('should reject a delay or backoff that is not a finite number of 0 or more', async function () {
+        // Each of these used to mean no wait at all, so a flapping dependency was called back to back.
+        for (const bad of [NaN, -1, Infinity, '250ms']) {
+            const value = /** @type {any} */ (bad);
+            await assert.rejects(() => runEffect(Retry(failing(), { delay: value })), TypeError);
+            await assert.rejects(() => runEffect(Retry(failing(), { backoff: value })), TypeError);
+        }
+        await assert.rejects(() => runEffect(Retry(failing(), { delay: NaN })), /Retry 'delay' .*the number NaN/);
     });
 
     it('should refuse a retry key in configureEffect', function () {
@@ -5362,6 +5790,58 @@ describe('Where a throw comes from', function () {
         );
         await assert.rejects(runEffect(flow), (e) => e === exporterFull);
         assert.equal(charges, 1, 'a Command that succeeded is not repeated for a hook that failed after it');
+    });
+
+    it('should reject when an onStep hook calls op and returns nothing, rather than hand next undefined', async function () {
+        // A metrics hook that awaited op and forgot the return turned "email taken" into undefined, so the flow
+        // saved a duplicate account while a recorder inside the hook kept the real answer.
+        let saves = 0;
+        configureEffect({
+            onStep: async (name, type, op) => {
+                await op();
+            }
+        });
+        const flow = effectPipe(
+            () =>
+                Command(
+                    function cmdFindUser() {
+                        return { id: 1 };
+                    },
+                    (found) => (found ? Failure('Email already in use.') : Success('free'))
+                ),
+            () =>
+                Command(function cmdSaveUser() {
+                    saves++;
+                    return { id: 2 };
+                })
+        )({ email: 'taken@x.com' });
+        await assert.rejects(runEffect(flow), (e) => e instanceof TypeError && /'cmdFindUser'/.test(e.message));
+        assert.equal(saves, 0, 'the flow must not continue as though no user was found');
+    });
+
+    it('should let a hook return undefined when there was no result to lose', async function () {
+        // Replay answers without calling op, a Command can return undefined itself, and a Parallel's op returns
+        // its decision, which the interpreter takes from op rather than from the hook.
+        const one = () =>
+            Command(function cmdOne() {
+                return 1;
+            });
+        assert.deepEqual(await runEffect(one(), {}, { onStep: async () => undefined }), Success(undefined));
+
+        const nothing = Command(function cmdNothing() {
+            return undefined;
+        });
+        const forgetful = {
+            onStep: /** @type {import('../index.js').StepRunner} */ (async (n, t, op) => void (await op()))
+        };
+        assert.deepEqual(await runEffect(nothing, {}, forgetful), Success(undefined));
+
+        /** @type {import('../index.js').StepRunner} */
+        const dropsOnlyParallel = async (name, type, op) => {
+            const result = await op();
+            return type === 'Parallel' ? undefined : result;
+        };
+        assert.deepEqual(await runEffect(Parallel([one()]), {}, { onStep: dropsOnlyParallel }), Success([1]));
     });
 
     it('should still retry an onStep hook that throws without calling op', async function () {
