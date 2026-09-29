@@ -24,7 +24,7 @@
     ],
     "sideEffects": false,
     "engines": {
-        "node": ">=18"
+        "node": ">=22"
     },
     "scripts": {
         "test": "mocha && tsd && tsc -p jsconfig.json",
