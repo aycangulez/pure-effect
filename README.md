@@ -14,7 +14,7 @@
 
 ## Table of Contents
 
-- **Getting started:** [Installation](#installation) · [Quick Start](#quick-start) · [Testing Without Mocks](#testing-without-mocks) · [How It Works](#how-it-works) · [Coming from async/await](#coming-from-asyncawait)
+- **Getting started:** [Installation](#installation) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Testing Without Mocks](#testing-without-mocks) · [Coming from async/await](#coming-from-asyncawait)
 - **Recording and replay:** [Time-Travel Debugging](#time-travel-debugging) · [Recording in Production](#recording-in-production)
 - **Building flows:** [Passing Runtime Context](#passing-runtime-context) · [Retrying Transient Failures](#retrying-transient-failures) · [Running Effects in Parallel](#running-effects-in-parallel) · [Composing Larger Flows](#composing-larger-flows) · [Which Errors Are Data](#which-errors-are-data) · [TypeScript](#typescript-typed-errors-and-context)
 - **Reference:** [Why Pure Effect](#why-pure-effect) · [Load Tests](#load-tests) · [API Reference](#api-reference) · [Limitations](#limitations)
@@ -68,6 +68,14 @@ async function registerUser(input) {
 }
 ```
 
+## How It Works
+
+A flow is a chain of pairs: an I/O call, and a `next` function that receives its answer and returns the next Command, a Success, or a Failure. `runEffect` walks the chain in a loop.
+
+Recording and replay hook into the one place where a Command's function is called. Recording writes down each answer. Replay supplies the recorded answer instead of making the call, so a replayed flow does no I/O.
+
+Building a flow runs the pure steps right away: `registerUserFlow(badInput)` returns the validation `Failure` synchronously, so the tests below do not need `runEffect`. Only Commands need it.
+
 ## Testing Without Mocks
 
 Pipelines return plain objects, so you can check what the code will do without running it.
@@ -110,13 +118,24 @@ A step tested on its own returns a `Failure` without `initialInput`. That is why
 
 Tests cannot see inside a Command's function without running it. If `cmdFindUser` said `db.findUser(input.name)` instead of `input.email`, every test on this page would still pass. Keep those functions to a single call, and let an integration test cover them.
 
-## How It Works
+**In TypeScript**, a flow is typed as any kind of step it could start with, since validation may already have returned a `Success` or a `Failure`, so `.cmd` and `.next` compile only after the test checks that the step is a Command. `node:assert`'s `assert(step.type === 'Command')` is such a check, and TypeScript follows it. Jest's and Vitest's `expect` is not, so a walk needs a check at every step, and a small helper makes that one line per step with any test framework:
 
-A flow is a chain of pairs: an I/O call, and a `next` function that receives its answer and returns the next Command, a Success, or a Failure. `runEffect` walks the chain in a loop.
+```ts
+import assert from 'node:assert/strict';
+import type { Effect } from 'pure-effect';
 
-Recording and replay hook into the one place where a Command's function is called. Recording writes down each answer. Replay supplies the recorded answer instead of making the call, so a replayed flow does no I/O.
+// Fails unless the step is the Command named, and returns it typed as one.
+function command<T, E, C>(step: Effect<T, E, C>, name: string) {
+    assert(step.type === 'Command', `expected ${name}, got ${step.type}`);
+    assert.equal(step.cmd.name, name);
+    return step;
+}
 
-Building a flow runs the pure steps right away: `registerUserFlow(badInput)` returns the validation `Failure` synchronously, so the tests above do not need `runEffect`. Only Commands need it.
+const step1 = command(registerUserFlow(input), 'cmdFindUser');
+command(step1.next(null), 'cmdSaveUser');
+```
+
+The answer handed to `next` has to match what the Command's function returns, so where the tests above pass `{ id: 1 }` for a user that was found, a TypeScript test passes a whole user, of the type `db.findUser` returns.
 
 ## Coming from async/await
 
