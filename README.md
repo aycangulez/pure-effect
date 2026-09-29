@@ -14,22 +14,10 @@
 
 ## Table of Contents
 
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Testing Without Mocks](#testing-without-mocks)
-- [How It Works](#how-it-works)
-- [Time-Travel Debugging](#time-travel-debugging)
-- [Recording in Production](#recording-in-production)
-- [Passing Runtime Context](#passing-runtime-context)
-- [Retrying Transient Failures](#retrying-transient-failures)
-- [Running Effects in Parallel](#running-effects-in-parallel)
-- [Composing Larger Flows](#composing-larger-flows)
-- [Which Errors Are Data](#which-errors-are-data)
-- [TypeScript: Typed Errors and Context](#typescript-typed-errors-and-context)
-- [Why Pure Effect](#why-pure-effect)
-- [Load Tests](#load-tests)
-- [API Reference](#api-reference)
-- [Limitations](#limitations)
+- **Getting started:** [Installation](#installation) · [Quick Start](#quick-start) · [Testing Without Mocks](#testing-without-mocks) · [How It Works](#how-it-works) · [Coming from async/await](#coming-from-asyncawait)
+- **Recording and replay:** [Time-Travel Debugging](#time-travel-debugging) · [Recording in Production](#recording-in-production)
+- **Building flows:** [Passing Runtime Context](#passing-runtime-context) · [Retrying Transient Failures](#retrying-transient-failures) · [Running Effects in Parallel](#running-effects-in-parallel) · [Composing Larger Flows](#composing-larger-flows) · [Which Errors Are Data](#which-errors-are-data) · [TypeScript](#typescript-typed-errors-and-context)
+- **Reference:** [Why Pure Effect](#why-pure-effect) · [Load Tests](#load-tests) · [API Reference](#api-reference) · [Limitations](#limitations)
 
 ## Installation
 
@@ -129,6 +117,139 @@ A flow is a chain of pairs: an I/O call, and a `next` function that receives its
 Recording and replay hook into the one place where a Command's function is called. Recording writes down each answer. Replay supplies the recorded answer instead of making the call, so a replayed flow does no I/O.
 
 Building a flow runs the pure steps right away: `registerUserFlow(badInput)` returns the validation `Failure` synchronously, so the tests above do not need `runEffect`. Only Commands need it.
+
+## Coming from async/await
+
+A flow does what `async`/`await` code does, as data. Instead of making a call and waiting for it, a step returns a Command that says which call to make and what to do with the answer. That is what lets a test hand a step an answer instead of mocking the database, and a replay hand it the recorded one. Each thing you would write with `async`/`await` has an equivalent:
+
+| With `async`/`await` | In a flow |
+| --- | --- |
+| `const user = await db.findUser(email)` | a Command: `Command(() => db.findUser(email), next)` |
+| the code after the `await`, which uses `user` | the Command's `next`, which receives `user` |
+| an `if` on `user` after the `await` | a branch in `next` |
+| `return value` | `Success(value)` |
+| `throw` to stop | `Failure(error)` |
+| a call inside `try`/`catch` | catch inside the Command's function and return a value for `next` to branch on; see [Which Errors Are Data](#which-errors-are-data) |
+| a loop that retries a call | `Retry(Command(...), options)` |
+| `await Promise.all([...])` | `Parallel([...])` |
+| a `for` loop with an `await` inside | a step that gets the list, then `Parallel(list.map(...), { limit: 1 })` |
+| a `try`/`catch` inside a loop, to keep going past a failure | the same `Parallel`, with `settled: true` |
+| a later call that needs two earlier results | a named step that passes both on; see [Composing Larger Flows](#composing-larger-flows) |
+| a value from the request, such as the tenant | `Ask`; see [Passing Runtime Context](#passing-runtime-context) |
+| `Date.now()` or a random ID | a Command, so a replay gets the recorded value |
+
+The Quick Start's `registerUserFlow` is this function, translated row by row: each `await` became a Command, the code after it became that Command's `next`, and each `throw` became a `Failure`.
+
+```js
+async function registerUserAsync(input) {
+    if (!input.email.includes('@')) throw new Error('Invalid email.');
+    const found = await db.findUser(input.email);
+    if (found) throw new Error('Email already in use.');
+    return db.saveUser(input);
+}
+```
+
+The difference shows most in the tests. To reach the branch where the email is taken, a test of `registerUserAsync` has to replace the database's methods, run the function, and put the methods back. Here it is with Node's built-in mocks; Jest's `spyOn` works the same way:
+
+```js
+import { mock } from 'node:test';
+
+const input = { email: 'test@test.com', password: 'password123' };
+
+mock.method(db, 'findUser', async () => ({ id: 1 }));
+const saveUser = mock.method(db, 'saveUser', async (user) => user);
+
+await assert.rejects(registerUserAsync(input), { message: 'Email already in use.' });
+assert.equal(saveUser.mock.callCount(), 0);
+mock.restoreAll();
+```
+
+The flow's test of the same branch hands one step the answer, with nothing to replace, wait for, or put back:
+
+```js
+assert.deepEqual(ensureEmailAvailable(input).next({ id: 1 }), Failure('Email already in use.'));
+```
+
+This is what the small functions are for. Each step is a place a test can start, so a branch is tested by calling the step it lives in. An `async` function has one way in, so a test of any branch runs everything before it, with every call on the way replaced. The mocks can check one thing these tests cannot: the arguments each call received, which [Testing Without Mocks](#testing-without-mocks) leaves to an integration test.
+
+A loop is written in two parts: a step that gets the list, and a `Parallel` over it. `Parallel` runs a list of flows, at the same time unless told otherwise, and `limit: 1` makes it run them one after another, like a `for` loop. The `async` version is usually split the same way. Paying a customer's unpaid invoices in order, and stopping at the first that fails:
+
+```js
+async function payUnpaidAsync(customerId) {
+    const invoices = await billing.findUnpaid(customerId);
+    for (const invoice of invoices) {
+        const receipt = await payments.charge(invoice);
+        await mailer.sendReceipt(receipt);
+    }
+}
+
+// First part: get the list.
+const findUnpaidInvoices = (customerId) => {
+    const cmdFindUnpaid = () => billing.findUnpaid(customerId);
+    return Command(cmdFindUnpaid);
+};
+
+// Second part: the loop's body, a flow of its own for one invoice.
+const chargeInvoice = (invoice) => {
+    const cmdChargeInvoice = () => payments.charge(invoice);
+    return Retry(Command(cmdChargeInvoice), { attempts: 3 });
+};
+
+const sendReceipt = (receipt) => {
+    const cmdSendReceipt = () => mailer.sendReceipt(receipt);
+    return Command(cmdSendReceipt);
+};
+
+const payInvoice = (invoice) => effectPipe(chargeInvoice, sendReceipt)(invoice);
+
+// The loop: one body per invoice, run one at a time.
+const payAll = (invoices) => Parallel(invoices.map(payInvoice), { limit: 1 });
+
+const payUnpaid = (customerId) => effectPipe(findUnpaidInvoices, payAll)(customerId);
+
+// The flow starts by getting the list, and hands what it gets to the loop.
+const flow = payUnpaid('cus_1');
+assert.equal(flow.cmd.name, 'cmdFindUnpaid');
+assert.equal(flow.next([{ id: 1 }, { id: 2 }]).effects.length, 2);
+
+// The body is tested on its own: the Retry holds only the charge, and the receipt comes after it.
+const body = payInvoice({ id: 1 });
+assert.equal(body.effect.cmd.name, 'cmdChargeInvoice');
+assert.equal(body.next({ id: 'receipt_1' }).cmd.name, 'cmdSendReceipt');
+
+// An empty list runs nothing.
+assert.deepEqual(await runEffect(payAll([])), Success([]));
+```
+
+Each invoice is paid after the one before it has finished, and the first that fails stops the rest from starting, as in the `async` version. When the payments can overlap, a higher `limit` runs several at a time.
+
+The loop's body is a flow built for one item, so it can hold as many steps as the body of a `for` loop. Put a `Retry` inside it, on the step that needs one. Around the whole loop, a `Retry` would pay every invoice again after one failed, charging the ones already paid; around the whole body, a receipt that failed to send would charge the card again. See [Retrying Transient Failures](#retrying-transient-failures).
+
+The `Parallel`'s `next` receives what each body returned, in order, so a total or a summary of the loop goes there: `Parallel(invoices.map(payInvoice), (receipts) => Success(receipts.length), { limit: 1 })`. To keep going past a failure, as a `try`/`catch` inside the loop would, add `settled: true`: every invoice is tried, and `next` receives one `Success` or `Failure` per invoice. See [Running Effects in Parallel](#running-effects-in-parallel).
+
+Sometimes getting the list is a loop of its own. Paging through an API with a cursor is one: each request needs the cursor from the page before, so the requests cannot be listed in advance. Write that loop as an ordinary `async` function, call it from one Command, and map over the list it returns, as above:
+
+```js
+async function fetchAllOrders() {
+    const orders = [];
+    let cursor = null;
+    do {
+        const page = await api.listOrders(cursor);
+        orders.push(...page.items);
+        cursor = page.nextCursor;
+    } while (cursor);
+    return orders;
+}
+
+const listAllOrders = () => {
+    const cmdListAllOrders = () => fetchAllOrders();
+    return Command(cmdListAllOrders);
+};
+```
+
+To the flow, the whole loop is one step. A trace records the finished list as that step's result, and a replay hands the list back without replaying the pages. A `Retry` around the Command starts again from the first page. A flow test cannot see inside it, so, like any Command's function, it is left to an integration test.
+
+The loop belongs in the flow only when the flow has to decide something on each pass, such as stopping at the first order that matches, or saving each page as it arrives. Then the Command's `next` returns the Command for the next page instead of a `Success`, until there are no more pages.
 
 ## Time-Travel Debugging
 
@@ -444,16 +565,17 @@ const loadCheckout = effectPipe(
 );
 ```
 
-**Join values that depend on each other locally.** When step B needs step A's result and step C needs both, pass both forward in one value. A small pipeline inside the step does this without nested callbacks:
+**Join values that depend on each other in a named step.** When step B needs step A's result and step C needs both, write a small step that runs B and passes both forward in one value. Give it a name, and the pipeline reads as a list of steps:
 
 ```js
+// Fetches the order's customer and passes on both.
+const withCustomer = (order) => effectPipe(fetchCustomer, (customer) => Success({ order, customer }))(order.customerId);
+
 const applyLoyaltyDiscount = (orderId) =>
-    effectPipe(
-        fetchOrder,
-        (order) => effectPipe(fetchCustomer, (customer) => Success({ order, customer }))(order.customerId),
-        ({ order, customer }) => Success(discountedTotal(order, customer))
-    )(orderId);
+    effectPipe(fetchOrder, withCustomer, ({ order, customer }) => Success(discountedTotal(order, customer)))(orderId);
 ```
+
+When the lookup is written in place rather than reused, the Command's own `next` does the join, with no pipeline inside the step: `Command(() => db.findCustomer(order.customerId), (customer) => Success({ order, customer }))`.
 
 **Pass only what the next steps need.** Avoid one object that collects everything computed so far. When a step's input is all it gets, it cannot depend on a value from far upstream without showing it, stale fields do not linger, and two steps cannot clash over the same key. Data also lives only as long as the flow needs it, which matters for credentials and personal data. In TypeScript, it keeps the pipeline type-checked: if an upstream step changes what it returns, the step that reads the value fails to compile instead of getting `undefined` at runtime.
 

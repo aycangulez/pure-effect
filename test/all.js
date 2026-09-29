@@ -19,6 +19,7 @@ import {
 import * as lib from '../index.js';
 import ts from 'typescript';
 import { readFileSync } from 'node:fs';
+import { mock } from 'node:test';
 import { enableTelemetry, telemetryHooks } from '../examples/opentelemetry-example.js';
 import { enableRecording, recordingHooks } from '../examples/recording-example.js';
 
@@ -4372,9 +4373,14 @@ describe('README examples', function () {
     // `js` block runs as one program with the Quick Start's definitions in scope, which makes every
     // `assert` the README prints a real assertion.
     const markdown = readFileSync('README.md', 'utf8');
-    const blocks = [...markdown.matchAll(/```(\w*)\n([\s\S]*?)```/g)]
-        .filter((match) => match[1] === 'js')
-        .map((match) => match[2]);
+    // The js blocks grouped by the heading they sit under, at any depth. The pattern matches a whole
+    // fence before anything inside it, so a `#` comment in a shell block does not count as a heading.
+    const sections = /** @type {string[][]} */ ([[]]);
+    for (const match of markdown.matchAll(/^#+ .*$|```(\w*)\n([\s\S]*?)```/gm)) {
+        if (match[0].startsWith('#')) sections.push([]);
+        else if (match[1] === 'js') sections[sections.length - 1].push(match[2]);
+    }
+    const blocks = sections.flat();
     const withoutImports = (/** @type {string} */ code) => code.replace(/^import[^;]*;\s*$/gm, '');
     const AsyncFunction = /** @type {any} */ (Object.getPrototypeOf(async function () {}).constructor);
 
@@ -4419,15 +4425,15 @@ describe('README examples', function () {
     });
 
     it('should run every example, assertions included, without performing I/O', async function () {
-        // The first block is the Quick Start, whose definitions the later examples use. Every other
-        // block gets its own scope so two sections can name the same helper without colliding.
-        const program =
-            withoutImports(blocks[0]) +
-            '\n' +
-            blocks
-                .slice(1)
-                .map((block) => `{\n${withoutImports(block)}\n}`)
-                .join('\n');
+        // The first section is the Quick Start, whose definitions the later examples use. Every other
+        // section gets its own scope so two sections can name the same helper without colliding.
+        // Within a section each block's scope sits inside the one before it: a block sees what the
+        // blocks above it defined, as a reader does, so a test can follow the code it tests, and two
+        // independent examples can still both declare `result`.
+        const [quickStart, ...rest] = sections.filter((section) => section.length > 0);
+        const nested = (/** @type {string[]} */ section) =>
+            section.reduceRight((inner, block) => `{\n${withoutImports(block)}\n${inner}}\n`, '');
+        const program = quickStart.map(withoutImports).join('\n') + '\n' + rest.map(nested).join('');
 
         // Everything the examples reach for that is not the library. These exist so the flows can be
         // built and walked, not to stand in for a real driver: every assertion the README makes is
@@ -4464,7 +4470,11 @@ describe('README examples', function () {
             summarize: (/** @type {any} */ outcome) => outcome.type,
             sink: () => {},
             telemetryHooks: () => ({}),
-            recordingHooks: () => ({})
+            recordingHooks: () => ({}),
+            // Real rather than stubbed: the async/await comparison shows the mocked test a plain
+            // `async` function needs, and it should pass against that function the way it would for
+            // a reader.
+            mock
         };
 
         const log = console.log;
@@ -4526,6 +4536,25 @@ describe('Parallel limit and settled', function () {
                 ['0p', { cancelled: false }]
             ]
         );
+    });
+
+    it('should run branches one after another, in array order, under a limit of 1', async function () {
+        // The README translates a `for` loop into this, so the order branches start in is part of what
+        // it promises, not only the order results come back in.
+        const events = /** @type {string[]} */ ([]);
+        const step = (/** @type {string} */ id, /** @type {number} */ ms) =>
+            Command(function cmdStep() {
+                events.push(`start ${id}`);
+                return new Promise((resolve) =>
+                    setTimeout(() => {
+                        events.push(`end ${id}`);
+                        resolve(id);
+                    }, ms)
+                );
+            });
+        // Descending durations, so any overlap or reordering would show.
+        await runEffect(Parallel([step('a', 3), step('b', 2), step('c', 1)], { limit: 1 }));
+        assert.deepEqual(events, ['start a', 'end a', 'start b', 'end b', 'start c', 'end c']);
     });
 
     it('should not start queued branches once one has failed', async function () {
