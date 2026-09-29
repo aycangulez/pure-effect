@@ -7,6 +7,7 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 ### Added
 
 - **`EffectValue`, `EffectError` and `EffectContext` read the value, error and context of an Effect**, as in `EffectError<ReturnType<typeof checkoutFlow>>`. `Parallel`'s declaration is built on them, alongside `ParallelBranches`, `ParallelValues` and `ParallelContext`.
+- **The reference recording wiring warns about a capped trace.** `recordingHooks` reports the first kept trace of a flow that `maxEntries` cut short through `onWarning`, once per flow, since such a trace replays only up to the first step it lacks, and the default cap of 500 cuts a long batch run short.
 
 ### Changed
 
@@ -14,6 +15,7 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 - **A `Parallel` declares its branches' errors.** Its branches were typed with one shared error that nothing inferred, so every `Parallel` declared `unknown`, and so did every pipeline holding one, including every loop written as the README writes it. A `Parallel` now declares each branch's error together with what `next` can return, and each outcome a settled `Parallel` hands `next` carries its own branch's error. A settled `Parallel` declares only `next`'s error, since a branch's failure reaches `next` as an outcome rather than escaping. `ParallelOutcomes` takes the branches instead of the values and one error, so `ParallelOutcomes<[User, Order], MyError>` is now written `ParallelOutcomes<[Effect<User, MyError>, Effect<Order, MyError>]>`, and `ParallelState` takes a sixth, optional parameter for the branches' error. `Parallel`'s type parameter is now the branches rather than their values, so an explicit `Parallel<[number]>(...)` stops compiling; leave it to be inferred.
 - **The type declarations need TypeScript 5.1 or later.** They happened to compile on TypeScript 4.7 and later, with nothing checking it, and the new `Parallel` declaration relies on 5.1, the first version that treats a mapped type over the branches as an array. TypeScript 5.1 is now checked on every change.
 - **Node 22 or later.** `engines` says `>=22`, where it said `>=18`: Node 18 and 20 have reached their end of life, and the tests run on 22, 24 and 26. Nothing in the library needs a newer Node, so code on an older one keeps running, but it is no longer tested there, and Yarn 1 refuses to install on it without `--ignore-engines`.
+- **`replayEffect` refuses `onMissing: 'execute'` on a trace that dropped entries.** The README and the replay error message advised `'execute'` for a trace cut short by `maxEntries`, but the steps such a trace lacks are ones production ran, so running them live repeated production's I/O: a billing batch replayed that way charged and invoiced subscriptions production had already billed. A trace whose `dropped` is above 0 now rejects with a `ReplayError` before anything runs; replay it without the option to stop at the first step it lacks, or record the flow with a higher `maxEntries`. The message for a missing step now says whether the cap may have dropped it, and `'execute'` is documented for Commands that reach test doubles or only read.
 
 ### Fixed
 

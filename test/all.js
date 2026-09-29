@@ -1337,7 +1337,7 @@ describe('Recording and replay', function () {
         // ReplayError of its own before onMissing was consulted, so the README's live tail never ran.
         const recorded = makeFlow();
         const { trace } = await recordEffect(recorded.flow, { id: 'FROM_TRACE' });
-        const prefix = { ...trace, trace: trace.trace.slice(0, 1) }; // what a recorder with maxEntries: 1 keeps
+        const prefix = { ...trace, trace: trace.trace.slice(0, 1) }; // as recorded before the flow gained its write
 
         const { flow, calls } = makeFlow();
         const { result: replayed } = await replayEffect(flow({ id: 'FROM_TRACE' }), prefix, { onMissing: 'execute' });
@@ -1378,7 +1378,7 @@ describe('Recording and replay', function () {
         const { result: replayed } = await replayEffect(flow({ id: 'x' }), trace);
         const error = /** @type {Error} */ (errorOf(replayed));
         assert.match(error.message, /onBeforeCommand hook vetoed/);
-        assert.match(error.message, /only when the trace was cut short/);
+        assert.match(error.message, /only where the Commands reach test doubles or only read/);
         assert.deepEqual(calls, { read: 0, write: 0 });
     });
 
@@ -1396,6 +1396,47 @@ describe('Recording and replay', function () {
         const diverged = { trace: [{ command: 'cmdSomethingElse', path: '0', result: {} }] };
         const { result: replayed } = await replayEffect(flow({ id: 'x' }), diverged, { onMissing: 'execute' });
         assert.equal(/** @type {Error} */ (errorOf(replayed)).name, 'TimeParadox');
+        assert.deepEqual(calls, { read: 0, write: 0 });
+    });
+
+    it('should refuse onMissing: execute on a trace maxEntries cut short, before any I/O', async function () {
+        // The steps a capped trace lacks are steps production ran, so running them live repeats production's
+        // I/O. The README and this message once advised exactly that for such a trace, and a billing batch
+        // replayed that way charged and invoiced subscriptions production had already billed.
+        const recorded = makeFlow();
+        const { trace } = await recordEffect(recorded.flow, { id: 'x' }, { maxEntries: 1 });
+        assert.equal(trace.dropped, 1);
+        const { flow, calls } = makeFlow();
+        for (const stored of [trace, JSON.parse(JSON.stringify(trace))]) {
+            await assert.rejects(
+                replayEffect(flow({ id: 'x' }), stored, { onMissing: 'execute' }),
+                (/** @type {any} */ e) => {
+                    assert.equal(e.name, 'ReplayError');
+                    assert.match(e.message, /dropped 1 entries under maxEntries/);
+                    assert.match(e.message, /would run it again/);
+                    assert.match(
+                        e.message,
+                        /stop at the first missing step, or record the flow with a higher maxEntries/
+                    );
+                    return true;
+                }
+            );
+        }
+        assert.deepEqual(calls, { read: 0, write: 0 }, 'nothing ran, not even the recorded prefix');
+    });
+
+    it('should say a capped trace may lack steps production ran, and not offer onMissing: execute', async function () {
+        const recorded = makeFlow();
+        const { trace } = await recordEffect(recorded.flow, { id: 'x' }, { maxEntries: 1 });
+        const { flow, calls } = makeFlow();
+        const { result: replayed, unreached } = await replayEffect(flow({ id: 'x' }), trace);
+        const error = /** @type {Error} */ (errorOf(replayed));
+        assert.equal(error.name, 'ReplayError');
+        assert.match(error.message, /Trace has no step at path '1' for 'cmdWrite'/);
+        assert.match(error.message, /production may have run this step/);
+        assert.match(error.message, /record the flow with a higher maxEntries to replay past it/);
+        assert.doesNotMatch(error.message, /onMissing/);
+        assert.deepEqual(unreached, [], 'the recorded prefix replayed');
         assert.deepEqual(calls, { read: 0, write: 0 });
     });
 
@@ -2486,6 +2527,42 @@ describe('examples/recording-example.js', function () {
         assert.equal(warnings.length, 1);
         assert.equal(warnings[0][1], 'bare');
         assert.match(warnings[0][0], /effectPipe/);
+    });
+
+    it('should warn once per flow when it keeps a trace maxEntries cut short', async function () {
+        // A capped trace lacks steps production ran, so it replays only up to the first of them. The default
+        // cap is 500, so a long batch run is cut short without anyone having chosen to.
+        /** @type {[string, string | undefined][]} */
+        const warnings = [];
+        /** @type {any[]} */
+        const written = [];
+        enableRecording({
+            keep: () => true,
+            maxEntries: 2,
+            sink: (/** @type {any} */ t) => void written.push(t),
+            onWarning: (message, flowName) => void warnings.push([message, flowName])
+        });
+        const read = (/** @type {number} */ n) =>
+            Command(function cmdRead() {
+                return n;
+            });
+        const long = effectPipe(
+            () => read(1),
+            () => read(2),
+            () => read(3)
+        );
+        const short = effectPipe(() => read(1));
+        await runEffect(long({ id: 1 }), { flowName: 'long' });
+        await runEffect(long({ id: 2 }), { flowName: 'long' });
+        await runEffect(short({ id: 3 }), { flowName: 'short' });
+        assert.deepEqual(
+            written.map((t) => t.dropped),
+            [1, 1, 0],
+            'every capped trace still reaches the sink'
+        );
+        assert.equal(warnings.length, 1);
+        assert.equal(warnings[0][1], 'long');
+        assert.match(warnings[0][0], /dropped 1 entries under maxEntries \(2\)/);
     });
 
     it('should give concurrent runs separate traces', async function () {

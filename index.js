@@ -1615,7 +1615,9 @@ const fromTrace = (traceLog, options = {}) => {
  *           reach a telemetry backend or a guardrail that performs I/O.
  * @property {'throw' | 'execute'} [onMissing] - What to do when the resolver has no recording for a step.
  *           `'throw'` (default) fails the replay, which makes side effects impossible for the whole run.
- *           `'execute'` runs the real Command, giving partial replay: recorded prefix, live tail.
+ *           `'execute'` runs the real Command, so pass it only where the Commands reach test doubles or only
+ *           read. A trace that dropped entries under `maxEntries` refuses it, since a step it lacks may be one
+ *           production ran.
  * @property {(step: ReplayStep, outcome: ReplayOutcome | undefined) => void} [onResolved] - Observes each step.
  */
 
@@ -1661,10 +1663,22 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     const { resolve, missing } = fromResolver
         ? { resolve: traceOrResolver, missing: undefined }
         : fromTrace(traceOrResolver, { onEntry: (entry) => void reached.add(entry) });
+    // Only a trace log carries metadata; a bare entries array and a Resolver carry none.
+    const traceLog = fromResolver || Array.isArray(traceOrResolver) ? undefined : traceOrResolver;
     // Defaults to the trace's context: an `Ask` gate replayed with another one takes another branch, and
     // no paradox flags it.
-    const recorded = fromResolver || Array.isArray(traceOrResolver) ? undefined : traceOrResolver.context;
-    const context = options.context ?? recorded ?? {};
+    const context = options.context ?? traceLog?.context ?? {};
+    // A trace capped by `maxEntries` lacks steps production ran, so running a missing step live repeats
+    // production's I/O: a billing batch replayed that way charged and invoiced subscriptions again.
+    const droppedEntries = Number(traceLog?.dropped) || 0;
+    const capped = droppedEntries > 0;
+    if (capped && onMissing === 'execute') {
+        throw replayError(
+            `The trace dropped ${droppedEntries} entries under maxEntries, so a step it lacks may be one ` +
+                "production ran, and onMissing: 'execute' would run it again. Replay without it to stop at the " +
+                'first missing step, or record the flow with a higher maxEntries.'
+        );
+    }
     let index = 0;
     // What `onResolved` threw. It stops the replay, which rejects with it, rather than counting as the
     // Command failing, which would let a Retry ask for an attempt production never made. Cast rather than
@@ -1692,15 +1706,21 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
         if (outcome === undefined) {
             if (onMissing !== 'execute') {
                 const what = missing ? missing(step) : `No recorded outcome for '${name}' at step ${step.index}`;
-                // The option is named with its one safe use, since a step with no entry may be one production
-                // never ran, and running it live would do I/O production refused.
-                throw replayError(
-                    `${what}; refusing to run the real Command. Production may never have run it: a Command ` +
-                        'an onBeforeCommand hook vetoed leaves no entry, and neither does a step added since the ' +
-                        "recording. Pass onMissing: 'execute' to run unrecorded steps live only when the trace was " +
-                        'cut short, as by maxEntries.',
-                    { command: name, index: step.index, path }
-                );
+                // Why the step may be missing decides the fix. A capped trace needs a higher cap, since the step
+                // may be one production ran; any other missing step may be one production never ran, and
+                // running it live against production would do I/O production refused.
+                const why = capped
+                    ? `The trace dropped ${droppedEntries} entries under maxEntries, so production may have run ` +
+                      'this step and the recorder not kept it; record the flow with a higher maxEntries to ' +
+                      'replay past it.'
+                    : 'Production may never have run it: a Command an onBeforeCommand hook vetoed leaves no ' +
+                      "entry, and neither does a step added since the recording. onMissing: 'execute' runs such " +
+                      'steps for real, so pass it only where the Commands reach test doubles or only read.';
+                throw replayError(`${what}; refusing to run the real Command. ${why}`, {
+                    command: name,
+                    index: step.index,
+                    path
+                });
             }
             return await op();
         }

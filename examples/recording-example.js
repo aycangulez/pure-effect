@@ -36,8 +36,8 @@ import { configureEffect, recorder, Failure } from '../index.js';
  * @property {(error: unknown, flowName?: string) => void} [onSinkError] - Receives an error thrown by `keep`
  *           or `sink`, which would otherwise have replaced the run's outcome. Defaults to `console.error`.
  * @property {(message: string, flowName?: string) => void} [onWarning] - Receives a warning about a trace that
- *           will not replay as recorded: one whose flow carried no input, reported once per flow. Defaults to
- *           `console.warn`.
+ *           will not replay as recorded: one whose flow carried no input, or one `maxEntries` cut short, each
+ *           reported once per flow. Defaults to `console.warn`.
  */
 
 /**
@@ -62,8 +62,9 @@ export function recordingHooks(options = {}) {
     } = options;
     /** @type {AsyncLocalStorage<RecordingStore>} */
     const scope = new AsyncLocalStorage();
-    /** Flows already warned about, so a warning comes once per flow rather than once per run. */
+    /** Flows already warned about, one set per warning, so each comes once per flow rather than once per run. */
     const warned = new Set();
+    const warnedCapped = new Set();
 
     /**
      * One recorder per run, held in async-local scope so `onStep` can find the right one without a
@@ -108,6 +109,17 @@ export function recordingHooks(options = {}) {
                         );
                     }
                     const { dropped, trace } = rec.toTrace();
+                    // A capped trace lacks steps production ran, so it replays only up to the first of them, and
+                    // replaying past it by running the missing steps live would repeat production's I/O.
+                    if (dropped && dropped > 0 && !warnedCapped.has(flowName)) {
+                        warnedCapped.add(flowName);
+                        onWarning(
+                            `Recording '${flowName || 'flow'}': a kept trace dropped ${dropped} entries under ` +
+                                `maxEntries (${maxEntries}), so it replays only up to the first step it lacks. ` +
+                                'Raise maxEntries for this flow to replay whole runs.',
+                            flowName
+                        );
+                    }
                     await sink({ ...head, dropped, trace });
                 }
             } catch (error) {

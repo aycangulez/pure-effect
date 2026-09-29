@@ -1496,7 +1496,8 @@ export interface ReplayOptions<Ctx = unknown> {
     /**
      * What to do when the Resolver has no recording for a step.
      * `'throw'` (default) fails the replay, making side effects impossible.
-     * `'execute'` runs the real Command: recorded prefix, live tail.
+     * `'execute'` runs the real Command, so pass it only where the Commands reach test doubles or only read.
+     * A trace that dropped entries under `maxEntries` refuses it, since a step it lacks may be one production ran.
      */
     onMissing?: 'throw' | 'execute';
     onResolved?: (step: ReplayStep, outcome: ReplayOutcome | undefined) => void;
