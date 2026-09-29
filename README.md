@@ -544,6 +544,66 @@ Outside a `Parallel`, the function is called with no arguments. A `Retry` inside
 
 Which branch failed first and cancelled the others depends on timing, so it is recorded with the trace. A replay of a cancelled `Parallel` returns the same failure production did, and stops each other branch where production stopped it, rather than letting whichever branch the replay reaches first decide. The same holds when the branch that cancelled the others was a `next` function or a pure step that threw: the replay throws the same error. If the branch that cancelled the others no longer fails, or the `Parallel` no longer has that branch, the replay raises a `TimeParadox` naming it.
 
+**Undoing what succeeded when a branch fails.** Without `settled`, the failing branch's `Failure` is the whole result, and the values of the branches that succeeded are dropped. When one of them did something that has to be undone, such as charging a card for an order whose stock then ran out, the code that called `runEffect` no longer has the charge to refund. Use `settled: true`, so `next` sees every outcome, and have it return the steps that undo whatever succeeded, followed by the failure:
+
+```js
+const reserveStock = (order) => {
+    const cmdReserveStock = () => inventory.reserve(order.items);
+    return Command(cmdReserveStock, (r) => (r.ok ? Success(r.reservationId) : Failure('out_of_stock')));
+};
+
+const chargeOrder = (order) => {
+    const cmdChargeOrder = () => payments.charge(order.customerId, order.total);
+    return Command(cmdChargeOrder, (c) => (c.ok ? Success(c.chargeId) : Failure('card_declined')));
+};
+
+const releaseStock = (reservationId) => {
+    const cmdReleaseStock = () => inventory.release(reservationId);
+    return Command(cmdReleaseStock);
+};
+
+const refundCharge = (chargeId) => {
+    const cmdRefundCharge = () => payments.refund(chargeId);
+    return Command(cmdRefundCharge);
+};
+
+// Passes both results on, or undoes whichever step succeeded and then fails.
+const reserveAndCharge = (order) =>
+    Parallel(
+        [reserveStock(order), chargeOrder(order)],
+        ([reservation, charge]) => {
+            if (reservation.type === 'Success' && charge.type === 'Success') {
+                return Success({ order, reservationId: reservation.value, chargeId: charge.value });
+            }
+            const undo = [];
+            if (reservation.type === 'Success') undo.push(releaseStock(reservation.value));
+            if (charge.type === 'Success') undo.push(refundCharge(charge.value));
+            const failed = reservation.type === 'Failure' ? reservation : charge;
+            return Parallel(undo, () => Failure(failed.error));
+        },
+        { settled: true }
+    );
+```
+
+`next` is a plain function, so each case is tested by handing it the outcomes, with no I/O:
+
+```js
+const order = { id: 'order_1', customerId: 'cus_1', items: [], total: 120 };
+
+// The card was charged, then the stock ran out: the flow refunds the charge and fails.
+const undoing = reserveAndCharge(order).next([Failure('out_of_stock'), Success('ch_1')]);
+assert.equal(undoing.effects[0].cmd.name, 'cmdRefundCharge');
+assert.deepEqual(undoing.next([null]), Failure('out_of_stock'));
+
+// Both succeeded, so there is nothing to undo.
+assert.deepEqual(
+    reserveAndCharge(order).next([Success('res_1'), Success('ch_1')]),
+    Success({ order, reservationId: 'res_1', chargeId: 'ch_1' })
+);
+```
+
+A settled `Parallel` cancels nothing, so both steps always run to the end, and the undoing starts once both have finished. The undo steps are part of the flow, so a trace records them and a replay repeats them. An undo step that fails ends the flow with its own error rather than the original one; wrap it in `Retry` if it can fail for a moment.
+
 ## Composing Larger Flows
 
 `effectPipe` runs steps in a straight line. Branching and joining use the same pieces:
@@ -663,7 +723,7 @@ if (result.type === 'Failure') {
 }
 ```
 
-The annotations are optional. Without them, the union holds whatever each step can pass to `Failure`, so write a string there `as const` to keep it exact, and a step that cannot fail, such as a Command without a `next`, adds nothing. The union covers the `Failure`s your steps return, not what a Command's function throws, which also ends the run with a `Failure`, so give a `switch` over `result.error` a `default`. To check for a thrown error, copy it into a variable typed `unknown` first, as in `const error: unknown = result.error`, since TypeScript refuses `instanceof Error` on an error type made only of strings, or on a flow that declares none.
+The annotations are optional. Without them, the union holds whatever each step can pass to `Failure`, with a string kept as its exact value, and a step that cannot fail, such as a Command without a `next`, adds nothing. The union covers the `Failure`s your steps return, not what a Command's function throws, which also ends the run with a `Failure`, so give a `switch` over `result.error` a `default`. To check for a thrown error, copy it into a variable typed `unknown` first, as in `const error: unknown = result.error`, since TypeScript refuses `instanceof Error` on an error type made only of strings, or on a flow that declares none.
 
 Value types are checked through the pipeline too, so a step that reads a field the previous step does not return is a compile error. This only works while every step uses the value it receives. A step written as `() => doSomething(outer)` ignores it, and the types stop being checked at that point.
 

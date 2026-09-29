@@ -59,8 +59,23 @@ Success();
 
 // --- Failure ---
 
+// A literal keeps its type without `as const`, so an error union stays exact
 const f = Failure('oops');
-expectType<FailureState<string>>(f);
+expectType<FailureState<'oops'>>(f);
+const objectError = Failure({ code: 'out_of_stock', sku: 'lamp' });
+expectType<FailureState<{ readonly code: 'out_of_stock'; readonly sku: 'lamp' }>>(objectError);
+const readonlyStillAssignable: { code: string; sku: string } = objectError.error;
+// @ts-expect-error an array error is a readonly tuple, which a mutable array does not accept
+const arrayErrorAsMutable: string[] = Failure(['a', 'b']).error;
+declare const dynamicMessage: string;
+expectType<FailureState<string>>(Failure(dynamicMessage));
+const quickStartValidate = (input: User) => {
+    if (!input.email.includes('@')) return Failure('invalid_email');
+    if (input.password.length < 8) return Failure('weak_password');
+    return Success(input);
+};
+const quickStartResult = await runEffect(effectPipe(quickStartValidate)({ email: 'a@b.c', password: 'secret123' }));
+expectType<SuccessState<User> | FailureState<'invalid_email' | 'weak_password'>>(quickStartResult);
 
 // --- Command ---
 

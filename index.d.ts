@@ -186,7 +186,13 @@ export type ParallelContext<B extends readonly unknown[]> = {
 
 export declare function Success<T>(value: T): SuccessState<T>;
 
-export declare function Failure<E = unknown>(error: E, initialInput?: unknown): FailureState<E>;
+/**
+ * `E` is a `const` type parameter, so `Failure('invalid_email')` is typed `'invalid_email'` rather than `string`
+ * and an error union needs no `as const`. An object error becomes readonly, with literal properties, which is
+ * still assignable to a mutable type; an array error becomes a readonly tuple, which is not. A value typed
+ * `string` stays `string`.
+ */
+export declare function Failure<const E = unknown>(error: E, initialInput?: unknown): FailureState<E>;
 
 /**
  * `next` is optional and defaults to `(result) => Success(result)`, which is what most Commands want.
