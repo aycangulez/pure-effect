@@ -412,7 +412,9 @@ app.post('/checkout', async (req, res) => {
     const result = await runEffect(checkoutFlow(req.body.productId), { tenant: req.tenant });
     if (result.type === 'Success') return res.json(result.value);
     // A Failure also carries the flow's input, so send the client only an error meant for it.
-    res.status(400).json({ error: typeof result.error === 'string' ? result.error : 'Checkout failed.' });
+    // Answer the errors the flow returns by name, and anything else, such as a database outage, as a server error.
+    if (result.error === 'Product not found.') return res.status(400).json({ error: result.error });
+    res.status(500).json({ error: 'Checkout failed.' });
 });
 ```
 
@@ -742,7 +744,7 @@ if (result.type === 'Failure') {
 }
 ```
 
-The annotations are optional. Without them, the union holds whatever each step can pass to `Failure`, with a string kept as its exact value, and a step that cannot fail, such as a Command without a `next`, adds nothing. The union covers the `Failure`s your steps return, not what a Command's function throws, which also ends the run with a `Failure`, so give a `switch` over `result.error` a `default`. To check for a thrown error, copy it into a variable typed `unknown` first, as in `const error: unknown = result.error`, since TypeScript refuses `instanceof Error` on an error type made only of strings, or on a flow that declares none.
+The annotations are optional. Without them, the union holds whatever each step can pass to `Failure`, with a string kept as its exact value, and a step that cannot fail, such as a Command without a `next`, adds nothing. The union covers the `Failure`s your steps return. A Command whose function throws, or that an `onBeforeCommand` hook vetoes, also ends the run with a `Failure` the union does not name, so where the result is handled, give it one fallback, such as a `default` in a `switch` over `result.error`, and treat what reaches it as a server error. One fallback covers the whole flow: catch inside a Command's function only what the flow can handle, and let the rest throw, which is also what lets `Retry` act on it. To check for a thrown error, copy it into a variable typed `unknown` first, as in `const error: unknown = result.error`, since TypeScript refuses `instanceof Error` on an error type made only of strings, or on a flow that declares none.
 
 Value types are checked through the pipeline too, so a step that reads a field the previous step does not return is a compile error. This only works while every step uses the value it receives. A step written as `() => doSomething(outer)` ignores it, and the types stop being checked at that point.
 
