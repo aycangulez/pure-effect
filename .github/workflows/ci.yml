@@ -23,6 +23,20 @@ jobs:
             # mocha, tsd, and strict tsc. Checked by exit code: tsd prints neither "passing" nor "failing".
             - run: npm test
 
+    types-minimum:
+        name: Types (TypeScript 5.1)
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: npm
+            - run: npm ci
+            # The oldest TypeScript the declarations support. Outside npm test, since a second TypeScript
+            # installed as a dev dependency would link its own tsc over the one the gate runs.
+            - run: npm run test:ts-minimum
+
     lint:
         name: Format
         runs-on: ubuntu-latest

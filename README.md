@@ -10,7 +10,7 @@
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks
 - Zero dependencies, about 7 KB minified and gzipped
-- Works in JavaScript and TypeScript (full generics, bundled `.d.ts`)
+- Works in JavaScript, and in TypeScript 5.1 or later (full generics, bundled `.d.ts`)
 
 ## Table of Contents
 
@@ -643,6 +643,8 @@ Retry(
 In short, **you can recover from an error your I/O produced, but you cannot catch a `Failure` a step returned.** Only the code that called `runEffect` acts on it. For the same reason, do not throw business errors from a Command's function: a throw there tells `Retry` that the I/O broke, and `Retry` will try again. A throw anywhere else in the flow is treated as a bug: `runEffect` rejects with the thrown error instead of returning a `Failure`.
 
 ## TypeScript: Typed Errors and Context
+
+The bundled declarations need TypeScript 5.1 or later.
 
 ### Error union across pipeline steps
 

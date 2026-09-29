@@ -28,6 +28,7 @@
     },
     "scripts": {
         "test": "mocha && tsd && tsc -p jsconfig.json",
+        "test:ts-minimum": "npx --yes -p typescript@5.1 tsc -p test/tsconfig.minimum.json",
         "format": "prettier --write index.js index.d.ts examples/*.js test/all.js test/types.test-d.ts README.md CLAUDE.md CHANGELOG.md CONTRIBUTING.md"
     },
     "tsd": {

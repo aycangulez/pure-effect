@@ -166,21 +166,13 @@ export type EffectContext<X> = [X] extends [SuccessState<any> | FailureState<any
 export type ParallelBranches<B> = B &
     (B extends readonly Effect<any, any, any>[] ? unknown : readonly Effect<any, any, any>[]);
 
-/**
- * The value of each branch, in array order: what `next` receives. The `Extract` changes nothing once the
- * branches are known, but before TypeScript 5.1 a mapped type over them was not known to be an array, and
- * `ParallelState` rejected it, so the declarations stopped compiling there. `ParallelOutcomes` needs it too.
- */
-export type ParallelValues<B extends readonly unknown[]> = Extract<
-    { -readonly [K in keyof B]: EffectValue<B[K]> },
-    readonly unknown[]
->;
+/** The value of each branch, in array order: what `next` receives. */
+export type ParallelValues<B extends readonly unknown[]> = { -readonly [K in keyof B]: EffectValue<B[K]> };
 
 /** What a settled `Parallel` hands to `next`: one outcome per branch, in array order, with that branch's error. */
-export type ParallelOutcomes<B extends readonly unknown[]> = Extract<
-    { -readonly [K in keyof B]: SuccessState<EffectValue<B[K]>> | FailureState<EffectError<B[K]>> },
-    readonly unknown[]
->;
+export type ParallelOutcomes<B extends readonly unknown[]> = {
+    -readonly [K in keyof B]: SuccessState<EffectValue<B[K]>> | FailureState<EffectError<B[K]>>;
+};
 
 /**
  * Every branch's context together, as `effectPipe` combines its steps', so a branch that reads none adds
@@ -263,7 +255,8 @@ export declare function Retry<T, E = never, Ctx = unknown>(
  * with one shared error and context, which nothing inferred, so both were `unknown`: a branch reading
  * the context let `runEffect` run without one, and every pipeline holding a `Parallel` lost its error
  * union. `B extends readonly unknown[] | []` infers an array literal as a tuple, so each position keeps
- * its own types.
+ * its own types. A `const` type parameter does too, but only from TypeScript 5.4 when the parameter is an
+ * intersection such as `ParallelBranches<B>`.
  */
 export declare function Parallel<B extends readonly unknown[] | []>(
     effects: ParallelBranches<B>,
@@ -297,7 +290,7 @@ export declare function Parallel<B extends readonly unknown[] | [], R, E = never
     R,
     // `E` alone would be inferred from the expected return type as well as from `next`, and inside
     // `effectPipe`'s arguments, where that type is still being inferred, it came out as `any`. The indexed
-    // access resolves to `E` but offers nothing to infer from, as TypeScript 5.4's `NoInfer` would.
+    // access resolves to `E` but offers nothing to infer from, as `NoInfer` would, which needs TypeScript 5.4.
     EffectError<B[number]> | [E][E extends any ? 0 : never],
     ParallelContext<B> & Ctx
 >;
