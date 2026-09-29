@@ -260,6 +260,43 @@ const savedOrPlaceholder = Retry(
 );
 expectType<RetryState<SavedUser, never>>(savedOrPlaceholder);
 
+// A next that can only fail adds nothing to the value, as a step that cannot fail adds nothing to the error.
+// Command took its function's result as the value, and Ask, Parallel and effectPipe took unknown, so a step
+// that either succeeds or compensates and then fails did not compile in a pipeline.
+type AppCtxForFailing = { tenant: string };
+const onlyFailsCommand = Command(
+    () => 42,
+    () => Failure('declined' as const)
+);
+const onlyFailsAsk = Ask((_ctx: AppCtxForFailing) => Failure('declined' as const));
+const onlyFailsParallel = Parallel([Success(1)], () => Failure('declined' as const));
+const onlyFailsPipe = effectPipe(
+    (chargeId: string) => Command(() => `refunded ${chargeId}`),
+    () => Failure('declined' as const)
+);
+expectType<CommandState<number, never, 'declined'>>(onlyFailsCommand);
+expectType<AskState<never, 'declined', AppCtxForFailing>>(onlyFailsAsk);
+expectType<ParallelState<[number], never, 'declined'>>(onlyFailsParallel);
+expectType<Effect<never, 'declined'>>(onlyFailsPipe('ch_1'));
+const refundCharge = (chargeId: string) => Command(() => `refunded ${chargeId}`);
+declare const inStock: boolean;
+const fulfilOrCompensate = effectPipe(
+    (id: number) =>
+        inStock
+            ? Success({ id })
+            : Command(
+                  () => 'released',
+                  () => Failure('declined' as const)
+              ),
+    (order: { id: number }) => Success(order.id)
+);
+expectType<(start: number) => Effect<number, 'declined'>>(fulfilOrCompensate);
+const compensateInPipeline = effectPipe(
+    (id: number) => (inStock ? Success({ id }) : effectPipe(refundCharge, () => Failure('declined' as const))('ch_1')),
+    (order: { id: number }) => Success(order.id)
+);
+expectType<(start: number) => Effect<number, 'declined'>>(compensateInPipeline);
+
 // --- long pipelines: typed for up to 20 steps, the same ceiling as Effect-TS ---
 
 const stepWith =
