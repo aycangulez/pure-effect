@@ -82,24 +82,24 @@ export type ParallelOptions = {
     settled?: boolean;
 };
 
-/** What a settled `Parallel` hands to `next`: one outcome per branch, in array order. */
-export type ParallelOutcomes<T extends readonly unknown[], E> = {
-    [K in keyof T]: SuccessState<T[K]> | FailureState<E>;
-};
-
 /**
  * `V` is what `next` receives, which is the branch values normally and the branch outcomes under
  * `settled`. It defaults to `T`, so every non-settled use reads as it always did.
+ *
+ * `E` is the error the node contributes to its pipeline, and `BranchError` the error its branches can
+ * fail with, which types `effects`. They differ only under `settled`, where a branch's failure reaches
+ * `next` as an outcome instead of escaping, so the node contributes only what `next` can return.
  */
 export type ParallelState<
     T extends readonly unknown[],
     R,
     E = unknown,
     Ctx = unknown,
-    V extends readonly unknown[] = T
+    V extends readonly unknown[] = T,
+    BranchError = E
 > = {
     type: 'Parallel';
-    effects: { [K in keyof T]: Effect<T[K], E, Ctx> };
+    effects: { [K in keyof T]: Effect<T[K], BranchError, Ctx> };
     next(values: [...V]): Effect<R, E, Ctx>;
     options?: ParallelOptions;
     initialInput?: unknown;
@@ -111,7 +111,86 @@ export type Effect<T, E = unknown, Ctx = unknown> =
     | CommandState<any, T, E, Ctx>
     | AskState<T, E, Ctx>
     | RetryState<T, E, Ctx>
-    | ParallelState<any, T, E, Ctx>;
+    | ParallelState<any, T, E, Ctx, any, any>;
+
+/**
+ * The value an Effect succeeds with. An Effect typed as the whole `Effect` union is read member by member,
+ * so a `Failure` adds nothing to it.
+ */
+export type EffectValue<X> =
+    X extends SuccessState<infer T>
+        ? T
+        : X extends CommandState<any, infer T, any, any>
+          ? T
+          : X extends AskState<infer T, any, any>
+            ? T
+            : X extends RetryState<infer T, any, any>
+              ? T
+              : X extends ParallelState<any, infer T, any, any, any, any>
+                ? T
+                : never;
+
+/** The error an Effect can fail with: what it returns as a `Failure`, not what a Command's function throws. */
+export type EffectError<X> =
+    X extends FailureState<infer E>
+        ? E
+        : X extends CommandState<any, any, infer E, any>
+          ? E
+          : X extends AskState<any, infer E, any>
+            ? E
+            : X extends RetryState<any, infer E, any>
+              ? E
+              : X extends ParallelState<any, any, infer E, any, any, any>
+                ? E
+                : never;
+
+/** The context an Effect reads, which is `unknown` for a `Success` or `Failure`, since they read none. */
+export type EffectContext<X> = [X] extends [SuccessState<any> | FailureState<any>]
+    ? unknown
+    : X extends CommandState<any, any, any, infer C>
+      ? C
+      : X extends AskState<any, any, infer C>
+        ? C
+        : X extends RetryState<any, any, infer C>
+          ? C
+          : X extends ParallelState<any, any, any, infer C, any, any>
+            ? C
+            : never;
+
+/**
+ * What `Parallel` accepts: the branches as given, checked to be Effects by a conditional rather than by a
+ * constraint. A constraint such as `readonly Effect<any, any, any>[]` is also the contextual type of each
+ * branch, so an `Ask` or a `Retry` written inside the array inferred its error and context as `any` from it,
+ * which switched their checking off.
+ */
+export type ParallelBranches<B> = B &
+    (B extends readonly Effect<any, any, any>[] ? unknown : readonly Effect<any, any, any>[]);
+
+/**
+ * The value of each branch, in array order: what `next` receives. The `Extract` changes nothing once the
+ * branches are known, but before TypeScript 5.1 a mapped type over them was not known to be an array, and
+ * `ParallelState` rejected it, so the declarations stopped compiling there. `ParallelOutcomes` needs it too.
+ */
+export type ParallelValues<B extends readonly unknown[]> = Extract<
+    { -readonly [K in keyof B]: EffectValue<B[K]> },
+    readonly unknown[]
+>;
+
+/** What a settled `Parallel` hands to `next`: one outcome per branch, in array order, with that branch's error. */
+export type ParallelOutcomes<B extends readonly unknown[]> = Extract<
+    { -readonly [K in keyof B]: SuccessState<EffectValue<B[K]>> | FailureState<EffectError<B[K]>> },
+    readonly unknown[]
+>;
+
+/**
+ * Every branch's context together, as `effectPipe` combines its steps', so a branch that reads none adds
+ * nothing and `runEffect` asks for every context a branch reads.
+ */
+export type ParallelContext<B extends readonly unknown[]> = {
+    [K in keyof B]: (context: EffectContext<B[K]>) => void;
+}[number] extends (context: infer Ctx) => void
+    ? Ctx
+    : unknown;
 
 export declare function Success<T>(value: T): SuccessState<T>;
 
@@ -179,28 +258,49 @@ export declare function Retry<T, E = never, Ctx = unknown>(
  * shared options object or a caller's `ParallelOptions`, could be `true` at runtime, and matching it to
  * an overload that types `next` as the values let a batch compile while it read outcome objects as
  * values. It matches no overload instead: write `settled: true` inline, or add `as const`.
+ *
+ * Each branch's value, error and context are read from the branch itself. The branches were once typed
+ * with one shared error and context, which nothing inferred, so both were `unknown`: a branch reading
+ * the context let `runEffect` run without one, and every pipeline holding a `Parallel` lost its error
+ * union. `B extends readonly unknown[] | []` infers an array literal as a tuple, so each position keeps
+ * its own types.
  */
-export declare function Parallel<T extends readonly unknown[], E = unknown, Ctx = unknown>(
-    effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
+export declare function Parallel<B extends readonly unknown[] | []>(
+    effects: ParallelBranches<B>,
     options: ParallelOptions & { settled: true }
-): ParallelState<[...T], ParallelOutcomes<T, E>, E, Ctx, ParallelOutcomes<T, E>>;
+): ParallelState<
+    ParallelValues<B>,
+    ParallelOutcomes<B>,
+    never,
+    ParallelContext<B>,
+    ParallelOutcomes<B>,
+    EffectError<B[number]>
+>;
 
-export declare function Parallel<T extends readonly unknown[], R, E = unknown, Ctx = unknown>(
-    effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
-    next: (values: ParallelOutcomes<T, E>) => Effect<R, E, Ctx>,
+export declare function Parallel<B extends readonly unknown[] | [], R, E = never, Ctx = unknown>(
+    effects: ParallelBranches<B>,
+    next: (outcomes: ParallelOutcomes<B>) => Effect<R, E, Ctx>,
     options: ParallelOptions & { settled: true }
-): ParallelState<[...T], R, E, Ctx, ParallelOutcomes<T, E>>;
+): ParallelState<ParallelValues<B>, R, E, ParallelContext<B> & Ctx, ParallelOutcomes<B>, EffectError<B[number]>>;
 
-export declare function Parallel<T extends readonly unknown[], E = unknown, Ctx = unknown>(
-    effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
+export declare function Parallel<B extends readonly unknown[] | []>(
+    effects: ParallelBranches<B>,
     options?: ParallelOptions & { settled?: false }
-): ParallelState<[...T], [...T], E, Ctx>;
+): ParallelState<ParallelValues<B>, ParallelValues<B>, EffectError<B[number]>, ParallelContext<B>>;
 
-export declare function Parallel<T extends readonly unknown[], R, E = unknown, Ctx = unknown>(
-    effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
-    next: (values: [...T]) => Effect<R, E, Ctx>,
+export declare function Parallel<B extends readonly unknown[] | [], R, E = never, Ctx = unknown>(
+    effects: ParallelBranches<B>,
+    next: (values: ParallelValues<B>) => Effect<R, E, Ctx>,
     options?: ParallelOptions & { settled?: false }
-): ParallelState<[...T], R, E, Ctx>;
+): ParallelState<
+    ParallelValues<B>,
+    R,
+    // `E` alone would be inferred from the expected return type as well as from `next`, and inside
+    // `effectPipe`'s arguments, where that type is still being inferred, it came out as `any`. The indexed
+    // access resolves to `E` but offers nothing to infer from, as TypeScript 5.4's `NoInfer` would.
+    EffectError<B[number]> | [E][E extends any ? 0 : never],
+    ParallelContext<B> & Ctx
+>;
 
 /**
  * Composes steps into a pipeline: each step receives the previous step's success value, and a Failure

@@ -3459,6 +3459,9 @@ describe('Kleisli laws', function () {
             }),
             { attempts: 2, delay: 0 }
         );
+    // The steps fail in different ways, so each loop over them needs one error type that covers them all.
+    /** @typedef {(x: number) => import('../index.js').Effect<number, unknown, any>} LawStep */
+    /** @type {LawStep[]} */
     const steps = [double, addBonus, guarded, retried];
     const inputs = [1, 10, 60];
 
@@ -3491,6 +3494,7 @@ describe('Kleisli laws', function () {
     });
 
     it('should satisfy associativity: (f >=> g) >=> h is f >=> (g >=> h) across every node type', async function () {
+        /** @type {[LawStep, LawStep, LawStep][]} */
         const triples = [
             [double, addBonus, guarded],
             [addBonus, retried, guarded],

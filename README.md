@@ -661,7 +661,7 @@ if (result.type === 'Failure') {
 }
 ```
 
-The annotations are optional. Without them, the union holds whatever each step can pass to `Failure`, so write a string there `as const` to keep it exact, and a step that cannot fail, such as a Command without a `next`, adds nothing. The union covers the `Failure`s your steps return, not what a Command's function throws, which also ends the run with a `Failure`, so give a `switch` over `result.error` a `default`. A step that returns a `Parallel` makes the whole union `unknown` unless its return type is annotated.
+The annotations are optional. Without them, the union holds whatever each step can pass to `Failure`, so write a string there `as const` to keep it exact, and a step that cannot fail, such as a Command without a `next`, adds nothing. The union covers the `Failure`s your steps return, not what a Command's function throws, which also ends the run with a `Failure`, so give a `switch` over `result.error` a `default`. To check for a thrown error, copy it into a variable typed `unknown` first, as in `const error: unknown = result.error`, since TypeScript refuses `instanceof Error` on an error type made only of strings, or on a flow that declares none.
 
 Value types are checked through the pipeline too, so a step that reads a field the previous step does not return is a compile error. This only works while every step uses the value it receives. A step written as `() => doSomething(outer)` ignores it, and the types stop being checked at that point.
 
@@ -680,7 +680,7 @@ const findProduct = (productId: string): Effect<Product, 'not_found', AppContext
 const result = await runEffect(findProduct('abc'), { tenant: 'acme', requestId: '123' });
 ```
 
-Every step's context counts, so a pipeline needs all the contexts its steps read, even when the first step reads none. `runEffect` requires a context whenever the flow reads one, since the flow would otherwise get an empty object.
+Every step's context counts, so a pipeline needs all the contexts its steps read, even when the first step reads none, and a `Parallel` needs every context its branches read. `runEffect` requires a context whenever the flow reads one, since the flow would otherwise get an empty object.
 
 ## Why Pure Effect
 

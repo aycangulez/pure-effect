@@ -350,21 +350,23 @@ const par = Parallel([Success(42), Success('hello')], ([n, s]) => {
     expectType<string>(s);
     return Success({ n, s });
 });
-expectType<ParallelState<[number, string], { n: number; s: string }>>(par);
+expectType<ParallelState<[number, string], { n: number; s: string }, never>>(par);
 
 // Parallel in effectPipe preserves type flow
 const parallelFlow = effectPipe((input: User) =>
     Parallel([Success(input.email), Success(input.password)], ([email, password]) => Success({ email, password }))
 );
-expectType<Effect<{ email: string; password: string }>>(parallelFlow({ email: 'a@b.com', password: 'secret123' }));
+expectType<Effect<{ email: string; password: string }, never>>(
+    parallelFlow({ email: 'a@b.com', password: 'secret123' })
+);
 
 // runEffect return type flows through Parallel
 const parallelResult = await runEffect(Parallel([Success(1), Success('x')], ([n, s]) => Success({ n, s })));
-expectType<SuccessState<{ n: number; s: string }> | FailureState<unknown>>(parallelResult);
+expectType<SuccessState<{ n: number; s: string }> | FailureState<never>>(parallelResult);
 
 // With next omitted, the Parallel resolves to the values tuple itself
 const parBare = Parallel([Success(42), Success('hello')]);
-expectType<ParallelState<[number, string], [number, string]>>(parBare);
+expectType<ParallelState<[number, string], [number, string], never>>(parBare);
 const parBareResult = await runEffect(parBare);
 if (parBareResult.type === 'Success') {
     expectType<[number, string]>(parBareResult.value);
@@ -372,17 +374,17 @@ if (parBareResult.type === 'Success') {
 
 // Options in the second slot leave the value types alone
 const parLimited = Parallel([Success(42), Success('hello')], { limit: 2 });
-expectType<ParallelState<[number, string], [number, string]>>(parLimited);
+expectType<ParallelState<[number, string], [number, string], never>>(parLimited);
 
 // Options alongside a next
 const parLimitedNext = Parallel([Success(42), Success('hello')], ([n, s]) => Success({ n, s }), { limit: 2 });
-expectType<ParallelState<[number, string], { n: number; s: string }>>(parLimitedNext);
+expectType<ParallelState<[number, string], { n: number; s: string }, never>>(parLimitedNext);
 
 // Settled hands next the branch outcomes rather than the values
 const parSettled = Parallel([Success(42), Success('hello')], { settled: true });
 const parSettledResult = await runEffect(parSettled);
 if (parSettledResult.type === 'Success') {
-    expectType<[SuccessState<number> | FailureState<unknown>, SuccessState<string> | FailureState<unknown>]>(
+    expectType<[SuccessState<number> | FailureState<never>, SuccessState<string> | FailureState<never>]>(
         parSettledResult.value
     );
 }
@@ -390,15 +392,22 @@ if (parSettledResult.type === 'Success') {
 const parSettledNext = Parallel(
     [Success(42), Success('hello')],
     ([first, second]) => {
-        expectType<SuccessState<number> | FailureState<unknown>>(first);
-        expectType<SuccessState<string> | FailureState<unknown>>(second);
+        expectType<SuccessState<number> | FailureState<never>>(first);
+        expectType<SuccessState<string> | FailureState<never>>(second);
         return Success(first.type === 'Success' ? first.value : 0);
     },
     { settled: true }
 );
-expectType<ParallelState<[number, string], number, unknown, unknown, ParallelOutcomes<[number, string], unknown>>>(
-    parSettledNext
-);
+expectType<
+    ParallelState<
+        [number, string],
+        number,
+        never,
+        unknown,
+        ParallelOutcomes<[SuccessState<number>, SuccessState<string>]>,
+        never
+    >
+>(parSettledNext);
 
 // @ts-expect-error a settled next receives outcomes, so a bare value cannot be used as one
 Parallel([Success(42)], ([n]) => Success(n + 1), { settled: true });
@@ -420,12 +429,72 @@ declare const optionsFromCaller: ParallelOptions;
 // @ts-expect-error a caller's ParallelOptions may carry settled: true
 Parallel([Success(42)], optionsFromCaller);
 // settled: false, or no settled at all, still types next as the values, and `as const` keeps a shared flag exact
-expectType<ParallelState<[number], [number]>>(Parallel([Success(42)], { limit: 2, settled: false }));
+expectType<ParallelState<[number], [number], never>>(Parallel([Success(42)], { limit: 2, settled: false }));
 const settledOptions = { limit: 2, settled: true } as const;
 const parSettledShared = Parallel([Success(42)], settledOptions);
 expectType<
-    ParallelState<[number], ParallelOutcomes<[number], unknown>, unknown, unknown, ParallelOutcomes<[number], unknown>>
+    ParallelState<
+        [number],
+        ParallelOutcomes<[SuccessState<number>]>,
+        never,
+        unknown,
+        ParallelOutcomes<[SuccessState<number>]>,
+        never
+    >
 >(parSettledShared);
+
+// @ts-expect-error a branch has to be an Effect
+Parallel([42]);
+
+// Each branch's error is its own. A Parallel fails with any of them, or with what next returns, which is
+// inferred from next alone.
+const failsA = Command(
+    () => 1,
+    (n) => (n ? Success(n) : Failure('a' as const))
+);
+const failsB = Command(
+    () => 'x',
+    (s) => (s ? Success(s) : Failure('b' as const))
+);
+expectType<ParallelState<[number, string], [number, string], 'a' | 'b'>>(Parallel([failsA, failsB]));
+const parWithNextError = Parallel([failsA, failsB], ([n, s]) => (n > 1 ? Success(s) : Failure('small' as const)));
+expectType<ParallelState<[number, string], string, 'a' | 'b' | 'small'>>(parWithNextError);
+// @ts-expect-error an annotation has to cover the branches' errors, not only next's
+const tooNarrow = (): Effect<string, 'small'> => Parallel([failsA], () => Failure('small' as const));
+
+// Under settled, each outcome carries its own branch's error, and only next's failure escapes
+const settledBatch = Parallel(
+    [failsA, failsB],
+    ([first, second]) => {
+        expectType<SuccessState<number> | FailureState<'a'>>(first);
+        expectType<SuccessState<string> | FailureState<'b'>>(second);
+        return first.type === 'Failure' && second.type === 'Failure' ? Failure('all_failed' as const) : Success(true);
+    },
+    { settled: true }
+);
+const settledBatchResult = await runEffect(settledBatch);
+if (settledBatchResult.type === 'Failure') {
+    expectType<'all_failed'>(settledBatchResult.error);
+}
+
+// Branches built with map, as the README writes a loop, keep their error, and so does a pipeline holding one
+const chargeOne = (id: number) =>
+    Command(
+        () => id,
+        (n) => (n ? Success(n) : Failure('declined' as const))
+    );
+expectType<ParallelState<number[], number[], 'declined'>>(Parallel([1, 2].map(chargeOne), { limit: 1 }));
+const chargeAll = effectPipe(
+    (ids: number[]) => (ids.length ? Success(ids) : Failure('no_invoices' as const)),
+    (ids: number[]) => Parallel(ids.map(chargeOne), { limit: 1 })
+);
+const chargeAllResult = await runEffect(chargeAll([1, 2]));
+expectType<SuccessState<number[]> | FailureState<'no_invoices' | 'declined'>>(chargeAllResult);
+
+// A Parallel written inside effectPipe's arguments, whose next cannot fail, adds no error. Its next's error
+// was once inferred from the pipeline's expected type as well, and came out as any.
+const countCharged = effectPipe((ids: number[]) => Parallel(ids.map(chargeOne), (charged) => Success(charged.length)));
+expectType<Effect<number, 'declined'>>(countCharged([1]));
 
 // --- Ctx (context type) ---
 
@@ -473,6 +542,30 @@ const needsBoth = effectPipe(findConn, findTenant);
 expectType<(start: string) => Effect<string, 'not_found', AppCtx & TenantCtx>>(needsBoth);
 // @ts-expect-error the tenant is missing
 runEffect(needsBoth('p1'), { db: 'conn' });
+
+// A Parallel needs every context its branches read, as a pipeline needs its steps'. The branches were once
+// typed with one shared context that nothing inferred, so a Parallel read as needing none.
+const readsDb = Ask((ctx: AppCtx) => Success(ctx.db));
+const readsTenant = Ask((ctx: TenantCtx) => Success(ctx.tenant));
+const dbBeside = Parallel([readsDb, Command(() => 1)]);
+expectType<ParallelState<[string, number], [string, number], never, AppCtx>>(dbBeside);
+// @ts-expect-error a branch reads AppCtx, so a context is required
+runEffect(dbBeside);
+// @ts-expect-error the branches read AppCtx and TenantCtx, and the tenant is missing
+runEffect(Parallel([readsDb, readsTenant]), { db: 'conn' });
+runEffect(Parallel([readsDb, readsTenant]), { db: 'conn', tenant: 't1' });
+// @ts-expect-error settled branches read the context the same way
+runEffect(Parallel([readsDb], { settled: true }));
+// @ts-expect-error so do branches built with map
+runEffect(Parallel(['a', 'b'].map(() => readsDb)));
+// @ts-expect-error and a Parallel inside a pipeline
+runEffect(effectPipe((id: string) => Parallel([readsDb, Command(() => id)]))('u1'));
+// @ts-expect-error next's context counts too
+runEffect(Parallel([Success(1)], ([n]) => Ask((ctx: AppCtx) => Success(ctx.db + n))));
+// A branch written inside the array infers its own error and context, where the parameter's type once gave
+// it any for both
+const inlineBranches = Parallel([Ask((ctx: AppCtx) => Success(ctx.db)), Retry(Command(() => 1))]);
+expectType<ParallelState<[string, number], [string, number], RetryExhaustedError, AppCtx>>(inlineBranches);
 
 // --- configureEffect / EffectConfiguration ---
 
