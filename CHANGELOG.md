@@ -2,6 +2,12 @@
 
 All notable changes to pure-effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
+## [Unreleased]
+
+### Changed
+
+- **An error union survives a pipeline without return annotations.** A step that cannot return a `Failure`, such as a Command with the default `next`, a Command whose `next` only succeeds, or a pure step that only returns `Success`, declared its error as `unknown`, which absorbed every other step's. So the Quick Start written in TypeScript typed `result.error` as `unknown`, and so did every pipeline that retried a Command in the recommended shape. Such a step now declares `never`, and the union holds the `Failure`s the steps can return: `Retry(Command(fn))` declares `RetryExhaustedError` alone, and a `Retry` whose fallback cannot fail declares nothing of its own. A variable that holds the results of two different flows, which both used to type as `FailureState<unknown>`, may need a wider annotation. A step that returns a `Parallel` still declares `unknown`, and a Command whose function throws still ends the run with a `Failure` the union does not name.
+
 ## [0.15.0] - 2026-09-27
 
 ### Added
@@ -194,6 +200,7 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 
 - Initial release: `Success`, `Failure`, `Command`, `effectPipe`, and `runEffect`.
 
+[Unreleased]: https://github.com/aycangulez/pure-effect/compare/v0.15.0...HEAD
 [0.15.0]: https://github.com/aycangulez/pure-effect/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/aycangulez/pure-effect/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/aycangulez/pure-effect/compare/v0.12.0...v0.13.0

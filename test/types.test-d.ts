@@ -83,7 +83,7 @@ const cmd = Command(
         return Success(saved);
     }
 );
-expectType<CommandState<SavedUser, SavedUser, unknown>>(cmd);
+expectType<CommandState<SavedUser, SavedUser, never>>(cmd);
 
 // A cmd that only throws, or returns Promise.reject, infers R as never. That has to stay assignable
 // to Effect under strictFunctionTypes, which is why every state's `next` is a method signature
@@ -107,21 +107,21 @@ const step2 = (user: User) =>
     );
 
 const flow = effectPipe(step1, step2);
-expectType<Effect<SavedUser>>(flow({ email: 'a@b.com', password: 'secret123' }));
+expectType<Effect<SavedUser, never>>(flow({ email: 'a@b.com', password: 'secret123' }));
 // @ts-expect-error missing password
 flow({ email: 'a@b.com' });
 
 // --- runEffect return type ---
 
 const result = await runEffect(flow({ email: 'a@b.com', password: 'secret123' }));
-expectType<SuccessState<SavedUser> | FailureState<unknown>>(result);
+expectType<SuccessState<SavedUser> | FailureState<never>>(result);
 
 // --- discriminated union narrowing ---
 
 if (result.type === 'Success') {
     expectType<SavedUser>(result.value);
 } else {
-    expectType<unknown>(result.error);
+    expectType<never>(result.error);
 }
 
 // --- Failure error type flows through runEffect ---
@@ -133,10 +133,10 @@ expectType<SuccessState<User> | FailureState<string>>(failResult);
 // --- Ask ---
 
 const ask = Ask((ctx) => Success(ctx as User));
-expectType<AskState<User, unknown>>(ask);
+expectType<AskState<User, never>>(ask);
 
 const askFlow = effectPipe((input: User) => Ask((_ctx) => Success(input)));
-expectType<Effect<User>>(askFlow({ email: 'a@b.com', password: 'secret123' }));
+expectType<Effect<User, never>>(askFlow({ email: 'a@b.com', password: 'secret123' }));
 
 // --- Retry ---
 
@@ -149,11 +149,11 @@ const innerCmd = Command(
 // abort the wrapped tree returned, which is not retried and leaves unwrapped, and the exhaustion
 // failure that follows an I/O fault the loop could not get past.
 const retried = Retry(innerCmd, { attempts: 3 });
-expectType<RetryState<number, unknown | RetryExhaustedError>>(retried);
+expectType<RetryState<number, RetryExhaustedError>>(retried);
 
 // Retry without options is valid
 const retriedNoOpts = Retry(innerCmd);
-expectType<RetryState<number, unknown | RetryExhaustedError>>(retriedNoOpts);
+expectType<RetryState<number, RetryExhaustedError>>(retriedNoOpts);
 
 // Retry in effectPipe preserves type flow
 const retryFlow = effectPipe((input: User) =>
@@ -165,7 +165,7 @@ const retryFlow = effectPipe((input: User) =>
         { attempts: 2 }
     )
 );
-expectType<Effect<SavedUser, unknown | RetryExhaustedError>>(retryFlow({ email: 'a@b.com', password: 'secret123' }));
+expectType<Effect<SavedUser, RetryExhaustedError>>(retryFlow({ email: 'a@b.com', password: 'secret123' }));
 
 // The wrapped tree's error type is an abort, which is never retried, so it leaves as itself and
 // cannot be what lastError holds: that is only ever a thrown value, which nothing types.
@@ -234,6 +234,31 @@ expectType<Effect<SavedUser, ValidationError | DbError>>(typedFlow({ email: 'a@b
 
 const typedResult = await runEffect(typedFlow({ email: 'a@b.com', password: 'secret123' }));
 expectType<SuccessState<SavedUser> | FailureState<ValidationError | DbError>>(typedResult);
+
+// The union needs no annotations. A step that cannot return a Failure, such as a Command with the default next or a
+// pure step that only succeeds, contributes never, where it used to contribute unknown and absorb every other member.
+declare const users: { find(email: string): Promise<SavedUser | null>; save(user: User): Promise<SavedUser> };
+const validateInferred = (input: User) =>
+    input.email.includes('@') ? Success(input) : Failure('invalid_email' as const);
+const ensureFree = (input: User) =>
+    Command(
+        () => users.find(input.email),
+        (found) => (found ? Failure('email_taken' as const) : Success(input))
+    );
+const normalize = (input: User) => Success({ ...input, email: input.email.toLowerCase() });
+const saveInferred = (input: User) => Command(() => users.save(input));
+const inferredFlow = effectPipe(validateInferred, ensureFree, normalize, saveInferred);
+const inferredResult = await runEffect(inferredFlow({ email: 'a@b.com', password: 'secret123' }));
+expectType<SuccessState<SavedUser> | FailureState<'invalid_email' | 'email_taken'>>(inferredResult);
+
+// A Retry whose fallback cannot fail declares no error of its own
+const savedOrPlaceholder = Retry(
+    Command(() => users.save({ email: 'a@b.com', password: 'secret123' })),
+    {
+        onExhausted: () => Success<SavedUser>({ id: 0, email: 'a@b.com' })
+    }
+);
+expectType<RetryState<SavedUser, never>>(savedOrPlaceholder);
 
 // --- long pipelines: typed for up to 20 steps, the same ceiling as Effect-TS ---
 
@@ -410,17 +435,17 @@ interface AppCtx {
 
 // Ask infers Ctx from callback parameter type
 const askWithCtx = Ask((ctx: AppCtx) => Success(ctx.db));
-expectType<AskState<string, unknown, AppCtx>>(askWithCtx);
+expectType<AskState<string, never, AppCtx>>(askWithCtx);
 
 // effectPipe propagates Ctx through steps
 const ctxFlow = effectPipe((input: User) => Ask((ctx: AppCtx) => Success({ ...input, conn: ctx.db })));
-expectType<Effect<{ email: string; password: string; conn: string }, unknown, AppCtx>>(
+expectType<Effect<{ email: string; password: string; conn: string }, never, AppCtx>>(
     ctxFlow({ email: 'a@b.com', password: 'secret123' })
 );
 
 // runEffect enforces context argument matches Ctx
 const ctxResult = await runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { db: 'conn' });
-expectType<SuccessState<{ email: string; password: string; conn: string }> | FailureState<unknown>>(ctxResult);
+expectType<SuccessState<{ email: string; password: string; conn: string }> | FailureState<never>>(ctxResult);
 
 // wrong context shape should error
 // @ts-expect-error context does not match Ctx
@@ -516,14 +541,14 @@ const replayOptions: ReplayOptions = {
         expectType<number>(step.index);
     }
 };
-expectType<Promise<Replay<number, unknown>>>(replayEffect(readRow, traceLog, replayOptions));
-expectType<Promise<Replay<number, unknown>>>(replayEffect(readRow, traceLog.trace));
+expectType<Promise<Replay<number, never>>>(replayEffect(readRow, traceLog, replayOptions));
+expectType<Promise<Replay<number, never>>>(replayEffect(readRow, traceLog.trace));
 (async () => {
     const { result, unreached } = await replayEffect(readRow, traceLog);
-    expectType<SuccessState<number> | FailureState<unknown>>(result);
+    expectType<SuccessState<number> | FailureState<never>>(result);
     expectType<TraceEntry[]>(unreached);
     const fromResolver = await replayEffect(readRow, () => ({ result: 42 }));
-    expectType<SuccessState<number> | FailureState<unknown>>(fromResolver.result);
+    expectType<SuccessState<number> | FailureState<never>>(fromResolver.result);
     // @ts-expect-error a Resolver cannot know what was left unreached
     fromResolver.unreached;
 })();
@@ -531,7 +556,7 @@ expectType<Promise<Replay<number, unknown>>>(replayEffect(readRow, traceLog.trac
 declare const traceOrResolver: TraceLog | TraceEntry[] | Resolver;
 (async () => {
     const forwarded = await replayEffect(readRow, traceOrResolver);
-    expectType<SuccessState<number> | FailureState<unknown>>(forwarded.result);
+    expectType<SuccessState<number> | FailureState<never>>(forwarded.result);
     expectType<TraceEntry[] | undefined>(forwarded.unreached);
 })();
 // @ts-expect-error strict was removed: paths make it unnecessary
@@ -575,7 +600,7 @@ recorder({ redact: (value, name, kind) => (kind === 'initialInput' ? { ...value,
     expectType<SuccessState<SavedUser> | FailureState<ValidationError | DbError>>(recorded.result);
     expectType<TraceLog>(recorded.trace);
     const withCtx = await recordEffect(ctxFlow, { email: 'a@b.c', password: 'x' }, { context: { db: 'conn' } });
-    expectType<SuccessState<{ email: string; password: string; conn: string }> | FailureState<unknown>>(withCtx.result);
+    expectType<SuccessState<{ email: string; password: string; conn: string }> | FailureState<never>>(withCtx.result);
 })();
 // @ts-expect-error context does not match the flow's Ctx
 recordEffect(ctxFlow, { email: 'a@b.c', password: 'x' }, { context: { db: 42 } });

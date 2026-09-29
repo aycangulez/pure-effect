@@ -661,6 +661,8 @@ if (result.type === 'Failure') {
 }
 ```
 
+The annotations are optional. Without them, the union holds whatever each step can pass to `Failure`, so write a string there `as const` to keep it exact, and a step that cannot fail, such as a Command without a `next`, adds nothing. The union covers the `Failure`s your steps return, not what a Command's function throws, which also ends the run with a `Failure`, so give a `switch` over `result.error` a `default`. A step that returns a `Parallel` makes the whole union `unknown` unless its return type is annotated.
+
 Value types are checked through the pipeline too, so a step that reads a field the previous step does not return is a compile error. This only works while every step uses the value it receives. A step written as `() => doSomething(outer)` ignores it, and the types stop being checked at that point.
 
 `effectPipe` is typed for up to 20 steps. A pipeline is itself a step, so a longer one nests, which is usually easier to read anyway: `effectPipe(effectPipe(s1, s2), effectPipe(s3, s4))`.
