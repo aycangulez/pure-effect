@@ -22,6 +22,7 @@ import { readFileSync } from 'node:fs';
 import { mock } from 'node:test';
 import { enableTelemetry, telemetryHooks } from '../examples/opentelemetry-example.js';
 import { enableRecording, recordingHooks } from '../examples/recording-example.js';
+import { effectPipeOverloads, currentOverloads } from '../scripts/effect-pipe-overloads.js';
 
 /** @import { CommandInterceptor } from "../index.js" */
 
@@ -4441,6 +4442,16 @@ describe('Declaration parity', function () {
             .sort();
         const shipped = Object.keys(lib).sort();
         assert.deepEqual(declared, shipped);
+    });
+
+    it('should hold exactly the effectPipe overloads the generator writes', async function () {
+        // Two thirds of index.d.ts is effectPipe's overloads, one per pipeline length. Edited by hand, a
+        // pattern meant for their type parameters once also rewrote ten return types. They are written by
+        // scripts/effect-pipe-overloads.js instead, and this fails when the file and the script disagree.
+        this.timeout(20000);
+        const generated = await effectPipeOverloads();
+        const current = currentOverloads(readFileSync('index.d.ts', 'utf8'));
+        assert.ok(current === generated, 'index.d.ts differs from the generator: run npm run generate');
     });
 });
 

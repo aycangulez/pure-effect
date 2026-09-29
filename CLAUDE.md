@@ -7,10 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 npm test                                          # run all tests
 npx mocha test/all.js --grep "pattern"            # run a single test by name
-npm run format                                    # Prettier over index.js, index.d.ts, examples/*.js, test/all.js, test/types.test-d.ts, README.md, CLAUDE.md, CHANGELOG.md, CONTRIBUTING.md
+npm run format                                    # Prettier over index.js, index.d.ts, examples/*.js, scripts/*.js, test/all.js, test/types.test-d.ts, README.md, CLAUDE.md, CHANGELOG.md, CONTRIBUTING.md
 npx tsd                                           # type-level gate over test/types.test-d.ts
-npx tsc -p jsconfig.json                          # strict tsc over index.js, test/all.js, test/types.test-d.ts, and examples/*.js, reading index.d.ts as a consumer; the same config VS Code uses
+npx tsc -p jsconfig.json                          # strict tsc over index.js, test/all.js, test/types.test-d.ts, examples/*.js, and scripts/*.js, reading index.d.ts as a consumer; the same config VS Code uses
 npm run test:ts-minimum                           # compiles index.d.ts and test/types.test-d.ts with TypeScript 5.1, the oldest the declarations support
+npm run generate                                  # rewrites effectPipe's overloads in index.d.ts from scripts/effect-pipe-overloads.js
 npx esbuild index.js --minify --format=esm | gzip -9 | wc -c    # the size the README claims
 npx stryker run                                   # mutation testing: mutates index.js, runs test/all.js against each mutant; report in reports/mutation/
 ```
@@ -120,7 +121,7 @@ Recording is an `onStep` hook, so it needs no change at call sites: give each ru
 
 ### TypeScript
 
-`index.d.ts` is written by hand, and three checks keep it matched to `index.js`: the `Declaration parity` test pins the two export lists to each other, `tsd` checks `test/types.test-d.ts`, and `tsc -p jsconfig.json` runs strict `checkJs` over `index.js`, `test/all.js`, `test/types.test-d.ts` and `examples/*.js`. `test/all.js` imports `../index.js`, which TypeScript resolves to `index.d.ts`, so the tests are checked as a strict consumer of the public types. The config is named `jsconfig.json` and is strict so that VS Code, which reads only `jsconfig.json` or `tsconfig.json` and checks JavaScript strictly by default, and the gate read one configuration; add any checked JavaScript in this repository to its `include` list.
+`index.d.ts` is written by hand, apart from `effectPipe`'s overloads, and three checks keep it matched to `index.js`: the `Declaration parity` test pins the two export lists to each other, `tsd` checks `test/types.test-d.ts`, and `tsc -p jsconfig.json` runs strict `checkJs` over `index.js`, `test/all.js`, `test/types.test-d.ts`, `examples/*.js` and `scripts/*.js`. `test/all.js` imports `../index.js`, which TypeScript resolves to `index.d.ts`, so the tests are checked as a strict consumer of the public types. The config is named `jsconfig.json` and is strict so that VS Code, which reads only `jsconfig.json` or `tsconfig.json` and checks JavaScript strictly by default, and the gate read one configuration; add any checked JavaScript in this repository to its `include` list.
 
 The declarations support TypeScript 5.1 and later, and `npm run test:ts-minimum` compiles them and `test/types.test-d.ts` with 5.1. Plain `tsc` checks there that every `@ts-expect-error` still fires and that every `expectType` argument is assignable, but not that types are exact, which stays `tsd`'s job on the current TypeScript. 5.1 is the first version that treats a mapped type over the branches as an array, which `ParallelState` requires; the declarations once compiled on 4.7 by accident, and a change to `Parallel` broke them there with nothing to notice. Two features they would otherwise use arrive in 5.4, `NoInfer` and `const` type parameters that infer a tuple through an intersection, so `Parallel` works around both. Raising the minimum breaks users on the older compiler, so it goes in the changelog as a breaking change.
 
@@ -128,7 +129,7 @@ Deliberate type errors in `test/types.test-d.ts` are `// @ts-expect-error` direc
 
 `Effect<T, E, Ctx>` carries the value, the error union and the context. Each `effectPipe` step has its own context type and the pipeline's is their intersection, because one shared `Ctx` was inferred as `unknown` whenever a step declared none, which switched context checking off for the whole pipeline; `unknown & AppCtx` is `AppCtx`, so a step that reads no context costs nothing. `runEffect` and `recordEffect` require the context when the flow's context type is not `unknown`, since the runtime would hand `Ask` an empty object. An error union survives without return annotations, since a step that cannot return a `Failure` contributes `never` (see below), and `Failure` takes a `const` type parameter, so a string passed to it keeps its literal type with no `as const`. The declared union leaves out what a Command's function throws, which `runEffect` returns as a `Failure` all the same, so a `switch` over it needs a `default`.
 
-`effectPipe` is 20 overloads, one per pipeline length, generated in one shape (values `T0` to `Tn`, then errors `E1` to `En`, then contexts `C1` to `Cn`), so extending the ceiling means regenerating the block rather than editing one overload. Past 20 it is a compile error, and nesting is the workaround.
+`effectPipe` is 20 overloads, one per pipeline length, in one shape (values `T0` to `Tn`, then errors `E1` to `En`, then contexts `C1` to `Cn`), and two thirds of index.d.ts. `scripts/effect-pipe-overloads.js` writes them between two marker comments, formatted with the repository's Prettier configuration so `npm run format` leaves them alone, and a `Declaration parity` test fails when the file and the script's output differ. Change them in the script and run `npm run generate`, never by hand: a pattern meant for their type parameters once also rewrote ten return types. Their doc comment lives in the script too, since a marker between it and the first overload would detach it, and raising the ceiling is `MAX_STEPS`. Past 20 it is a compile error, and nesting is the workaround.
 
 Declarations that exist for a reason, each pinned in the tsd file:
 
