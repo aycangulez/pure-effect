@@ -5,10 +5,13 @@
  * markers there. Run `npm run generate` after editing this file; a test fails when index.d.ts and this
  * output differ, so the overloads are never edited by hand.
  *
- * Every overload has one shape: values `T0` to `Tn`, then errors `E1` to `En`, then contexts `C1` to `Cn`.
- * `T0` is the input and has no default. A value or error parameter nothing infers defaults to `never`, so
- * a step that cannot fail adds nothing to the error union and a step that can only fail adds nothing to
- * the value; a context parameter defaults to `unknown`, which adds nothing to an intersection.
+ * Every overload has one shape: the input `T0`, then `R1` to `Rn`, each step's whole return. Each step
+ * receives `EffectValue` of the one before, and the pipeline fails with every step's `EffectError` and
+ * reads every step's `EffectContext`. Inferring the return whole joins Failures of different shapes into a
+ * union, where one error parameter per step picked one of them and refused the rest. A step that cannot
+ * fail adds `never` to the error, and one that reads no context adds `unknown` to the intersection. Each
+ * `Rn` defaults to `never`, which reads as no value, no error and an `unknown` context, for a step typed
+ * `any` that leaves nothing to infer.
  */
 
 import { readFile, writeFile } from 'node:fs/promises';
@@ -35,18 +38,14 @@ const upTo = (/** @type {number} */ n) => Array.from({ length: n }, (_, i) => i 
 /** The overload for a pipeline of `n` steps, on one line; Prettier lays it out. */
 const overload = (/** @type {number} */ n) => {
     const steps = upTo(n);
-    const typeParameters = [
-        'T0',
-        ...steps.map((i) => `T${i} = never`),
-        ...steps.map((i) => `E${i} = never`),
-        ...steps.map((i) => `C${i} = unknown`)
-    ];
-    const parameters = steps.map((i) => `f${i}: (value: T${i - 1}) => Effect<T${i}, E${i}, C${i}>`);
-    const errors = steps.map((i) => `E${i}`).join(' | ');
-    const contexts = steps.map((i) => `C${i}`).join(' & ');
+    const typeParameters = ['T0', ...steps.map((i) => `R${i} extends AnyEffect = never`)];
+    const input = (/** @type {number} */ i) => (i === 1 ? 'T0' : `EffectValue<R${i - 1}>`);
+    const parameters = steps.map((i) => `f${i}: (value: ${input(i)}) => R${i}`);
+    const errors = steps.map((i) => `EffectError<R${i}>`).join(' | ');
+    const contexts = steps.map((i) => `EffectContext<R${i}>`).join(' & ');
     return (
         `export declare function effectPipe<${typeParameters.join(', ')}>(${parameters.join(', ')}): ` +
-        `(start: T0) => Effect<T${n}, ${errors}, ${contexts}>;`
+        `(start: T0) => Effect<EffectValue<R${n}>, ${errors}, ${contexts}>;`
     );
 };
 

@@ -82,7 +82,8 @@ expectType<SuccessState<User> | FailureState<'invalid_email' | 'weak_password'>>
 
 // next is optional, defaulting to Success
 expectType<CommandState<number, number, never>>(Command(() => 42));
-expectType<CommandState<number, string>>(
+// A next that only succeeds cannot fail, so it adds never, as the default next does
+expectType<CommandState<number, string, never>>(
     Command(
         () => 42,
         (n: number) => Success(String(n))
@@ -224,6 +225,17 @@ if (recoveredResult.type === 'Failure') {
     expectType<'flaky' | 'cache_miss'>(recoveredResult.error);
 }
 
+// A Retry that starts a pipeline hands its next what the retried Command returned, not the pipeline's value, so a
+// test walking the flow passes that. It was typed as the pipeline's value, which the Retry's next never receives.
+const chargeThenReceipt = effectPipe(
+    (orderId: string) => Retry(Command(async () => ({ chargeId: orderId }))),
+    (charge: { chargeId: string }) => Command(async () => ({ receiptFor: charge.chargeId }))
+);
+const walkedRetry = chargeThenReceipt('order_1');
+if (walkedRetry.type === 'Retry') walkedRetry.next({ chargeId: 'ch_1' });
+// @ts-expect-error a Retry built on its own still types what its next receives
+Retry(innerCmd).next('not a number');
+
 // A step annotated with its return type can return a retried Command that keeps its default next, which is the
 // shape the README recommends. Command's value type was inferred from the annotation rather than from the
 // function, as unknown, until the no-next case got its own overload.
@@ -321,6 +333,61 @@ const compensateInPipeline = effectPipe(
     (order: { id: number }) => Success(order.id)
 );
 expectType<(start: number) => Effect<number, 'declined'>>(compensateInPipeline);
+
+// A function returning Failures of different shapes needs no annotation, wherever a flow takes one. Inferring one
+// error parameter from several object errors picks one of them, so a string and an object error did not compile,
+// and neither, once `const` kept literals, did two objects told apart by a literal `code`.
+type Banned = { readonly code: 'banned'; readonly id: string };
+declare const findSaved: () => Promise<SavedUser | null>;
+declare const bannedId: string;
+const mixedStep = (u: SavedUser) =>
+    u.id < 0 ? Failure('invalid_id') : u.id === 0 ? Failure({ code: 'banned', id: u.email }) : Success(u);
+expectType<Effect<SavedUser, 'invalid_id' | Banned>>(effectPipe(mixedStep)({ id: 1, email: 'a@b.com' }));
+const sameKey = effectPipe((u: SavedUser) =>
+    u.id ? Failure({ code: 'missing' }) : Failure({ code: 'banned', id: u.email })
+);
+expectType<Effect<never, { readonly code: 'missing' } | Banned>>(sameKey({ id: 1, email: 'a@b.com' }));
+const mixedNext = Command(findSaved, (u) =>
+    !u ? Failure('not_found') : u.id === 0 ? Failure({ code: 'banned', id: u.email }) : Success(u)
+);
+expectType<CommandState<SavedUser | null, SavedUser, 'not_found' | Banned>>(mixedNext);
+const mixedAsk = Ask((ctx: { tenant: string }) =>
+    ctx.tenant ? Failure('no_tenant') : Failure({ code: 'banned', id: ctx.tenant })
+);
+expectType<AskState<never, 'no_tenant' | Banned, { tenant: string }>>(mixedAsk);
+const mixedParallel = Parallel([Success(1)], ([n]) =>
+    n > 0 ? Failure('too_many') : Failure({ code: 'banned', id: String(n) })
+);
+expectType<ParallelState<[number], never, 'too_many' | Banned>>(mixedParallel);
+const mixedSettled = Parallel(
+    [Success(1)],
+    ([o]) => (o.type === 'Success' ? Failure('too_many') : Failure({ code: 'banned', id: bannedId })),
+    { settled: true }
+);
+expectType<
+    ParallelState<[number], never, 'too_many' | Banned, unknown, [SuccessState<number> | FailureState<never>], never>
+>(mixedSettled);
+const mixedFallback = Retry(Command(findSaved), {
+    onExhausted: () => (inStock ? Failure('down') : Failure({ code: 'banned', id: bannedId }))
+});
+expectType<RetryState<SavedUser | null, 'down' | Banned>>(mixedFallback);
+// A step's value is joined the same way, from a Success on one branch and a Command on another
+const eitherValue = effectPipe((n: number) => (n > 0 ? Success({ big: n }) : Command(async () => ({ small: n }))));
+expectType<Effect<{ big: number } | { small: number }, never>>(eitherValue(1));
+// An Ask or Retry written inline in a step keeps its own error and context: the step's return is constrained by
+// AnyEffect, which has no type parameters, so it gives a call written there nothing to infer from.
+const inlineAsk = effectPipe((u: SavedUser) =>
+    Ask((ctx: { tenant: string }) => (ctx.tenant ? Success(u) : Failure('no_tenant')))
+);
+expectType<Effect<SavedUser, 'no_tenant', { tenant: string }>>(inlineAsk({ id: 1, email: 'a@b.com' }));
+const inlineRetry = effectPipe((u: SavedUser) => Retry(Command(async () => u)));
+expectType<Effect<SavedUser, RetryExhaustedError, unknown>>(inlineRetry({ id: 1, email: 'a@b.com' }));
+// A step typed any leaves nothing to infer, so it reads as no value, no error and no context, and runEffect needs
+// none; falling back to the constraint made its context never, which runEffect then demanded.
+declare const untypedStep: any;
+const untyped = effectPipe(untypedStep)(1);
+expectType<Effect<never, never, unknown>>(untyped);
+await runEffect(untyped);
 
 // Some type arguments given, as to type a JSON response: TypeScript infers none of the rest, so they take their
 // defaults. The never defaults refused a next that can fail in such a call, which compiled before them, so Command's

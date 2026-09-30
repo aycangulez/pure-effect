@@ -42,12 +42,15 @@ export type RetryOptions = {
     backoff?: number;
 };
 
-/** `E` is what the Retry can fail with: an abort from the steps it wraps, or the exhaustion after its last attempt. */
-export type RetryState<T, E = unknown, Ctx = unknown> = {
+/**
+ * `E` is what the Retry can fail with: an abort from the steps it wraps, or the exhaustion after its last attempt. `R`
+ * is what the retried steps succeed with, which `next` receives; it differs from `T` once a pipeline continues past it.
+ */
+export type RetryState<T, E = unknown, Ctx = unknown, R = T> = {
     type: 'Retry';
-    effect: Effect<T, any, Ctx>;
-    options: RetryOptions & { onExhausted?: (error: RetryExhaustedError) => Effect<T, any, Ctx> };
-    next(value: T): Effect<T, E, Ctx>;
+    effect: Effect<R, any, Ctx>;
+    options: RetryOptions & { onExhausted?: (error: RetryExhaustedError) => Effect<R, any, Ctx> };
+    next(value: R): Effect<T, E, Ctx>;
     initialInput?: unknown;
 };
 
@@ -86,8 +89,12 @@ export type Effect<T, E = unknown, Ctx = unknown> =
     | FailureState<E>
     | CommandState<any, T, E, Ctx>
     | AskState<T, E, Ctx>
-    | RetryState<T, E, Ctx>
+    | RetryState<T, E, Ctx, any>
     | ParallelState<any, T, E, Ctx, any, any>;
+
+// No type parameters, so as the constraint on a callback's return it gives a call written inline there nothing to infer.
+/** Any Effect: a `Success`, `Failure`, `Command`, `Ask`, `Retry` or `Parallel`. */
+export type AnyEffect = { readonly type: 'Success' | 'Failure' | 'Command' | 'Ask' | 'Retry' | 'Parallel' };
 
 /** The value an Effect succeeds with. */
 export type EffectValue<X> =
@@ -97,7 +104,7 @@ export type EffectValue<X> =
           ? T
           : X extends AskState<infer T, any, any>
             ? T
-            : X extends RetryState<infer T, any, any>
+            : X extends RetryState<infer T, any, any, any>
               ? T
               : X extends ParallelState<any, infer T, any, any, any, any>
                 ? T
@@ -111,7 +118,7 @@ export type EffectError<X> =
           ? E
           : X extends AskState<any, infer E, any>
             ? E
-            : X extends RetryState<any, infer E, any>
+            : X extends RetryState<any, infer E, any, any>
               ? E
               : X extends ParallelState<any, any, infer E, any, any, any>
                 ? E
@@ -124,7 +131,7 @@ export type EffectContext<X> = [X] extends [SuccessState<any> | FailureState<any
       ? C
       : X extends AskState<any, any, infer C>
         ? C
-        : X extends RetryState<any, any, infer C>
+        : X extends RetryState<any, any, infer C, any>
           ? C
           : X extends ParallelState<any, any, any, infer C, any, any>
             ? C
@@ -166,11 +173,12 @@ export declare function Command<R>(
     meta?: CommandMeta
 ): CommandState<R, R, never>;
 
-export declare function Command<R, T = never, E = never, Ctx = unknown>(
+// `N` is what `next` returns, whole, so Failures of different shapes join; given explicitly, `T`, `E` and `Ctx` build it.
+export declare function Command<R, T = never, E = never, Ctx = unknown, N extends AnyEffect = Effect<T, E, Ctx>>(
     cmd: (signal?: AbortSignal) => Promise<R> | R,
-    next?: (result: R) => Effect<T, E, Ctx>,
+    next?: (result: R) => N,
     meta?: CommandMeta
-): CommandState<R, T, E, Ctx>;
+): CommandState<R, EffectValue<N>, EffectError<N>, EffectContext<N>>;
 
 /** For `Command<User | null>(fetchJson, next)`: given some type arguments, TypeScript infers none of the rest. */
 export declare function Command<R, T = R, E = unknown, Ctx = unknown>(
@@ -182,19 +190,19 @@ export declare function Command<R, T = R, E = unknown, Ctx = unknown>(
 /** The name a Command is known by in traces, replays and spans: `meta.name`, else `cmd.name`, else `'anonymous'`. */
 export declare function commandName(command: CommandState<any, any, any, any>): string;
 
-/** Reads the context passed to `runEffect`. Give every type argument or none. */
-export declare function Ask<T = never, E = never, Ctx = unknown>(
-    next: (context: Ctx) => Effect<T, E, Ctx>
-): AskState<T, E, Ctx>;
+/** Reads the context passed to `runEffect`. Give the value, error and context types, or none. */
+export declare function Ask<T = never, E = never, Ctx = unknown, N extends AnyEffect = Effect<T, E, Ctx>>(
+    next: (context: Ctx) => N
+): AskState<EffectValue<N>, EffectError<N>, Ctx & EffectContext<N>>;
 
 /**
  * Runs `effect` again when a Command in it throws, then runs `onExhausted` once the attempts run out. Give every type
  * argument or none.
  */
-export declare function Retry<T, E = never, E2 = never, Ctx = unknown>(
+export declare function Retry<T, E = never, E2 = never, Ctx = unknown, N extends AnyEffect = Effect<T, E2, Ctx>>(
     effect: Effect<T, E, Ctx>,
-    options: RetryOptions & { onExhausted: (error: RetryExhaustedError) => Effect<T, E2, Ctx> }
-): RetryState<T, E | E2, Ctx>;
+    options: RetryOptions & { onExhausted: (error: RetryExhaustedError) => N }
+): RetryState<T | EffectValue<N>, E | EffectError<N>, Ctx & EffectContext<N>>;
 
 /**
  * Runs `effect` again when a Command in it throws, and fails with `RetryExhaustedError` once the attempts run out. Give
@@ -222,29 +230,33 @@ export declare function Parallel<B extends readonly unknown[] | []>(
     EffectError<B[number]>
 >;
 
-export declare function Parallel<B extends readonly unknown[] | [], R = never, E = never, Ctx = unknown>(
+export declare function Parallel<B extends readonly unknown[] | [], N extends AnyEffect = never>(
     effects: ParallelBranches<B>,
-    next: (outcomes: ParallelOutcomes<B>) => Effect<R, E, Ctx>,
+    next: (outcomes: ParallelOutcomes<B>) => N,
     options: ParallelOptions & { settled: true }
-): ParallelState<ParallelValues<B>, R, E, ParallelContext<B> & Ctx, ParallelOutcomes<B>, EffectError<B[number]>>;
+): ParallelState<
+    ParallelValues<B>,
+    EffectValue<N>,
+    EffectError<N>,
+    ParallelContext<B> & EffectContext<N>,
+    ParallelOutcomes<B>,
+    EffectError<B[number]>
+>;
 
 export declare function Parallel<B extends readonly unknown[] | []>(
     effects: ParallelBranches<B>,
     options?: ParallelOptions & { settled?: false }
 ): ParallelState<ParallelValues<B>, ParallelValues<B>, EffectError<B[number]>, ParallelContext<B>>;
 
-export declare function Parallel<B extends readonly unknown[] | [], R = never, E = never, Ctx = unknown>(
+export declare function Parallel<B extends readonly unknown[] | [], N extends AnyEffect = never>(
     effects: ParallelBranches<B>,
-    next: (values: ParallelValues<B>) => Effect<R, E, Ctx>,
+    next: (values: ParallelValues<B>) => N,
     options?: ParallelOptions & { settled?: false }
 ): ParallelState<
     ParallelValues<B>,
-    R,
-    // `E` alone would be inferred from the expected return type as well as from `next`, and inside
-    // `effectPipe`'s arguments, where that type is still being inferred, it came out as `any`. The indexed
-    // access resolves to `E` but offers nothing to infer from, as `NoInfer` would, which needs TypeScript 5.4.
-    EffectError<B[number]> | [E][E extends any ? 0 : never],
-    ParallelContext<B> & Ctx
+    EffectValue<N>,
+    EffectError<B[number]> | EffectError<N>,
+    ParallelContext<B> & EffectContext<N>
 >;
 
 // BEGIN effectPipe overloads, generated by scripts/effect-pipe-overloads.js: edit it, then npm run generate.
@@ -252,993 +264,980 @@ export declare function Parallel<B extends readonly unknown[] | [], R = never, E
  * Composes steps into a pipeline: each step gets the previous step's value, and a `Failure` stops it.
  * Typed for up to 20 steps; nest pipelines for more.
  */
-export declare function effectPipe<T0, T1 = never, E1 = never, C1 = unknown>(
-    f1: (value: T0) => Effect<T1, E1, C1>
-): (start: T0) => Effect<T1, E1, C1>;
+export declare function effectPipe<T0, R1 extends AnyEffect = never>(
+    f1: (value: T0) => R1
+): (start: T0) => Effect<EffectValue<R1>, EffectError<R1>, EffectContext<R1>>;
 
-export declare function effectPipe<T0, T1 = never, T2 = never, E1 = never, E2 = never, C1 = unknown, C2 = unknown>(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>
-): (start: T0) => Effect<T2, E1 | E2, C1 & C2>;
-
-export declare function effectPipe<
-    T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown
->(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>
-): (start: T0) => Effect<T3, E1 | E2 | E3, C1 & C2 & C3>;
+export declare function effectPipe<T0, R1 extends AnyEffect = never, R2 extends AnyEffect = never>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2
+): (start: T0) => Effect<EffectValue<R2>, EffectError<R1> | EffectError<R2>, EffectContext<R1> & EffectContext<R2>>;
 
 export declare function effectPipe<
     T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>
-): (start: T0) => Effect<T4, E1 | E2 | E3 | E4, C1 & C2 & C3 & C4>;
-
-export declare function effectPipe<
-    T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    T5 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    E5 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown
->(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>
-): (start: T0) => Effect<T5, E1 | E2 | E3 | E4 | E5, C1 & C2 & C3 & C4 & C5>;
-
-export declare function effectPipe<
-    T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    T5 = never,
-    T6 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    E5 = never,
-    E6 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown
->(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>
-): (start: T0) => Effect<T6, E1 | E2 | E3 | E4 | E5 | E6, C1 & C2 & C3 & C4 & C5 & C6>;
-
-export declare function effectPipe<
-    T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    T5 = never,
-    T6 = never,
-    T7 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    E5 = never,
-    E6 = never,
-    E7 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown
->(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>
-): (start: T0) => Effect<T7, E1 | E2 | E3 | E4 | E5 | E6 | E7, C1 & C2 & C3 & C4 & C5 & C6 & C7>;
-
-export declare function effectPipe<
-    T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    T5 = never,
-    T6 = never,
-    T7 = never,
-    T8 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    E5 = never,
-    E6 = never,
-    E7 = never,
-    E8 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown
->(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>
-): (start: T0) => Effect<T8, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8, C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8>;
-
-export declare function effectPipe<
-    T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    T5 = never,
-    T6 = never,
-    T7 = never,
-    T8 = never,
-    T9 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    E5 = never,
-    E6 = never,
-    E7 = never,
-    E8 = never,
-    E9 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown
->(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>
-): (start: T0) => Effect<T9, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9, C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9>;
-
-export declare function effectPipe<
-    T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    T5 = never,
-    T6 = never,
-    T7 = never,
-    T8 = never,
-    T9 = never,
-    T10 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    E5 = never,
-    E6 = never,
-    E7 = never,
-    E8 = never,
-    E9 = never,
-    E10 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown
->(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>
-): (
-    start: T0
-) => Effect<T10, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10, C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10>;
-
-export declare function effectPipe<
-    T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    T5 = never,
-    T6 = never,
-    T7 = never,
-    T8 = never,
-    T9 = never,
-    T10 = never,
-    T11 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    E5 = never,
-    E6 = never,
-    E7 = never,
-    E8 = never,
-    E9 = never,
-    E10 = never,
-    E11 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown
->(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3
 ): (
     start: T0
 ) => Effect<
-    T11,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11
+    EffectValue<R3>,
+    EffectError<R1> | EffectError<R2> | EffectError<R3>,
+    EffectContext<R1> & EffectContext<R2> & EffectContext<R3>
 >;
 
 export declare function effectPipe<
     T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    T5 = never,
-    T6 = never,
-    T7 = never,
-    T8 = never,
-    T9 = never,
-    T10 = never,
-    T11 = never,
-    T12 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    E5 = never,
-    E6 = never,
-    E7 = never,
-    E8 = never,
-    E9 = never,
-    E10 = never,
-    E11 = never,
-    E12 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4
 ): (
     start: T0
 ) => Effect<
-    T12,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12
+    EffectValue<R4>,
+    EffectError<R1> | EffectError<R2> | EffectError<R3> | EffectError<R4>,
+    EffectContext<R1> & EffectContext<R2> & EffectContext<R3> & EffectContext<R4>
 >;
 
 export declare function effectPipe<
     T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    T5 = never,
-    T6 = never,
-    T7 = never,
-    T8 = never,
-    T9 = never,
-    T10 = never,
-    T11 = never,
-    T12 = never,
-    T13 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    E5 = never,
-    E6 = never,
-    E7 = never,
-    E8 = never,
-    E9 = never,
-    E10 = never,
-    E11 = never,
-    E12 = never,
-    E13 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown,
-    C13 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>,
-    f13: (value: T12) => Effect<T13, E13, C13>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5
 ): (
     start: T0
 ) => Effect<
-    T13,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13
+    EffectValue<R5>,
+    EffectError<R1> | EffectError<R2> | EffectError<R3> | EffectError<R4> | EffectError<R5>,
+    EffectContext<R1> & EffectContext<R2> & EffectContext<R3> & EffectContext<R4> & EffectContext<R5>
 >;
 
 export declare function effectPipe<
     T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    T5 = never,
-    T6 = never,
-    T7 = never,
-    T8 = never,
-    T9 = never,
-    T10 = never,
-    T11 = never,
-    T12 = never,
-    T13 = never,
-    T14 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    E5 = never,
-    E6 = never,
-    E7 = never,
-    E8 = never,
-    E9 = never,
-    E10 = never,
-    E11 = never,
-    E12 = never,
-    E13 = never,
-    E14 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown,
-    C13 = unknown,
-    C14 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>,
-    f13: (value: T12) => Effect<T13, E13, C13>,
-    f14: (value: T13) => Effect<T14, E14, C14>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6
 ): (
     start: T0
 ) => Effect<
-    T14,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14
+    EffectValue<R6>,
+    EffectError<R1> | EffectError<R2> | EffectError<R3> | EffectError<R4> | EffectError<R5> | EffectError<R6>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6>
 >;
 
 export declare function effectPipe<
     T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    T5 = never,
-    T6 = never,
-    T7 = never,
-    T8 = never,
-    T9 = never,
-    T10 = never,
-    T11 = never,
-    T12 = never,
-    T13 = never,
-    T14 = never,
-    T15 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    E5 = never,
-    E6 = never,
-    E7 = never,
-    E8 = never,
-    E9 = never,
-    E10 = never,
-    E11 = never,
-    E12 = never,
-    E13 = never,
-    E14 = never,
-    E15 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown,
-    C13 = unknown,
-    C14 = unknown,
-    C15 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>,
-    f13: (value: T12) => Effect<T13, E13, C13>,
-    f14: (value: T13) => Effect<T14, E14, C14>,
-    f15: (value: T14) => Effect<T15, E15, C15>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7
 ): (
     start: T0
 ) => Effect<
-    T15,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15
+    EffectValue<R7>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7>
 >;
 
 export declare function effectPipe<
     T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    T5 = never,
-    T6 = never,
-    T7 = never,
-    T8 = never,
-    T9 = never,
-    T10 = never,
-    T11 = never,
-    T12 = never,
-    T13 = never,
-    T14 = never,
-    T15 = never,
-    T16 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    E5 = never,
-    E6 = never,
-    E7 = never,
-    E8 = never,
-    E9 = never,
-    E10 = never,
-    E11 = never,
-    E12 = never,
-    E13 = never,
-    E14 = never,
-    E15 = never,
-    E16 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown,
-    C13 = unknown,
-    C14 = unknown,
-    C15 = unknown,
-    C16 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>,
-    f13: (value: T12) => Effect<T13, E13, C13>,
-    f14: (value: T13) => Effect<T14, E14, C14>,
-    f15: (value: T14) => Effect<T15, E15, C15>,
-    f16: (value: T15) => Effect<T16, E16, C16>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8
 ): (
     start: T0
 ) => Effect<
-    T16,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16
+    EffectValue<R8>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8>
 >;
 
 export declare function effectPipe<
     T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    T5 = never,
-    T6 = never,
-    T7 = never,
-    T8 = never,
-    T9 = never,
-    T10 = never,
-    T11 = never,
-    T12 = never,
-    T13 = never,
-    T14 = never,
-    T15 = never,
-    T16 = never,
-    T17 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    E5 = never,
-    E6 = never,
-    E7 = never,
-    E8 = never,
-    E9 = never,
-    E10 = never,
-    E11 = never,
-    E12 = never,
-    E13 = never,
-    E14 = never,
-    E15 = never,
-    E16 = never,
-    E17 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown,
-    C13 = unknown,
-    C14 = unknown,
-    C15 = unknown,
-    C16 = unknown,
-    C17 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>,
-    f13: (value: T12) => Effect<T13, E13, C13>,
-    f14: (value: T13) => Effect<T14, E14, C14>,
-    f15: (value: T14) => Effect<T15, E15, C15>,
-    f16: (value: T15) => Effect<T16, E16, C16>,
-    f17: (value: T16) => Effect<T17, E17, C17>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9
 ): (
     start: T0
 ) => Effect<
-    T17,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16 & C17
+    EffectValue<R9>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9>
 >;
 
 export declare function effectPipe<
     T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    T5 = never,
-    T6 = never,
-    T7 = never,
-    T8 = never,
-    T9 = never,
-    T10 = never,
-    T11 = never,
-    T12 = never,
-    T13 = never,
-    T14 = never,
-    T15 = never,
-    T16 = never,
-    T17 = never,
-    T18 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    E5 = never,
-    E6 = never,
-    E7 = never,
-    E8 = never,
-    E9 = never,
-    E10 = never,
-    E11 = never,
-    E12 = never,
-    E13 = never,
-    E14 = never,
-    E15 = never,
-    E16 = never,
-    E17 = never,
-    E18 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown,
-    C13 = unknown,
-    C14 = unknown,
-    C15 = unknown,
-    C16 = unknown,
-    C17 = unknown,
-    C18 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>,
-    f13: (value: T12) => Effect<T13, E13, C13>,
-    f14: (value: T13) => Effect<T14, E14, C14>,
-    f15: (value: T14) => Effect<T15, E15, C15>,
-    f16: (value: T15) => Effect<T16, E16, C16>,
-    f17: (value: T16) => Effect<T17, E17, C17>,
-    f18: (value: T17) => Effect<T18, E18, C18>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10
 ): (
     start: T0
 ) => Effect<
-    T18,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17 | E18,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16 & C17 & C18
+    EffectValue<R10>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10>
 >;
 
 export declare function effectPipe<
     T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    T5 = never,
-    T6 = never,
-    T7 = never,
-    T8 = never,
-    T9 = never,
-    T10 = never,
-    T11 = never,
-    T12 = never,
-    T13 = never,
-    T14 = never,
-    T15 = never,
-    T16 = never,
-    T17 = never,
-    T18 = never,
-    T19 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    E5 = never,
-    E6 = never,
-    E7 = never,
-    E8 = never,
-    E9 = never,
-    E10 = never,
-    E11 = never,
-    E12 = never,
-    E13 = never,
-    E14 = never,
-    E15 = never,
-    E16 = never,
-    E17 = never,
-    E18 = never,
-    E19 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown,
-    C13 = unknown,
-    C14 = unknown,
-    C15 = unknown,
-    C16 = unknown,
-    C17 = unknown,
-    C18 = unknown,
-    C19 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>,
-    f13: (value: T12) => Effect<T13, E13, C13>,
-    f14: (value: T13) => Effect<T14, E14, C14>,
-    f15: (value: T14) => Effect<T15, E15, C15>,
-    f16: (value: T15) => Effect<T16, E16, C16>,
-    f17: (value: T16) => Effect<T17, E17, C17>,
-    f18: (value: T17) => Effect<T18, E18, C18>,
-    f19: (value: T18) => Effect<T19, E19, C19>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11
 ): (
     start: T0
 ) => Effect<
-    T19,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17 | E18 | E19,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16 & C17 & C18 & C19
+    EffectValue<R11>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11>
 >;
 
 export declare function effectPipe<
     T0,
-    T1 = never,
-    T2 = never,
-    T3 = never,
-    T4 = never,
-    T5 = never,
-    T6 = never,
-    T7 = never,
-    T8 = never,
-    T9 = never,
-    T10 = never,
-    T11 = never,
-    T12 = never,
-    T13 = never,
-    T14 = never,
-    T15 = never,
-    T16 = never,
-    T17 = never,
-    T18 = never,
-    T19 = never,
-    T20 = never,
-    E1 = never,
-    E2 = never,
-    E3 = never,
-    E4 = never,
-    E5 = never,
-    E6 = never,
-    E7 = never,
-    E8 = never,
-    E9 = never,
-    E10 = never,
-    E11 = never,
-    E12 = never,
-    E13 = never,
-    E14 = never,
-    E15 = never,
-    E16 = never,
-    E17 = never,
-    E18 = never,
-    E19 = never,
-    E20 = never,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown,
-    C13 = unknown,
-    C14 = unknown,
-    C15 = unknown,
-    C16 = unknown,
-    C17 = unknown,
-    C18 = unknown,
-    C19 = unknown,
-    C20 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>,
-    f13: (value: T12) => Effect<T13, E13, C13>,
-    f14: (value: T13) => Effect<T14, E14, C14>,
-    f15: (value: T14) => Effect<T15, E15, C15>,
-    f16: (value: T15) => Effect<T16, E16, C16>,
-    f17: (value: T16) => Effect<T17, E17, C17>,
-    f18: (value: T17) => Effect<T18, E18, C18>,
-    f19: (value: T18) => Effect<T19, E19, C19>,
-    f20: (value: T19) => Effect<T20, E20, C20>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12
 ): (
     start: T0
 ) => Effect<
-    T20,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17 | E18 | E19 | E20,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16 & C17 & C18 & C19 & C20
+    EffectValue<R12>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12>
+>;
+
+export declare function effectPipe<
+    T0,
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never,
+    R13 extends AnyEffect = never
+>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12,
+    f13: (value: EffectValue<R12>) => R13
+): (
+    start: T0
+) => Effect<
+    EffectValue<R13>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>
+    | EffectError<R13>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12> &
+        EffectContext<R13>
+>;
+
+export declare function effectPipe<
+    T0,
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never,
+    R13 extends AnyEffect = never,
+    R14 extends AnyEffect = never
+>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12,
+    f13: (value: EffectValue<R12>) => R13,
+    f14: (value: EffectValue<R13>) => R14
+): (
+    start: T0
+) => Effect<
+    EffectValue<R14>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>
+    | EffectError<R13>
+    | EffectError<R14>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12> &
+        EffectContext<R13> &
+        EffectContext<R14>
+>;
+
+export declare function effectPipe<
+    T0,
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never,
+    R13 extends AnyEffect = never,
+    R14 extends AnyEffect = never,
+    R15 extends AnyEffect = never
+>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12,
+    f13: (value: EffectValue<R12>) => R13,
+    f14: (value: EffectValue<R13>) => R14,
+    f15: (value: EffectValue<R14>) => R15
+): (
+    start: T0
+) => Effect<
+    EffectValue<R15>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>
+    | EffectError<R13>
+    | EffectError<R14>
+    | EffectError<R15>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12> &
+        EffectContext<R13> &
+        EffectContext<R14> &
+        EffectContext<R15>
+>;
+
+export declare function effectPipe<
+    T0,
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never,
+    R13 extends AnyEffect = never,
+    R14 extends AnyEffect = never,
+    R15 extends AnyEffect = never,
+    R16 extends AnyEffect = never
+>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12,
+    f13: (value: EffectValue<R12>) => R13,
+    f14: (value: EffectValue<R13>) => R14,
+    f15: (value: EffectValue<R14>) => R15,
+    f16: (value: EffectValue<R15>) => R16
+): (
+    start: T0
+) => Effect<
+    EffectValue<R16>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>
+    | EffectError<R13>
+    | EffectError<R14>
+    | EffectError<R15>
+    | EffectError<R16>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12> &
+        EffectContext<R13> &
+        EffectContext<R14> &
+        EffectContext<R15> &
+        EffectContext<R16>
+>;
+
+export declare function effectPipe<
+    T0,
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never,
+    R13 extends AnyEffect = never,
+    R14 extends AnyEffect = never,
+    R15 extends AnyEffect = never,
+    R16 extends AnyEffect = never,
+    R17 extends AnyEffect = never
+>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12,
+    f13: (value: EffectValue<R12>) => R13,
+    f14: (value: EffectValue<R13>) => R14,
+    f15: (value: EffectValue<R14>) => R15,
+    f16: (value: EffectValue<R15>) => R16,
+    f17: (value: EffectValue<R16>) => R17
+): (
+    start: T0
+) => Effect<
+    EffectValue<R17>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>
+    | EffectError<R13>
+    | EffectError<R14>
+    | EffectError<R15>
+    | EffectError<R16>
+    | EffectError<R17>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12> &
+        EffectContext<R13> &
+        EffectContext<R14> &
+        EffectContext<R15> &
+        EffectContext<R16> &
+        EffectContext<R17>
+>;
+
+export declare function effectPipe<
+    T0,
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never,
+    R13 extends AnyEffect = never,
+    R14 extends AnyEffect = never,
+    R15 extends AnyEffect = never,
+    R16 extends AnyEffect = never,
+    R17 extends AnyEffect = never,
+    R18 extends AnyEffect = never
+>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12,
+    f13: (value: EffectValue<R12>) => R13,
+    f14: (value: EffectValue<R13>) => R14,
+    f15: (value: EffectValue<R14>) => R15,
+    f16: (value: EffectValue<R15>) => R16,
+    f17: (value: EffectValue<R16>) => R17,
+    f18: (value: EffectValue<R17>) => R18
+): (
+    start: T0
+) => Effect<
+    EffectValue<R18>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>
+    | EffectError<R13>
+    | EffectError<R14>
+    | EffectError<R15>
+    | EffectError<R16>
+    | EffectError<R17>
+    | EffectError<R18>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12> &
+        EffectContext<R13> &
+        EffectContext<R14> &
+        EffectContext<R15> &
+        EffectContext<R16> &
+        EffectContext<R17> &
+        EffectContext<R18>
+>;
+
+export declare function effectPipe<
+    T0,
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never,
+    R13 extends AnyEffect = never,
+    R14 extends AnyEffect = never,
+    R15 extends AnyEffect = never,
+    R16 extends AnyEffect = never,
+    R17 extends AnyEffect = never,
+    R18 extends AnyEffect = never,
+    R19 extends AnyEffect = never
+>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12,
+    f13: (value: EffectValue<R12>) => R13,
+    f14: (value: EffectValue<R13>) => R14,
+    f15: (value: EffectValue<R14>) => R15,
+    f16: (value: EffectValue<R15>) => R16,
+    f17: (value: EffectValue<R16>) => R17,
+    f18: (value: EffectValue<R17>) => R18,
+    f19: (value: EffectValue<R18>) => R19
+): (
+    start: T0
+) => Effect<
+    EffectValue<R19>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>
+    | EffectError<R13>
+    | EffectError<R14>
+    | EffectError<R15>
+    | EffectError<R16>
+    | EffectError<R17>
+    | EffectError<R18>
+    | EffectError<R19>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12> &
+        EffectContext<R13> &
+        EffectContext<R14> &
+        EffectContext<R15> &
+        EffectContext<R16> &
+        EffectContext<R17> &
+        EffectContext<R18> &
+        EffectContext<R19>
+>;
+
+export declare function effectPipe<
+    T0,
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never,
+    R13 extends AnyEffect = never,
+    R14 extends AnyEffect = never,
+    R15 extends AnyEffect = never,
+    R16 extends AnyEffect = never,
+    R17 extends AnyEffect = never,
+    R18 extends AnyEffect = never,
+    R19 extends AnyEffect = never,
+    R20 extends AnyEffect = never
+>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12,
+    f13: (value: EffectValue<R12>) => R13,
+    f14: (value: EffectValue<R13>) => R14,
+    f15: (value: EffectValue<R14>) => R15,
+    f16: (value: EffectValue<R15>) => R16,
+    f17: (value: EffectValue<R16>) => R17,
+    f18: (value: EffectValue<R17>) => R18,
+    f19: (value: EffectValue<R18>) => R19,
+    f20: (value: EffectValue<R19>) => R20
+): (
+    start: T0
+) => Effect<
+    EffectValue<R20>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>
+    | EffectError<R13>
+    | EffectError<R14>
+    | EffectError<R15>
+    | EffectError<R16>
+    | EffectError<R17>
+    | EffectError<R18>
+    | EffectError<R19>
+    | EffectError<R20>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12> &
+        EffectContext<R13> &
+        EffectContext<R14> &
+        EffectContext<R15> &
+        EffectContext<R16> &
+        EffectContext<R17> &
+        EffectContext<R18> &
+        EffectContext<R19> &
+        EffectContext<R20>
 >;
 // END effectPipe overloads.
 
