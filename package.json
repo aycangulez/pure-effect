@@ -1,6 +1,6 @@
 {
     "name": "pure-effect",
-    "version": "0.15.0",
+    "version": "0.16.0",
     "description": "Records what your business logic did in production and replays it anywhere: time-travel debugging for JavaScript and TypeScript, with zero dependencies. Business logic is plain data you can test without mocks.",
     "keywords": [
         "effect",
@@ -20,15 +20,18 @@
     "files": [
         "index.js",
         "index.d.ts",
-        "CHANGELOG.md"
+        "CHANGELOG.md",
+        "examples"
     ],
     "sideEffects": false,
     "engines": {
-        "node": ">=18"
+        "node": ">=22"
     },
     "scripts": {
         "test": "mocha && tsd && tsc -p jsconfig.json",
-        "format": "prettier --write index.js index.d.ts examples/*.js test/all.js test/types.test-d.ts README.md CLAUDE.md CHANGELOG.md CONTRIBUTING.md"
+        "test:ts-minimum": "npx --yes -p typescript@5.1 tsc -p test/tsconfig.minimum.json",
+        "generate": "node scripts/effect-pipe-overloads.js",
+        "format": "prettier --write index.js index.d.ts examples/*.js scripts/*.js test/all.js test/types.test-d.ts README.md CLAUDE.md CHANGELOG.md CONTRIBUTING.md"
     },
     "tsd": {
         "directory": "test"

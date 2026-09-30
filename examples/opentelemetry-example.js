@@ -1,10 +1,10 @@
 // @ts-check
 
 import { trace, SpanStatusCode } from '@opentelemetry/api';
-import { configureEffect } from '../index.js';
+import { configureEffect } from 'pure-effect';
 
 /** @import { Tracer } from "@opentelemetry/api" */
-/** @import { EffectConfiguration, ParallelDecision, RunWrapper, StepRunner } from "../index.js" */
+/** @import { EffectConfiguration, ParallelDecision, RunWrapper, StepRunner } from "pure-effect" */
 
 /**
  * Reference wiring for OpenTelemetry spans

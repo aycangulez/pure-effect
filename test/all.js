@@ -14,13 +14,19 @@ import {
     recorder,
     recordEffect,
     replayEffect,
-    timeTravel
+    timeTravel,
+    commandName
 } from '../index.js';
 import * as lib from '../index.js';
 import ts from 'typescript';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync, copyFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { mock } from 'node:test';
 import { enableTelemetry, telemetryHooks } from '../examples/opentelemetry-example.js';
 import { enableRecording, recordingHooks } from '../examples/recording-example.js';
+import { effectPipeOverloads, currentOverloads } from '../scripts/effect-pipe-overloads.js';
 
 /** @import { CommandInterceptor } from "../index.js" */
 
@@ -87,11 +93,11 @@ describe('Core', function () {
         const input = { email: 'test@test.com', password: 'password123' };
         const step1 = registerUserFlow(input);
         assert.equal(step1.type, 'Command');
-        assert.equal(step1.cmd.name, 'cmdFindUser');
+        assert.equal(commandName(step1), 'cmdFindUser');
 
         const step2 = step1.next(null);
         assert.equal(step2.type, 'Command');
-        assert.equal(step2.cmd.name, 'cmdSaveUser');
+        assert.equal(commandName(step2), 'cmdSaveUser');
     });
 
     it('should access context through onBeforeCommand', async function () {
@@ -462,6 +468,36 @@ const errorOf = (/** @type {any} */ result) => result.error;
 
 describe('Recording and replay', function () {
     beforeEach(() => configureEffect());
+
+    it('should warn in timeTravel when recorded steps are anonymous', async function () {
+        // Inline arrow Commands are all 'anonymous', and a replay tells steps apart by name, so a refactor that swapped
+        // two of them replayed as a Success with each handed the other's recorded result.
+        const inline = effectPipe(
+            () => Command(() => 1),
+            () => Command(() => 2)
+        );
+        const named = effectPipe(() =>
+            Command(function cmdNamed() {
+                return 1;
+            })
+        );
+        for (const [flow, expected] of /** @type {const} */ ([
+            [inline, true],
+            [named, false]
+        ])) {
+            const { trace } = await recordEffect(flow, { id: 1 });
+            /** @type {string[]} */
+            const lines = [];
+            await timeTravel(flow, trace, { log: (/** @type {string} */ line) => void lines.push(line) });
+            const warning = lines.find((l) => l.includes("named 'anonymous'"));
+            assert.equal(Boolean(warning), expected);
+            if (warning) {
+                assert.match(warning, /2 of the recorded steps/);
+                assert.match(warning, /cannot tell them apart/);
+                assert.match(warning, /a const or meta\.name/);
+            }
+        }
+    });
 
     it('should record and replay the registration flow end to end', async function () {
         const input = { email: 'replay@test.com', password: 'password123' };
@@ -1336,7 +1372,7 @@ describe('Recording and replay', function () {
         // ReplayError of its own before onMissing was consulted, so the README's live tail never ran.
         const recorded = makeFlow();
         const { trace } = await recordEffect(recorded.flow, { id: 'FROM_TRACE' });
-        const prefix = { ...trace, trace: trace.trace.slice(0, 1) }; // what a recorder with maxEntries: 1 keeps
+        const prefix = { ...trace, trace: trace.trace.slice(0, 1) }; // as recorded before the flow gained its write
 
         const { flow, calls } = makeFlow();
         const { result: replayed } = await replayEffect(flow({ id: 'FROM_TRACE' }), prefix, { onMissing: 'execute' });
@@ -1377,7 +1413,7 @@ describe('Recording and replay', function () {
         const { result: replayed } = await replayEffect(flow({ id: 'x' }), trace);
         const error = /** @type {Error} */ (errorOf(replayed));
         assert.match(error.message, /onBeforeCommand hook vetoed/);
-        assert.match(error.message, /only when the trace was cut short/);
+        assert.match(error.message, /only where the Commands reach test doubles or only read/);
         assert.deepEqual(calls, { read: 0, write: 0 });
     });
 
@@ -1395,6 +1431,47 @@ describe('Recording and replay', function () {
         const diverged = { trace: [{ command: 'cmdSomethingElse', path: '0', result: {} }] };
         const { result: replayed } = await replayEffect(flow({ id: 'x' }), diverged, { onMissing: 'execute' });
         assert.equal(/** @type {Error} */ (errorOf(replayed)).name, 'TimeParadox');
+        assert.deepEqual(calls, { read: 0, write: 0 });
+    });
+
+    it('should refuse onMissing: execute on a trace maxEntries cut short, before any I/O', async function () {
+        // The steps a capped trace lacks are steps production ran, so running them live repeats production's
+        // I/O. The README and this message once advised exactly that for such a trace, and a billing batch
+        // replayed that way charged and invoiced subscriptions production had already billed.
+        const recorded = makeFlow();
+        const { trace } = await recordEffect(recorded.flow, { id: 'x' }, { maxEntries: 1 });
+        assert.equal(trace.dropped, 1);
+        const { flow, calls } = makeFlow();
+        for (const stored of [trace, JSON.parse(JSON.stringify(trace))]) {
+            await assert.rejects(
+                replayEffect(flow({ id: 'x' }), stored, { onMissing: 'execute' }),
+                (/** @type {any} */ e) => {
+                    assert.equal(e.name, 'ReplayError');
+                    assert.match(e.message, /dropped 1 entries under maxEntries/);
+                    assert.match(e.message, /would run it again/);
+                    assert.match(
+                        e.message,
+                        /stop at the first missing step, or record the flow with a higher maxEntries/
+                    );
+                    return true;
+                }
+            );
+        }
+        assert.deepEqual(calls, { read: 0, write: 0 }, 'nothing ran, not even the recorded prefix');
+    });
+
+    it('should say a capped trace may lack steps production ran, and not offer onMissing: execute', async function () {
+        const recorded = makeFlow();
+        const { trace } = await recordEffect(recorded.flow, { id: 'x' }, { maxEntries: 1 });
+        const { flow, calls } = makeFlow();
+        const { result: replayed, unreached } = await replayEffect(flow({ id: 'x' }), trace);
+        const error = /** @type {Error} */ (errorOf(replayed));
+        assert.equal(error.name, 'ReplayError');
+        assert.match(error.message, /Trace has no step at path '1' for 'cmdWrite'/);
+        assert.match(error.message, /production may have run this step/);
+        assert.match(error.message, /record the flow with a higher maxEntries to replay past it/);
+        assert.doesNotMatch(error.message, /onMissing/);
+        assert.deepEqual(unreached, [], 'the recorded prefix replayed');
         assert.deepEqual(calls, { read: 0, write: 0 });
     });
 
@@ -2273,9 +2350,41 @@ describe('Per-call inherit', function () {
     });
 });
 
+/**
+ * Imports an example as a user who copied it into their own project would: from a directory whose node_modules holds
+ * this library under its package name, and the example's other dependency.
+ * @param {string} file - The example's file name in examples/
+ * @returns {Promise<any>}
+ */
+const importCopiedExample = async (file) => {
+    const repo = fileURLToPath(new URL('..', import.meta.url));
+    const project = mkdtempSync(join(tmpdir(), 'pure-effect-example-'));
+    try {
+        mkdirSync(join(project, 'node_modules'));
+        symlinkSync(repo, join(project, 'node_modules', 'pure-effect'), 'dir');
+        symlinkSync(
+            join(repo, 'node_modules', '@opentelemetry'),
+            join(project, 'node_modules', '@opentelemetry'),
+            'dir'
+        );
+        writeFileSync(join(project, 'package.json'), '{ "type": "module" }');
+        copyFileSync(join(repo, 'examples', file), join(project, file));
+        return await import(pathToFileURL(join(project, file)).href);
+    } finally {
+        rmSync(project, { recursive: true, force: true });
+    }
+};
+
 describe('examples/recording-example.js', function () {
     beforeEach(() => configureEffect());
     afterEach(() => configureEffect());
+
+    it('should run as it is when copied into a project that installs the library', async function () {
+        // It imported '../index.js', a path that exists only in this repository, so every copy failed with
+        // `Cannot find module` until its import was edited. It imports the library by its package name instead.
+        const copied = await importCopiedExample('recording-example.js');
+        assert.equal(typeof copied.recordingHooks, 'function');
+    });
 
     const failing = (/** @type {any} */ input) =>
         effectPipe(
@@ -2487,6 +2596,69 @@ describe('examples/recording-example.js', function () {
         assert.match(warnings[0][0], /effectPipe/);
     });
 
+    it('should warn once per flow when it keeps a trace maxEntries cut short', async function () {
+        // A capped trace lacks steps production ran, so it replays only up to the first of them. The default
+        // cap is 500, so a long batch run is cut short without anyone having chosen to.
+        /** @type {[string, string | undefined][]} */
+        const warnings = [];
+        /** @type {any[]} */
+        const written = [];
+        enableRecording({
+            keep: () => true,
+            maxEntries: 2,
+            sink: (/** @type {any} */ t) => void written.push(t),
+            onWarning: (message, flowName) => void warnings.push([message, flowName])
+        });
+        const read = (/** @type {number} */ n) =>
+            Command(function cmdRead() {
+                return n;
+            });
+        const long = effectPipe(
+            () => read(1),
+            () => read(2),
+            () => read(3)
+        );
+        const short = effectPipe(() => read(1));
+        await runEffect(long({ id: 1 }), { flowName: 'long' });
+        await runEffect(long({ id: 2 }), { flowName: 'long' });
+        await runEffect(short({ id: 3 }), { flowName: 'short' });
+        assert.deepEqual(
+            written.map((t) => t.dropped),
+            [1, 1, 0],
+            'every capped trace still reaches the sink'
+        );
+        assert.equal(warnings.length, 1);
+        assert.equal(warnings[0][1], 'long');
+        assert.match(warnings[0][0], /dropped 1 entries under maxEntries \(2\)/);
+    });
+
+    it('should warn once per flow when it keeps a trace with anonymous steps', async function () {
+        // A replay tells steps apart by name, and inline arrow Commands are all 'anonymous', so a refactor that swapped
+        // two of them replayed as a Success with each handed the other's recorded result, and nothing flagged it.
+        /** @type {[string, string | undefined][]} */
+        const warnings = [];
+        enableRecording({
+            keep: () => true,
+            onWarning: (message, flowName) => void warnings.push([message, flowName])
+        });
+        const inline = effectPipe(
+            () => Command(() => 1),
+            () => Command(() => 2)
+        );
+        const named = effectPipe(() =>
+            Command(function cmdNamed() {
+                return 1;
+            })
+        );
+        await runEffect(inline({ id: 1 }), { flowName: 'inline' });
+        await runEffect(inline({ id: 2 }), { flowName: 'inline' });
+        await runEffect(named({ id: 3 }), { flowName: 'named' });
+        assert.equal(warnings.length, 1);
+        assert.equal(warnings[0][1], 'inline');
+        assert.match(warnings[0][0], /2 of its steps are named 'anonymous'/);
+        assert.match(warnings[0][0], /meta\.name/);
+    });
+
     it('should give concurrent runs separate traces', async function () {
         /** @type {any[]} */
         const written = [];
@@ -2595,6 +2767,13 @@ describe('examples/recording-example.js', function () {
 describe('examples/opentelemetry-example.js', function () {
     beforeEach(() => configureEffect());
     afterEach(() => configureEffect());
+
+    it('should run as it is when copied into a project that installs the library', async function () {
+        // It imported '../index.js', a path that exists only in this repository, so every copy failed with
+        // `Cannot find module` until its import was edited. It imports the library by its package name instead.
+        const copied = await importCopiedExample('opentelemetry-example.js');
+        assert.equal(typeof copied.telemetryHooks, 'function');
+    });
 
     /** A tracer stub, so the example is testable without standing up an SDK. */
     const fakeTracer = () => {
@@ -2985,6 +3164,33 @@ describe('Command identity', function () {
         const { result: replayed } = await replayEffect(flow({ id: 'x1' }), trace);
         assert.equal(replayed.type, 'Success', 'replay matching lines up on meta.name');
         assert.deepEqual(valueOf(replayed), valueOf(result));
+    });
+
+    it('should name a Command with commandName the way a trace does', function () {
+        // A test walking a flow read `cmd.name`, which is empty for an inline arrow named through meta.name,
+        // so the only way to check such a step was to copy the identity rule into the test.
+        const cmdInternalName = () => 'ok';
+        const cmdFallback = () => 'ok';
+        assert.equal(commandName(Command(cmdInternalName, undefined, { name: 'chargeCard' })), 'chargeCard');
+        assert.equal(commandName(Command(() => 'ok', undefined, { name: 'cmdInline' })), 'cmdInline');
+        assert.equal(commandName(Command(cmdFallback, undefined, { attempt: 1 })), 'cmdFallback');
+        assert.equal(commandName(Command(() => 'ok')), 'anonymous');
+        for (const meta of /** @type {any[]} */ (['a string', 42, null, { name: 7 }, { name: '' }])) {
+            assert.equal(commandName(Command(cmdFallback, undefined, meta)), 'cmdFallback', JSON.stringify(meta));
+        }
+    });
+
+    it('should refuse to name anything but a Command', function () {
+        // A walk that expected a Command and reached a Failure read `cmd.name` off undefined, and the
+        // TypeError named neither the step it got nor the one it expected.
+        assert.throws(() => commandName(/** @type {any} */ (Failure('Email already in use.'))), {
+            name: 'EffectTypeError',
+            message: /commandName expects a Command, got an Effect of type 'Failure'/
+        });
+        assert.throws(() => commandName(/** @type {any} */ (undefined)), {
+            name: 'EffectTypeError',
+            message: /commandName expects a Command, got undefined/
+        });
     });
 });
 
@@ -3458,6 +3664,9 @@ describe('Kleisli laws', function () {
             }),
             { attempts: 2, delay: 0 }
         );
+    // The steps fail in different ways, so each loop over them needs one error type that covers them all.
+    /** @typedef {(x: number) => import('../index.js').Effect<number, unknown, any>} LawStep */
+    /** @type {LawStep[]} */
     const steps = [double, addBonus, guarded, retried];
     const inputs = [1, 10, 60];
 
@@ -3490,6 +3699,7 @@ describe('Kleisli laws', function () {
     });
 
     it('should satisfy associativity: (f >=> g) >=> h is f >=> (g >=> h) across every node type', async function () {
+        /** @type {[LawStep, LawStep, LawStep][]} */
         const triples = [
             [double, addBonus, guarded],
             [addBonus, retried, guarded],
@@ -3806,7 +4016,10 @@ describe('Malformed flows', function () {
             )
         );
         assert.equal(e?.name, 'EffectTypeError');
-        assert.match(e.message, /A continuation returned undefined, which usually means a missing return/);
+        assert.match(
+            e.message,
+            /The next of Command 'cmdRead' returned undefined, which usually means a missing return/
+        );
     });
 
     it('should reject a Command continuation that returns nothing in the middle of a pipeline', async function () {
@@ -3825,7 +4038,7 @@ describe('Malformed flows', function () {
             )
         );
         assert.equal(e?.name, 'EffectTypeError');
-        assert.match(e.message, /A continuation returned undefined/);
+        assert.match(e.message, /The next of Command 'cmdRead' returned undefined/);
     });
 
     it('should reject a Command continuation that returns a plain value', async function () {
@@ -3841,7 +4054,15 @@ describe('Malformed flows', function () {
             )
         );
         assert.equal(e?.name, 'EffectTypeError');
-        assert.match(e.message, /returned the number 6/);
+        assert.match(e.message, /The next of Command 'cmdRead' returned the number 6/);
+    });
+
+    it('should name the node whose next returned something other than an Effect', async function () {
+        // The message said only that the flow or a continuation had, so finding the culprit meant reading every next.
+        const fromParallel = await errorFrom(() => runEffect(Parallel([Success(1)], /** @type {any} */ (() => 2))));
+        assert.match(fromParallel?.message, /The next of a Parallel returned the number 2/);
+        const fromAsk = await errorFrom(() => runEffect(Ask(/** @type {any} */ (() => 2))));
+        assert.match(fromAsk?.message, /The next of an Ask returned the number 2/);
     });
 
     it('should recognise a flow that was never called with its input', async function () {
@@ -3925,7 +4146,7 @@ describe('Malformed flows', function () {
             )
         );
         assert.equal(e?.name, 'EffectTypeError');
-        assert.match(e.message, /A continuation returned a Promise/);
+        assert.match(e.message, /The next of Command 'cmdFind' returned a Promise/);
     });
 
     it('should not leave a throwing async step as an unhandled rejection', async function () {
@@ -4039,6 +4260,24 @@ describe('Constructor arguments', function () {
             messageFrom(() => Parallel([Success(1)], /** @type {any} */ (undefined), /** @type {any} */ (5))),
             /options .*the number 5/
         );
+    });
+
+    it('should refuse a third argument that a Parallel given its options second would ignore', function () {
+        // With the options second nothing reads a third argument, so `Parallel(effects, { limit: 1 }, next)` ran
+        // without its next and handed the values on unchanged. Only TypeScript refused it.
+        const parallel = /** @type {any} */ (Parallel);
+        const next = (/** @type {any[]} */ values) => Success(values.length);
+        assert.match(
+            messageFrom(() => parallel([Success(1)], { limit: 1 }, next)),
+            /next goes second and its options third: Parallel\(effects, next, options\)/
+        );
+        assert.match(
+            messageFrom(() => parallel([Success(1)], { limit: 1 }, { settled: true })),
+            /one options object.*a plain object, would be ignored/
+        );
+        // An absent third argument, as a caller forwarding one may pass, is still fine.
+        assert.doesNotThrow(() => parallel([Success(1)], { limit: 1 }, undefined));
+        assert.doesNotThrow(() => parallel([Success(1)], { limit: 1 }, null));
     });
 
     it('should refuse a Retry given the step instead of its Effect, or a bare number of attempts', function () {
@@ -4360,6 +4599,16 @@ describe('Declaration parity', function () {
         const shipped = Object.keys(lib).sort();
         assert.deepEqual(declared, shipped);
     });
+
+    it('should hold exactly the effectPipe overloads the generator writes', async function () {
+        // Two thirds of index.d.ts is effectPipe's overloads, one per pipeline length. Edited by hand, a
+        // pattern meant for their type parameters once also rewrote ten return types. They are written by
+        // scripts/effect-pipe-overloads.js instead, and this fails when the file and the script disagree.
+        this.timeout(20000);
+        const generated = await effectPipeOverloads();
+        const current = currentOverloads(readFileSync('index.d.ts', 'utf8'));
+        assert.ok(current === generated, 'index.d.ts differs from the generator: run npm run generate');
+    });
 });
 
 describe('README examples', function () {
@@ -4372,9 +4621,14 @@ describe('README examples', function () {
     // `js` block runs as one program with the Quick Start's definitions in scope, which makes every
     // `assert` the README prints a real assertion.
     const markdown = readFileSync('README.md', 'utf8');
-    const blocks = [...markdown.matchAll(/```(\w*)\n([\s\S]*?)```/g)]
-        .filter((match) => match[1] === 'js')
-        .map((match) => match[2]);
+    // The js blocks grouped by the heading they sit under, at any depth. The pattern matches a whole
+    // fence before anything inside it, so a `#` comment in a shell block does not count as a heading.
+    const sections = /** @type {string[][]} */ ([[]]);
+    for (const match of markdown.matchAll(/^#+ .*$|```(\w*)\n([\s\S]*?)```/gm)) {
+        if (match[0].startsWith('#')) sections.push([]);
+        else if (match[1] === 'js') sections[sections.length - 1].push(match[2]);
+    }
+    const blocks = sections.flat();
     const withoutImports = (/** @type {string} */ code) => code.replace(/^import[^;]*;\s*$/gm, '');
     const AsyncFunction = /** @type {any} */ (Object.getPrototypeOf(async function () {}).constructor);
 
@@ -4419,15 +4673,15 @@ describe('README examples', function () {
     });
 
     it('should run every example, assertions included, without performing I/O', async function () {
-        // The first block is the Quick Start, whose definitions the later examples use. Every other
-        // block gets its own scope so two sections can name the same helper without colliding.
-        const program =
-            withoutImports(blocks[0]) +
-            '\n' +
-            blocks
-                .slice(1)
-                .map((block) => `{\n${withoutImports(block)}\n}`)
-                .join('\n');
+        // The first section is the Quick Start, whose definitions the later examples use. Every other
+        // section gets its own scope so two sections can name the same helper without colliding.
+        // Within a section each block's scope sits inside the one before it: a block sees what the
+        // blocks above it defined, as a reader does, so a test can follow the code it tests, and two
+        // independent examples can still both declare `result`.
+        const [quickStart, ...rest] = sections.filter((section) => section.length > 0);
+        const nested = (/** @type {string[]} */ section) =>
+            section.reduceRight((inner, block) => `{\n${withoutImports(block)}\n${inner}}\n`, '');
+        const program = quickStart.map(withoutImports).join('\n') + '\n' + rest.map(nested).join('');
 
         // Everything the examples reach for that is not the library. These exist so the flows can be
         // built and walked, not to stand in for a real driver: every assertion the README makes is
@@ -4464,7 +4718,11 @@ describe('README examples', function () {
             summarize: (/** @type {any} */ outcome) => outcome.type,
             sink: () => {},
             telemetryHooks: () => ({}),
-            recordingHooks: () => ({})
+            recordingHooks: () => ({}),
+            // Real rather than stubbed: the async/await comparison shows the mocked test a plain
+            // `async` function needs, and it should pass against that function the way it would for
+            // a reader.
+            mock
         };
 
         const log = console.log;
@@ -4526,6 +4784,25 @@ describe('Parallel limit and settled', function () {
                 ['0p', { cancelled: false }]
             ]
         );
+    });
+
+    it('should run branches one after another, in array order, under a limit of 1', async function () {
+        // The README translates a `for` loop into this, so the order branches start in is part of what
+        // it promises, not only the order results come back in.
+        const events = /** @type {string[]} */ ([]);
+        const step = (/** @type {string} */ id, /** @type {number} */ ms) =>
+            Command(function cmdStep() {
+                events.push(`start ${id}`);
+                return new Promise((resolve) =>
+                    setTimeout(() => {
+                        events.push(`end ${id}`);
+                        resolve(id);
+                    }, ms)
+                );
+            });
+        // Descending durations, so any overlap or reordering would show.
+        await runEffect(Parallel([step('a', 3), step('b', 2), step('c', 1)], { limit: 1 }));
+        assert.deepEqual(events, ['start a', 'end a', 'start b', 'end b', 'start c', 'end c']);
     });
 
     it('should not start queued branches once one has failed', async function () {

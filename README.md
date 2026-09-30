@@ -10,26 +10,16 @@
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks
 - Zero dependencies, about 7 KB minified and gzipped
-- Works in JavaScript and TypeScript (full generics, bundled `.d.ts`)
+- Works in JavaScript, and in TypeScript 5.1 or later (full generics, bundled `.d.ts`)
 
 ## Table of Contents
 
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Testing Without Mocks](#testing-without-mocks)
-- [How It Works](#how-it-works)
-- [Time-Travel Debugging](#time-travel-debugging)
-- [Recording in Production](#recording-in-production)
-- [Passing Runtime Context](#passing-runtime-context)
-- [Retrying Transient Failures](#retrying-transient-failures)
-- [Running Effects in Parallel](#running-effects-in-parallel)
-- [Composing Larger Flows](#composing-larger-flows)
-- [Which Errors Are Data](#which-errors-are-data)
-- [TypeScript: Typed Errors and Context](#typescript-typed-errors-and-context)
-- [Why Pure Effect](#why-pure-effect)
-- [Load Tests](#load-tests)
-- [API Reference](#api-reference)
-- [Limitations](#limitations)
+- **Getting started:** [Installation](#installation) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Testing Without Mocks](#testing-without-mocks) · [Coming from async/await](#coming-from-asyncawait)
+- **Recording and replay:** [Time-Travel Debugging](#time-travel-debugging) · [Recording in Production](#recording-in-production)
+- **Building flows:** [Passing Runtime Context](#passing-runtime-context) · [Retrying Transient Failures](#retrying-transient-failures) · [Running Effects in Parallel](#running-effects-in-parallel) · [Composing Larger Flows](#composing-larger-flows) · [Which Errors Are Data](#which-errors-are-data) · [TypeScript](#typescript-typed-errors-and-context)
+- **Reference:** [Why Pure Effect](#why-pure-effect) · [Load Tests](#load-tests) · [API Reference](#api-reference) · [Limitations](#limitations)
+
+The five sections under Getting started are enough to write and test a flow. Come back to the rest when a flow needs it: recording, retries, steps that run at the same time, or TypeScript.
 
 ## Installation
 
@@ -80,6 +70,14 @@ async function registerUser(input) {
 }
 ```
 
+## How It Works
+
+A flow is a chain of pairs: an I/O call, and a `next` function that receives its answer and returns the next Command, a Success, or a Failure. `runEffect` walks the chain in a loop.
+
+Recording and replay hook into the one place where a Command's function is called. Recording writes down each answer. Replay supplies the recorded answer instead of making the call, so a replayed flow does no I/O.
+
+Building a flow runs the pure steps right away: `registerUserFlow(badInput)` returns the validation `Failure` synchronously, so the tests below do not need `runEffect`. Only Commands need it.
+
 ## Testing Without Mocks
 
 Pipelines return plain objects, so you can check what the code will do without running it.
@@ -103,14 +101,16 @@ assert.deepEqual(ensureEmailAvailable(input).next(null), Success(input));
 assert.deepEqual(ensureEmailAvailable(input).next({ id: 1 }), Failure('Email already in use.'));
 ```
 
-Then test the flow: the right calls, in the right order.
+Then test the flow: the right calls, in the right order. `commandName` gives the name a Command is recorded under:
 
 ```js
+import { commandName } from 'pure-effect';
+
 const step1 = registerUserFlow(input);
-assert.equal(step1.cmd.name, 'cmdFindUser');
+assert.equal(commandName(step1), 'cmdFindUser');
 
 const step2 = step1.next(null); // pretend no user was found
-assert.equal(step2.cmd.name, 'cmdSaveUser');
+assert.equal(commandName(step2), 'cmdSaveUser');
 // The database was never touched.
 ```
 
@@ -120,15 +120,169 @@ For example, if the email guard returned `Success(true)` instead of `Success(inp
 
 A step tested on its own returns a `Failure` without `initialInput`. That is why the assertion above is `Failure('Email already in use.')`, while the validation one is `Failure('Invalid email.', badInput)`: `effectPipe` adds the input when it builds a flow.
 
+A walk stops at each Command to be handed its answer. To run the whole flow instead, `Retry` and `Parallel` included, hand `replayEffect` a function that answers each Command by name. Nothing is called and a retry does not wait, and answering `{ error }` makes that Command throw, which is how a test reaches a `Retry`'s fallback:
+
+```js
+const answers = { cmdFindUser: null, cmdSaveUser: { id: 1, ...input } };
+const answer = (step) => (step.name in answers ? { result: answers[step.name] } : undefined);
+const { result } = await replayEffect(registerUserFlow(input), answer);
+assert.deepEqual(result, Success({ id: 1, ...input }));
+```
+
 Tests cannot see inside a Command's function without running it. If `cmdFindUser` said `db.findUser(input.name)` instead of `input.email`, every test on this page would still pass. Keep those functions to a single call, and let an integration test cover them.
 
-## How It Works
+**In TypeScript**, a flow is typed as any kind of step it could start with, since validation may already have returned a `Success` or a `Failure`, so `.cmd` and `.next` compile only after the test checks that the step is a Command. `node:assert`'s `assert(step.type === 'Command')` is such a check, and TypeScript follows it. Jest's and Vitest's `expect` is not, so a walk needs a check at every step, and a small helper makes that one line per step with any test framework:
 
-A flow is a chain of pairs: an I/O call, and a `next` function that receives its answer and returns the next Command, a Success, or a Failure. `runEffect` walks the chain in a loop.
+```ts
+import assert from 'node:assert/strict';
+import { commandName } from 'pure-effect';
+import type { Effect } from 'pure-effect';
 
-Recording and replay hook into the one place where a Command's function is called. Recording writes down each answer. Replay supplies the recorded answer instead of making the call, so a replayed flow does no I/O.
+// Fails unless the step is the Command named, and returns it typed as one.
+function assertCommand<T, E, C>(step: Effect<T, E, C>, name: string) {
+    assert(step.type === 'Command', `expected ${name}, got ${step.type}`);
+    assert.equal(commandName(step), name);
+    return step;
+}
 
-Building a flow runs the pure steps right away: `registerUserFlow(badInput)` returns the validation `Failure` synchronously, so the tests above do not need `runEffect`. Only Commands need it.
+const step1 = assertCommand(registerUserFlow(input), 'cmdFindUser');
+assertCommand(step1.next(null), 'cmdSaveUser');
+```
+
+For a step that returns its Command directly, as in `ensureEmailAvailable(input).next(found)`, `next` is checked against what the Command's function returns, so where the tests above pass `{ id: 1 }` for a user that was found, a TypeScript test passes a whole user, of the type `db.findUser` returns. A Command reached any other way, by walking the whole flow or through an `Ask`'s `next`, accepts any value, since its type does not say which Command it is.
+
+## Coming from async/await
+
+A flow does what `async`/`await` code does, as data. Instead of making a call and waiting for it, a step returns a Command that says which call to make and what to do with the answer. That is what lets a test hand a step an answer instead of mocking the database, and a replay hand it the recorded one. Each thing you would write with `async`/`await` has an equivalent:
+
+| With `async`/`await` | In a flow |
+| --- | --- |
+| `const user = await db.findUser(email)` | a Command: `Command(() => db.findUser(email), next)` |
+| the code after the `await`, which uses `user` | the Command's `next`, which receives `user` |
+| an `if` on `user` after the `await` | a branch in `next` |
+| `return value` | `Success(value)` |
+| `throw` to stop | `Failure(error)` |
+| a call inside `try`/`catch` | catch inside the Command's function and return a value for `next` to branch on; see [Which Errors Are Data](#which-errors-are-data) |
+| a loop that retries a call | `Retry(Command(...), options)` |
+| `await Promise.all([...])` | `Parallel([...])` |
+| a `for` loop with an `await` inside | a step that gets the list, then `Parallel(list.map(...), { limit: 1 })` |
+| a `try`/`catch` inside a loop, to keep going past a failure | the same `Parallel`, with `settled: true` |
+| a later call that needs two earlier results | a named step that passes both on; see [Composing Larger Flows](#composing-larger-flows) |
+| a value from the request, such as the tenant | `Ask`; see [Passing Runtime Context](#passing-runtime-context) |
+| `Date.now()` or a random ID | a Command, so a replay gets the recorded value |
+
+The Quick Start's `registerUserFlow` is this function, translated row by row: each `await` became a Command, the code after it became that Command's `next`, and each `throw` became a `Failure`.
+
+```js
+async function registerUserAsync(input) {
+    if (!input.email.includes('@')) throw new Error('Invalid email.');
+    const found = await db.findUser(input.email);
+    if (found) throw new Error('Email already in use.');
+    return db.saveUser(input);
+}
+```
+
+The difference shows most in the tests. To reach the branch where the email is taken, a test of `registerUserAsync` has to replace the database's methods, run the function, and put the methods back. Here it is with Node's built-in mocks; Jest's `spyOn` works the same way:
+
+```js
+import { mock } from 'node:test';
+
+const input = { email: 'test@test.com', password: 'password123' };
+
+mock.method(db, 'findUser', async () => ({ id: 1 }));
+const saveUser = mock.method(db, 'saveUser', async (user) => user);
+
+await assert.rejects(registerUserAsync(input), { message: 'Email already in use.' });
+assert.equal(saveUser.mock.callCount(), 0);
+mock.restoreAll();
+```
+
+The flow's test of the same branch hands one step the answer, with nothing to replace, wait for, or put back:
+
+```js
+assert.deepEqual(ensureEmailAvailable(input).next({ id: 1 }), Failure('Email already in use.'));
+```
+
+This is what the small functions are for. Each step is a place a test can start, so a branch is tested by calling the step it lives in. An `async` function has one way in, so a test of any branch runs everything before it, with every call on the way replaced. The mocks can check one thing these tests cannot: the arguments each call received, which [Testing Without Mocks](#testing-without-mocks) leaves to an integration test.
+
+A loop is written in two parts: a step that gets the list, and a `Parallel` over it. `Parallel` runs a list of flows, at the same time unless told otherwise, and `limit: 1` makes it run them one after another, like a `for` loop. The `async` version is usually split the same way. Paying a customer's unpaid invoices in order, and stopping at the first that fails:
+
+```js
+async function payUnpaidAsync(customerId) {
+    const invoices = await billing.findUnpaid(customerId);
+    for (const invoice of invoices) {
+        const receipt = await payments.charge(invoice);
+        await mailer.sendReceipt(receipt);
+    }
+}
+
+// First part: get the list.
+const findUnpaidInvoices = (customerId) => {
+    const cmdFindUnpaid = () => billing.findUnpaid(customerId);
+    return Command(cmdFindUnpaid);
+};
+
+// Second part: the loop's body, a flow of its own for one invoice.
+const chargeInvoice = (invoice) => {
+    const cmdChargeInvoice = () => payments.charge(invoice);
+    return Retry(Command(cmdChargeInvoice), { attempts: 3 });
+};
+
+const sendReceipt = (receipt) => {
+    const cmdSendReceipt = () => mailer.sendReceipt(receipt);
+    return Command(cmdSendReceipt);
+};
+
+const payInvoice = (invoice) => effectPipe(chargeInvoice, sendReceipt)(invoice);
+
+// The loop: one body per invoice, run one at a time.
+const payAll = (invoices) => Parallel(invoices.map(payInvoice), { limit: 1 });
+
+const payUnpaid = (customerId) => effectPipe(findUnpaidInvoices, payAll)(customerId);
+
+// The flow starts by getting the list, and hands what it gets to the loop.
+const flow = payUnpaid('cus_1');
+assert.equal(commandName(flow), 'cmdFindUnpaid');
+assert.equal(flow.next([{ id: 1 }, { id: 2 }]).effects.length, 2);
+
+// The body is tested on its own: the Retry holds only the charge, and the receipt comes after it.
+const body = payInvoice({ id: 1 });
+assert.equal(commandName(body.effect), 'cmdChargeInvoice');
+assert.equal(commandName(body.next({ id: 'receipt_1' })), 'cmdSendReceipt');
+
+// An empty list runs nothing.
+assert.deepEqual(await runEffect(payAll([])), Success([]));
+```
+
+Each invoice is paid after the one before it has finished, and the first that fails stops the rest from starting, as in the `async` version. When the payments can overlap, a higher `limit` runs several at a time.
+
+The loop's body is a flow built for one item, so it can hold as many steps as the body of a `for` loop. Put a `Retry` inside it, on the step that needs one. Around the whole loop, a `Retry` would pay every invoice again after one failed, charging the ones already paid; around the whole body, a receipt that failed to send would charge the card again. See [Retrying Transient Failures](#retrying-transient-failures).
+
+The `Parallel`'s `next` receives what each body returned, in order, so a total or a summary of the loop goes there: `Parallel(invoices.map(payInvoice), (receipts) => Success(receipts.length), { limit: 1 })`. To keep going past a failure, as a `try`/`catch` inside the loop would, add `settled: true`: every invoice is tried, and `next` receives one `Success` or `Failure` per invoice. See [Running Effects in Parallel](#running-effects-in-parallel).
+
+Sometimes getting the list is a loop of its own. Paging through an API with a cursor is one: each request needs the cursor from the page before, so the requests cannot be listed in advance. Write that loop as an ordinary `async` function, call it from one Command, and map over the list it returns, as above:
+
+```js
+async function fetchAllOrders() {
+    const orders = [];
+    let cursor = null;
+    do {
+        const page = await api.listOrders(cursor);
+        orders.push(...page.items);
+        cursor = page.nextCursor;
+    } while (cursor);
+    return orders;
+}
+
+const listAllOrders = () => {
+    const cmdListAllOrders = () => fetchAllOrders();
+    return Command(cmdListAllOrders);
+};
+```
+
+To the flow, the whole loop is one step. A trace records the finished list as that step's result, and a replay hands the list back without replaying the pages. A `Retry` around the Command starts again from the first page. A flow test cannot see inside it, so, like any Command's function, it is left to an integration test.
+
+The loop belongs in the flow only when the flow has to decide something on each pass, such as stopping at the first order that matches, or saving each page as it arrives. Then the Command's `next` returns the Command for the next page instead of a `Success`, until there are no more pages.
 
 ## Time-Travel Debugging
 
@@ -183,9 +337,9 @@ it('prod incident 8f3a: a 100% promo produces a $0 charge', async () => {
 });
 ```
 
-The test checks that the flow still takes the recorded path and handles the recorded outcomes the same way. If a refactor reorders or replaces a step, the replay raises a `TimeParadox` naming where it diverged. If the error handling changes, the assertion fails.
+The test checks that the flow still takes the recorded path and handles the recorded outcomes the same way. If a refactor reorders or replaces a step, the replay ends in a `Failure` whose error is a `TimeParadox` naming where it diverged. It is not thrown, so a test that expects a `Failure` should check the error too, as this one checks its `code`. If the error handling changes, the assertion fails.
 
-A flow that stops issuing Commands before the recording ends (for example, a fix that skips the charge) raises no `TimeParadox`, and the replay can end in `Success` with recorded steps left over. `replayEffect` returns those steps as `unreached`, so a test can assert which ones it expects to skip:
+A flow that stops issuing Commands before the recording ends (for example, a fix that skips the charge) produces no `TimeParadox`, and the replay can end in `Success` with recorded steps left over. `replayEffect` returns those steps as `unreached`, so a test can assert which ones it expects to skip:
 
 ```js
 it('incident 8f3a fixed: a 100% promo checks out without a charge', async () => {
@@ -203,6 +357,8 @@ For every other recording, `unreached` should be empty, so a fix that skips a st
 This works when the removed step is the last one the flow reaches. Remove a step from the middle and every later step moves to a different path, so the replay stops at a `TimeParadox`. In that case `unreached` lists the steps the replay never got to, not the steps the fix made unnecessary.
 
 **Replay checks the path, not the values.** It shows that the flow asks for the same Commands in the same order and handles the same answers. It cannot check what the flow computes, because every Command's result comes from the recording, not from the new code. If you fix how a refund amount is calculated and replay the bad run, the charge step gets the old amount from the recording: the replay reports `Success`, returns the value from before the fix, and flags nothing. Test a change to a value against the pure step that computes it.
+
+**A replay cannot check a fix inside a Command's function either.** The function never runs, so the replay hands the flow what it returned or threw before the fix: catch a duplicate-key error inside the function and return it as data, and the old trace still replays the throw. Cover such a fix with an integration test. And when a Command's result changes shape, rename the Command, since a trace matches it by name: under the old name, an old trace hands the new code a result in the old shape, which it can take for another answer without any `TimeParadox`.
 
 **A trace records what each Command returned, not the arguments it was called with.** Given the recorded input and results, the flow does the same thing again, so replaying up to a step rebuilds the arguments that Command ran with. You can inspect them in a debugger, but you cannot assert on them. Storing arguments would also double what `redact` has to cover, since arguments are usually the sensitive part of a call.
 
@@ -229,9 +385,10 @@ await replayEffect(checkoutFlow(input), resolve);
 
 ## Recording in Production
 
-`recordEffect` suits tests and scripts, where one call covers the whole run. To record an application without changing any call site, install the hooks once at startup (see `examples/recording-example.js`).
+`recordEffect` suits tests and scripts, where one call covers the whole run. To record an application without changing any call site, install the hooks once at startup. The two files imported below ship in the package's `examples` folder, `node_modules/pure-effect/examples`, and in the repository's [examples folder](https://github.com/aycangulez/pure-effect/blob/main/examples); copy them into your project.
 
 ```js
+import { randomUUID } from 'node:crypto';
 import { configureEffect } from 'pure-effect';
 import { recordingHooks } from './recording-example.js';
 import { telemetryHooks } from './opentelemetry-example.js';
@@ -239,15 +396,17 @@ import { telemetryHooks } from './opentelemetry-example.js';
 configureEffect(
     telemetryHooks(),
     recordingHooks({
-        sink: (trace) => putObject(`traces/${trace.flowName}/${requestId}.json`, JSON.stringify(trace)),
-        redact: (value, name, kind) => (kind === 'initialInput' ? { ...value, password: '[redacted]' } : value),
+        sink: (trace) => putObject(`traces/${trace.flowName}/${randomUUID()}.json`, JSON.stringify(trace)),
+        // A replay runs validation again on the stored input, so the stand-in keeps the password rule's verdict.
+        redact: (value, name, kind) =>
+            kind === 'initialInput' ? { ...value, password: value.password.length >= 8 ? '[redacted]' : '' } : value,
         maxEntries: 500,
         keep: (result) => result.type === 'Failure' // the default; keep everything, or sample
     })
 );
 ```
 
-By default, successful runs are held in memory and then discarded. A run that rejects because your own code threw, such as a `TypeError` after an API changed the shape of its response, is offered to `keep` as a `Failure` carrying the thrown error, so by default its trace is kept, and the run still rejects. Replaying that trace reproduces the throw. If `keep` or the sink throws, for example because `JSON.stringify` meets a value it cannot serialize, the run keeps its own outcome and the error goes to `onSinkError`, which defaults to `console.error`. `redact` runs before anything enters the trace, including the stored `initialInput` and `context`. `maxEntries` caps the length of a trace and reports the overflow as `dropped`. The sink can write a trace to S3 or a database column as JSON, as long as your Commands return plain data.
+By default, successful runs are held in memory and then discarded. A run that rejects because your own code threw, such as a `TypeError` after an API changed the shape of its response, is offered to `keep` as a `Failure` carrying the thrown error, so by default its trace is kept, and the run still rejects. Replaying that trace reproduces the throw. If `keep` or the sink throws, for example because `JSON.stringify` meets a value it cannot serialize, the run keeps its own outcome and the error goes to `onSinkError`, which defaults to `console.error`. `redact` runs before anything enters the trace, including the stored `initialInput` and `context`. `maxEntries` caps the length of a trace and reports the overflow as `dropped`; a capped trace replays only up to the first step it lacks, so the example warns through `onWarning` the first time it keeps one for a flow. It warns the same way about a flow whose steps include any named `'anonymous'`. The sink can write a trace to S3 or a database column as JSON, as long as your Commands return plain data.
 
 The example reads the input from the flow itself, where `effectPipe` stores it, so build the outermost flow with `effectPipe`. A flow that starts with a bare `Command`, `Ask`, `Retry`, or `Parallel` records no input, and `timeTravel` would rebuild it from `undefined`. A one-step pipeline is enough, as in `runEffect(effectPipe(loadProfile)(userId))`. The example warns through `onWarning`, which defaults to `console.warn`, the first time it keeps a trace of such a flow, and `timeTravel` warns when it replays one. The example also takes the context from the run's first Command, so a run that stops before any Command, for example at an `Ask` check, records no context. Such a run did no I/O, so running the flow again with its input and the context from your logs reproduces it.
 
@@ -272,11 +431,13 @@ app.post('/checkout', async (req, res) => {
     const result = await runEffect(checkoutFlow(req.body.productId), { tenant: req.tenant });
     if (result.type === 'Success') return res.json(result.value);
     // A Failure also carries the flow's input, so send the client only an error meant for it.
-    res.status(400).json({ error: typeof result.error === 'string' ? result.error : 'Checkout failed.' });
+    // Answer the errors the flow returns by name, and anything else, such as a database outage, as a server error.
+    if (result.error === 'Product not found.') return res.status(400).json({ error: result.error });
+    res.status(500).json({ error: 'Checkout failed.' });
 });
 ```
 
-Recording stores the context alongside the trace, so `Ask` replays with the values the original request saw.
+Recording stores the context alongside the trace, so `Ask` replays with the values the original request saw. It is copied once per run, so read a value that can change while a run is under way, such as a switch an operator can flip to stop a batch, in a Command, whose result the trace records each time.
 
 ## Retrying Transient Failures
 
@@ -421,7 +582,67 @@ const fetchProfileUncancellable = (userId) => Command(() => fetch(`/users/${user
 
 Outside a `Parallel`, the function is called with no arguments. A `Retry` inside a cancelled branch stops retrying.
 
-Which branch failed first and cancelled the others depends on timing, so it is recorded with the trace. A replay of a cancelled `Parallel` returns the same failure production did, and stops each other branch where production stopped it, rather than letting whichever branch the replay reaches first decide. The same holds when the branch that cancelled the others was a `next` function or a pure step that threw: the replay throws the same error. If the branch that cancelled the others no longer fails, or the `Parallel` no longer has that branch, the replay raises a `TimeParadox` naming it.
+Which branch failed first and cancelled the others depends on timing, so it is recorded with the trace. A replay of a cancelled `Parallel` returns the same failure production did, and stops each other branch where production stopped it, rather than letting whichever branch the replay reaches first decide. The same holds when the branch that cancelled the others was a `next` function or a pure step that threw: the replay throws the same error. If the branch that cancelled the others no longer fails, or the `Parallel` no longer has that branch, the replay ends in a `TimeParadox` naming it.
+
+**Undoing what succeeded when a branch fails.** Without `settled`, the failing branch's `Failure` is the whole result, and the values of the branches that succeeded are dropped. When one of them did something that has to be undone, such as charging a card for an order whose stock then ran out, the code that called `runEffect` no longer has the charge to refund. Use `settled: true`, so `next` sees every outcome, and have it return the steps that undo whatever succeeded, followed by the failure:
+
+```js
+const reserveStock = (order) => {
+    const cmdReserveStock = () => inventory.reserve(order.items);
+    return Command(cmdReserveStock, (r) => (r.ok ? Success(r.reservationId) : Failure('out_of_stock')));
+};
+
+const chargeOrder = (order) => {
+    const cmdChargeOrder = () => payments.charge(order.customerId, order.total);
+    return Command(cmdChargeOrder, (c) => (c.ok ? Success(c.chargeId) : Failure('card_declined')));
+};
+
+const releaseStock = (reservationId) => {
+    const cmdReleaseStock = () => inventory.release(reservationId);
+    return Command(cmdReleaseStock);
+};
+
+const refundCharge = (chargeId) => {
+    const cmdRefundCharge = () => payments.refund(chargeId);
+    return Command(cmdRefundCharge);
+};
+
+// Passes both results on, or undoes whichever step succeeded and then fails.
+const reserveAndCharge = (order) =>
+    Parallel(
+        [reserveStock(order), chargeOrder(order)],
+        ([reservation, charge]) => {
+            if (reservation.type === 'Failure') {
+                const undo = charge.type === 'Success' ? [refundCharge(charge.value)] : [];
+                return Parallel(undo, () => Failure(reservation.error));
+            }
+            if (charge.type === 'Failure') {
+                return Parallel([releaseStock(reservation.value)], () => Failure(charge.error));
+            }
+            return Success({ order, reservationId: reservation.value, chargeId: charge.value });
+        },
+        { settled: true }
+    );
+```
+
+`next` is a plain function, so each case is tested by handing it the outcomes, with no I/O:
+
+```js
+const order = { id: 'order_1', customerId: 'cus_1', items: [], total: 120 };
+
+// The card was charged, then the stock ran out: the flow refunds the charge and fails.
+const undoing = reserveAndCharge(order).next([Failure('out_of_stock'), Success('ch_1')]);
+assert.equal(commandName(undoing.effects[0]), 'cmdRefundCharge');
+assert.deepEqual(undoing.next([null]), Failure('out_of_stock'));
+
+// Both succeeded, so there is nothing to undo.
+assert.deepEqual(
+    reserveAndCharge(order).next([Success('res_1'), Success('ch_1')]),
+    Success({ order, reservationId: 'res_1', chargeId: 'ch_1' })
+);
+```
+
+A settled `Parallel` cancels nothing, so both steps always run to the end, and the undoing starts once both have finished. The undo steps are part of the flow, so a trace records them and a replay repeats them. An undo step that fails ends the flow with its own error rather than the original one; wrap it in `Retry` if it can fail for a moment.
 
 ## Composing Larger Flows
 
@@ -444,16 +665,17 @@ const loadCheckout = effectPipe(
 );
 ```
 
-**Join values that depend on each other locally.** When step B needs step A's result and step C needs both, pass both forward in one value. A small pipeline inside the step does this without nested callbacks:
+**Join values that depend on each other in a named step.** When step B needs step A's result and step C needs both, write a small step that runs B and passes both forward in one value. Give it a name, and the pipeline reads as a list of steps:
 
 ```js
+// Fetches the order's customer and passes on both.
+const withCustomer = (order) => effectPipe(fetchCustomer, (customer) => Success({ order, customer }))(order.customerId);
+
 const applyLoyaltyDiscount = (orderId) =>
-    effectPipe(
-        fetchOrder,
-        (order) => effectPipe(fetchCustomer, (customer) => Success({ order, customer }))(order.customerId),
-        ({ order, customer }) => Success(discountedTotal(order, customer))
-    )(orderId);
+    effectPipe(fetchOrder, withCustomer, ({ order, customer }) => Success(discountedTotal(order, customer)))(orderId);
 ```
+
+When the lookup is written in place rather than reused, the Command's own `next` does the join, with no pipeline inside the step: `Command(() => db.findCustomer(order.customerId), (customer) => Success({ order, customer }))`.
 
 **Pass only what the next steps need.** Avoid one object that collects everything computed so far. When a step's input is all it gets, it cannot depend on a value from far upstream without showing it, stale fields do not linger, and two steps cannot clash over the same key. Data also lives only as long as the flow needs it, which matters for credentials and personal data. In TypeScript, it keeps the pipeline type-checked: if an upstream step changes what it returns, the step that reads the value fails to compile instead of getting `undefined` at runtime.
 
@@ -522,6 +744,8 @@ In short, **you can recover from an error your I/O produced, but you cannot catc
 
 ## TypeScript: Typed Errors and Context
 
+The bundled declarations need TypeScript 5.1 or later.
+
 ### Error union across pipeline steps
 
 Each step in `effectPipe` carries its own error type. The compiler collects them into a union automatically:
@@ -538,6 +762,10 @@ if (result.type === 'Failure') {
     result.error; // 'invalid_email' | 'weak_password' | 'network_timeout' | 'rate_limited'
 }
 ```
+
+The annotations are optional. Without them, the union holds whatever each step can pass to `Failure`, each error kept exactly as written, whether a string or an object, and a step that cannot fail, such as a Command without a `next`, adds nothing. The union covers the `Failure`s your steps return. A Command whose function throws, or that an `onBeforeCommand` hook vetoes, also ends the run with a `Failure` the union does not name, so where the result is handled, give it one fallback, such as a `default` in a `switch` over `result.error`, and treat what reaches it as a server error. One fallback covers the whole flow: catch inside a Command's function only what the flow can handle, and let the rest throw, which is also what lets `Retry` act on it. To check for a thrown error, copy it into a variable typed `unknown` first, as in `const error: unknown = result.error`, since TypeScript refuses `instanceof Error` on an error type made only of strings, or on a flow that declares none.
+
+To type what a Command's function returns, such as a JSON response, write the function's result type, as in `Command((): Promise<User | null> => fetchJson(url), next)`. `Command<User | null>(…)` also compiles, but with some type arguments given TypeScript infers none of the others, so that Command's errors are typed `unknown`, which hides the rest of the union.
 
 Value types are checked through the pipeline too, so a step that reads a field the previous step does not return is a compile error. This only works while every step uses the value it receives. A step written as `() => doSomething(outer)` ignores it, and the types stop being checked at that point.
 
@@ -556,7 +784,7 @@ const findProduct = (productId: string): Effect<Product, 'not_found', AppContext
 const result = await runEffect(findProduct('abc'), { tenant: 'acme', requestId: '123' });
 ```
 
-Every step's context counts, so a pipeline needs all the contexts its steps read, even when the first step reads none. `runEffect` requires a context whenever the flow reads one, since the flow would otherwise get an empty object.
+Every step's context counts, so a pipeline needs all the contexts its steps read, even when the first step reads none, and a `Parallel` needs every context its branches read. `runEffect` requires a context whenever the flow reads one, since the flow would otherwise get an empty object.
 
 ## Why Pure Effect
 
@@ -603,11 +831,11 @@ Returns `{ type: 'Failure', error, initialInput }`. Stops the pipeline immediate
 
 Returns `{ type: 'Command', cmd, next, meta }`.
 
-- `cmd`: A function (sync or async) that performs the side effect. Inside a `Parallel` branch it is called with an `AbortSignal` that fires when a sibling branch fails; elsewhere it is called with no arguments. A function passed by name gets the signal as its first argument, so wrap one that takes an optional argument (see [Limitations](#limitations)).
-- `next`: Receives the result of `cmd` and returns the next Effect. Optional, defaulting to `(result) => Success(result)`.
-- `meta`: Optional metadata, passed to `onBeforeCommand`. A string `meta.name` becomes the Command's identity. Otherwise, the name of the function is used (`cmd.name`).
+- `cmd`: the function, sync or async, that does the I/O. Inside a `Parallel` branch it gets an `AbortSignal` that fires when a sibling fails, and elsewhere no argument, so wrap a function that takes an optional first argument (see [Limitations](#limitations)).
+- `next`: receives `cmd`'s result and returns the next Effect; by default `(result) => Success(result)`.
+- `meta`: metadata passed to `onBeforeCommand`. A string `meta.name` names the Command.
 
-**Every Command needs a name.** Test assertions, trace entries, replay matching, and telemetry spans all use it. It is chosen in this order:
+**Every Command needs a name**, which tests, traces, replay matching and telemetry all use. It is `meta.name`, else the function's name, else `'anonymous'`:
 
 ```js
 Command(cmdFn, next, { name: 'chargeCard' }); // 1. meta.name, independent of how cmdFn was written
@@ -617,7 +845,11 @@ Command(function cmdChargeCard() {
 Command(() => api.charge(), next); // 3. neither, so 'anonymous'
 ```
 
-Use `meta.name` in code that gets minified, since minifiers rename functions and would rename every step in every trace. Otherwise, naming the function is fine, and is what the examples do.
+Use `meta.name` in code that gets minified, since a minifier renames functions and with them every step in every trace. Otherwise naming the function is enough, as the examples do: an arrow assigned to a `const` first, as in `const cmdChargeCard = () => api.charge()`, takes the `const`'s name. An inline arrow does not, and a replay cannot tell two `'anonymous'` Commands apart, so a refactor that swaps them replays without complaint, each handed the other's recorded result.
+
+#### `commandName(command)`
+
+Returns a Command's name, chosen in the order above, so a test checks a step by the name its trace would record: `assert.equal(commandName(step), 'cmdFindUser')`. Anything but a Command throws an `EffectTypeError`.
 
 #### `Ask(nextFn)`
 
@@ -637,29 +869,27 @@ An option set to `undefined` keeps its default.
 
 #### `Parallel(effects, next?, options?)`
 
-Returns `{ type: 'Parallel', effects, next, options }`. Runs all effects at the same time. `next` receives the array of success values, in order, and is optional, defaulting to `(values) => Success(values)` as with `Command`. The first branch to fail cancels the others and its `Failure` is returned; `next` is not called. Which branch fails first depends on timing, so it is recorded, and a replay returns the same one. Each branch's Commands receive an `AbortSignal` as their only argument, so I/O that accepts it can be stopped while running; see [Running Effects in Parallel](#running-effects-in-parallel).
+Returns `{ type: 'Parallel', effects, next, options }`, which runs the branches at the same time and hands `next` their values in order; by default `(values) => Success(values)`. The first branch to fail cancels the others and its `Failure` is the result, with `next` skipped. Which branch that is depends on timing, so it is recorded, and a replay returns the same one. Each branch's Commands get an `AbortSignal` to pass to their I/O; see [Running Effects in Parallel](#running-effects-in-parallel).
 
-The second argument can be `next` or the options, so `Parallel(effects, { limit: 5 })` works.
+The second argument is `next` or the options, so `Parallel(effects, { limit: 5 })` works; after the options, a third argument throws.
 
-- `limit`: the most branches running at once. Results and recorded paths stay in array order, so a limit changes only the pacing. A value that is not a positive integer throws a `TypeError`.
-- `settled`: run every branch to the end and pass `next` one outcome per branch, `Success` or `Failure`, in array order. No branch cancels the others, and the `Parallel` never fails because of a branch. An `EffectTypeError` still escapes, because a malformed flow is a bug, not a branch outcome.
+- `limit`: the most branches running at once, a positive integer. Results and recorded paths stay in array order, so it changes only the pacing.
+- `settled`: run every branch to the end and hand `next` one `Success` or `Failure` per branch, in array order: no branch cancels the others or fails the `Parallel`. A bug still rejects the run, since a step or `next` that throws, or returns something other than an Effect, is not a branch outcome.
 
 ### Building pipelines
 
 #### `effectPipe(...functions)`
 
-Composes functions into a sequential pipeline. Each function receives the unwrapped `Success` value from the previous step, and a `Failure` from any step stops the pipeline.
-
-A step does not have to use the value it receives. In JavaScript, closing over something from the enclosing scope is fine:
+Composes steps into a pipeline: each step gets the previous step's `Success` value, and a `Failure` from any step stops it. A step may ignore the value it gets and close over the enclosing scope instead, which is fine in JavaScript:
 
 ```js
 // The last step ignores what came before and uses the enclosing input instead.
 const registerUserFlow = (input) => effectPipe(validateRegistration, () => saveUser(input))(input);
 ```
 
-In TypeScript, types stop being checked at that step, because a function that ignores its parameter puts no constraint on the step before it. See [TypeScript: Typed Errors and Context](#typescript-typed-errors-and-context). Passing the value through every step keeps the whole pipeline checked, which is why the [Quick Start](#quick-start) does it.
+In TypeScript, type checking stops at that step, since a function that ignores its parameter constrains nothing before it; passing the value through every step, as the [Quick Start](#quick-start) does, keeps the whole pipeline checked. See [TypeScript: Typed Errors and Context](#typescript-typed-errors-and-context).
 
-One shape to avoid in either language:
+In either language, a Command a step builds and does not return never runs, and any `Failure` it would have produced is lost:
 
 ```js
 (value) => {
@@ -668,47 +898,44 @@ One shape to avoid in either language:
 };
 ```
 
-A Command is only data, so one that is created and not returned never runs, and any `Failure` it would have produced is lost. Return the Command, and have its `next` return the value the rest of the pipeline needs.
+Return the Command, and have its `next` return the value the rest of the pipeline needs.
 
 ### Running a flow
 
 #### `runEffect(effect, context?, callConfig?)`
 
-Walks the flow, runs each Command with `async/await`, resolves `Ask` with the supplied `context`, and returns the final `Success` or `Failure`.
+Runs a flow and resolves with its `Success` or `Failure`.
 
-- `context`: Passed to `Ask`'s next function and to `onBeforeCommand`. `context.flowName` names the workflow in telemetry.
-- `callConfig`: Per-call `onStep`, `onRun`, and `onBeforeCommand`, added to the `configureEffect` wiring unless `inherit: false`, which ignores that wiring for the run. A `retry` key throws a `TypeError`: retry options are per-use, passed to `Retry`. See [`configureEffect`](#configureeffectconfigs).
-- `onRun` fires once per `runEffect` call. Retry attempts run inside that one span.
+- `context`: what `Ask` reads, also passed to `onBeforeCommand`. `context.flowName` names the run in traces and telemetry.
+- `callConfig`: `onStep`, `onRun` and `onBeforeCommand` for this call only, added to the `configureEffect` wiring, or used alone with `inherit: false`; see [`configureEffect`](#configureeffectconfigs). `onRun` wraps the run once, retries included. A `retry` key throws a `TypeError`, since retry options belong to each `Retry`.
 
-A step that returns something other than an Effect is a bug, so `runEffect` throws an `EffectTypeError` naming the step instead of returning a `Failure`:
+A flow that is not made of Effects is a bug, so `runEffect` rejects with an `EffectTypeError` that says where, rather than returning a `Failure`:
 
 ```
 Step 'validateRegistration' returned a plain object. Return Success, Failure, Command, Ask,
 Retry, or Parallel: a plain value has to be wrapped, as in Success(value).
 ```
 
-The same check catches a missing `return`, a Command's next function returning a plain value, a step or next function written as `async` (it returns a Promise, so do the awaited work in a Command instead), and `runEffect(flow)` where `runEffect(flow(input))` was meant. The building blocks check their own arguments as the flow is built, before any of its I/O runs: `Command(db.findUser(email))`, which makes the call while building the flow, `Command(fn, { name })` with the metadata where `next` goes, a `Parallel` given something other than an array of Effects, and an `effectPipe` step that is not a function each throw an `EffectTypeError` naming the mistake. A Command whose function throws is still a `Failure`. A throw from a `next` function or a pure step is also a bug, and `runEffect` rejects with the error as thrown.
+That covers a missing `return`, a `next` that returns a plain value, a step or `next` written as `async` (do the awaited work in a Command instead), and `runEffect(flow)` where `runEffect(flow(input))` was meant. The building blocks check their arguments as the flow is built, before any of its I/O runs, so `Command(db.findUser(email))`, which makes the call while the flow is built, `Command(fn, { name })`, with the metadata in `next`'s place, and a `Parallel` or `effectPipe` given the wrong thing each throw an `EffectTypeError` there. A throw from a Command's function, or from an `onBeforeCommand` veto, is a `Failure`; a throw from a `next` or a pure step is a bug too, and `runEffect` rejects with it as thrown.
 
 #### `configureEffect(...configs)`
 
-- `onRun(effect, pipeline, flowName)` wraps the entire workflow; must `await pipeline()` and return its result.
-- `onStep(name, type, op, path)` wraps each Command; must `await op()` and return its result. A hook that calls another hook passes `path` on, since a replay matches steps on it. `op()` returns a promise, even for a synchronous Command. Returning a value _without_ calling `op()` is how replay works. A throw after `op()` succeeded is a bug in the hook: the run rejects, and `Retry` does not run the Command again. So is returning `undefined` after `op()` returned a value, which is what a hook that forgot its `return` does: the run rejects with a `TypeError` instead of continuing as though the Command had returned nothing. A throw without calling `op()` counts as the Command failing.
-- `onStep` also wraps each `Parallel`, with `name` and `type` both `'Parallel'`. Its `op()` runs the branches, so a hook must call it; a hook that returns without calling it makes the run reject with a `TypeError`. It returns which branch, if any, cancelled the others, such as `{ cancelled: true, branch: 0 }`, and it returns even when a branch threw, since the run rejects only after the hook has returned. Telemetry gets one span per `Parallel`, with the spans of its branches' Commands inside it, marked as an error when the `Parallel` was cancelled.
-- `onBeforeCommand(command, context)` fires before each Command; throw to abort. The run returns a `Failure` carrying the thrown error, and `Retry` does not retry it.
-
-It only configures hooks. Retry options are passed to `Retry(effect, options)`, and a `retry` key here throws a `TypeError`.
-
-Each call adds a layer of hooks on top of those already installed and returns a function that removes that layer. Passing several configurations to one call is the same as calling it once for each, so these two forms are equivalent:
+Adds a layer of hooks for the whole process and returns a function that removes it. Several configurations passed to one call form one layer, the same as installing each on its own. Removing a layer removes only that layer, even when others were installed after it, so a library can add and remove its own hooks without touching the application's. `configureEffect()` with no arguments removes every layer, and a call whose arguments are all `undefined`, such as `configureEffect(flag ? hooks : undefined)`, changes nothing. A `retry` key throws a `TypeError`, since retry options belong to each `Retry`.
 
 ```js
-configureEffect(telemetryHooks(), recordingHooks({ sink }));
-
-// or, as two layers:
-configureEffect(telemetryHooks());
-configureEffect(recordingHooks({ sink }));
+const remove = configureEffect(telemetryHooks(), recordingHooks({ sink }));
+// the same as configureEffect(telemetryHooks()) followed by configureEffect(recordingHooks({ sink }))
+remove();
 ```
 
-This is the order the hooks run in during one `runEffect`:
+- `onRun(effect, pipeline, flowName)`: wraps the whole run. It must `await pipeline()` and return its result.
+- `onStep(name, type, op, path)`: wraps each Command, and each `Parallel` with `name` and `type` both `'Parallel'`. It must `await op()` and return its result, and pass `path` on to any hook it calls, since a replay matches steps on it.
+    - For a Command, `op()` returns a promise, even for a synchronous function. Returning a value without calling `op()` answers for the Command, which is how replay works, and throwing without calling it counts as the Command failing.
+    - A throw after `op()` succeeded, or `undefined` returned in place of its value, as a hook that forgot its `return` does, is a bug in the hook: the run rejects, and `Retry` does not run the Command again.
+    - For a `Parallel`, `op()` runs the branches, so a hook must call it or the run rejects with a `TypeError`. It returns which branch, if any, cancelled the others, as in `{ cancelled: true, branch: 0 }`, even when a branch threw.
+- `onBeforeCommand(command, context)`: runs before each Command. A throw vetoes the Command: the run returns a `Failure` carrying the thrown error, and `Retry` does not retry it.
+
+Layers run in the order they were installed, the first outermost, so a result or a thrown error unwinds from the innermost hook out:
 
 ```
 runEffect(flow(input))
@@ -729,15 +956,7 @@ runEffect(flow(input))
 ├─ telemetry.onRun returns
 ```
 
-Removing a layer removes only that layer, even if others were installed after it, so a library can add its own hooks and remove them later without affecting the application's. Calling `configureEffect()` with no arguments removes every layer. A call whose arguments are all `undefined`, such as a conditional `configureEffect(flag ? hooks : undefined)`, installs nothing and removes nothing.
-
-```js
-const remove = configureEffect(telemetryHooks());
-// ... later
-remove();
-```
-
-**Per-call hooks.** By default, the hooks in a `callConfig` are merged with the configured ones by the same rules: configured wrappers go outside, and configured `onBeforeCommand` hooks run first. `inherit: false` leaves the configured hooks out of the run. With configured hooks `C` and a call `K` that supplies only `onStep`:
+**Per-call hooks.** The hooks in a `callConfig` are merged over the configured ones by the same rules, the configured wrappers outside and the configured `onBeforeCommand` hooks first. `inherit: false` leaves the configured hooks out. With configured hooks `C` and a call `K` that supplies only `onStep`:
 
 ```
                   inherit: true (default)        inherit: false
@@ -747,17 +966,29 @@ onBeforeCommand   C.onBeforeCommand              (none)
 onStep            C.onStep( K.onStep( cmd ) )    K.onStep
 ```
 
-`recordEffect` inherits, so recording inside an application that already has tracing still produces spans. `replayEffect` passes `inherit: false` unless `hooks: true`.
+`recordEffect` inherits, so recording inside an application that already traces still produces spans. `replayEffect` passes `inherit: false` unless `hooks: true`.
 
 ### Recording and replay
 
 #### `recorder(options?)`
 
-Returns `{ onStep, entries, toTrace }`. Pass `onStep` to `runEffect` to record what every Command returned. A recorder holds the steps of every run it sees, so installed with `configureEffect` for a whole application it mixes requests into one trace, which a replay refuses; give each run its own recorder, as `examples/recording-example.js` does. `toTrace(meta)` packages the trace, and it copies the `initialInput` and `context` you give it at the moment you call it. A value that cannot be copied whole, such as a context holding a logger function, is copied around the parts that cannot be copied, which are kept as they are. If a Command can change either, for example an ORM save that adds an id to the object it was given, call `toTrace` with them before the run and take `trace` and `dropped` from a second call afterwards, as `recordEffect` does.
+Returns `{ onStep, entries, toTrace }`, a hook that records every step of a run, passed as `runEffect(flow, context, { onStep })`. Give each run its own recorder: one shared by a whole application mixes requests into one trace, which a replay refuses. `recordEffect` and the [recording example](https://github.com/aycangulez/pure-effect/blob/main/examples/recording-example.js) both do this for you.
 
-Each entry is `{ command, path, result, durationMs }`, or `{ command, path, threw: true, error, durationMs }` when the Command threw, so a trace also shows which step was slow. `threw` is what marks a step that threw, since a JSON copy of the trace drops `error` when the Command threw `undefined`; an entry with `error` and no `threw`, as older traces have, still counts as one. `path` is the Command's position in the flow, which is what a replay matches on. Each `Parallel` adds one entry, `{ command: 'Parallel', path, result }`, whose result says which branch, if any, cancelled the others: `{ cancelled: false }`, `{ cancelled: true, branch: 0 }`, or `branch: null` when an enclosing `Parallel` cancelled it. `redact` is not called for it, since it holds no data from your flow. Results are copied when recorded, so a later step that changes a returned object does not change the trace, and copied again when a replay hands them to the flow. In a value that cannot be copied whole, such as an object holding a function, the parts that cannot be copied are kept as they are. The copy keeps data but not classes; see [Recording in Production](#recording-in-production). Recording never changes the outcome of a run: if `redact` throws, the step is recorded as `'[redaction failed]'` and the flow carries on.
+- `onStep`: the hook. Recording never changes a run's outcome; a value `redact` fails on is recorded as `'[redaction failed]'`.
+- `entries`: the steps recorded so far, one per Command and one per `Parallel`. `path` is the step's position in the flow, which a replay matches on; an older entry with `error` and no `threw` still counts as a throw.
 
-- `options.redact(value, name, kind)`: Removes sensitive data from a trace. It receives every value the trace stores, and `kind` says which one it is. Each value is a copy, so `redact` can delete fields in place or return a new value, and the flow still sees what it was given:
+```text
+{ command, path, result, durationMs }                          a Command that returned
+{ command, path, threw: true, error, durationMs }              a Command that threw
+{ command: 'Parallel', path, result: { cancelled, branch } }   which branch, if any, cancelled the others
+```
+
+- `toTrace(meta)`: the entries as a trace, with `meta`'s `initialInput`, `context`, `flowName` and `version`, copied when it is called (a part that cannot be copied, such as a function, is kept as it is). If a Command can change the input or the context, as an ORM save that adds an id does, call it before the run for those and again afterwards for the entries, as `recordEffect` does.
+- `options.redact(value, name, kind)`: returns what the trace stores in place of `value`. `kind` is `'result'`, `'error'`, `'initialInput'` or `'context'`, and `name` is the Command's name, or the kind. It gets a copy, so changing it in place is safe.
+- `options.maxEntries`: the most entries a trace keeps; the rest are counted in `dropped`, and a replay stops at the first step the trace lacks.
+- `options.stack`: record stack traces for thrown errors (off by default).
+
+Results are copied as they are recorded, so a later step cannot change them; see [Recording in Production](#recording-in-production) for what a copy keeps. When writing `redact`, check a value before replacing a field in it, since `{ ...value, email: '[redacted]' }` turns a `null` into an object and the replay takes the other branch:
 
 ```js
 // Masks a field only where there is one, so a lookup that found nothing still records null.
@@ -765,7 +996,7 @@ const mask = (value, field) =>
     value && typeof value === 'object' && field in value ? { ...value, [field]: '[redacted]' } : value;
 
 const redact = (value, name, kind) => {
-    if (kind === 'initialInput') return mask(value, 'password');
+    if (kind === 'initialInput') return mask(value, 'cardNumber');
     if (kind === 'context') return mask(value, 'authToken');
     if (kind === 'error') return mask(value, 'attempted');
     return name === 'cmdFetchUser' ? mask(value, 'email') : value;
@@ -776,33 +1007,28 @@ assert.equal(redact(null, 'cmdFetchUser', 'result'), null); // still nothing fou
 assert.equal(redact('card_declined', 'cmdCharge', 'error'), 'card_declined'); // still a string
 ```
 
-Check the value before replacing a field in it. `{ ...value, email: '[redacted]' }` turns a `null` into an object, so a lookup that found nothing replays as one that found a user, and the flow takes the other branch. It also turns an error thrown as a string into an object holding its letters.
-
-For `'result'` and `'error'`, `name` is the Command's name; for `'initialInput'` and `'context'`, it is the kind. Redacting `initialInput` rarely breaks replay, since Commands are not run; it matters only if a step branches on the removed field. Redacting `context` breaks `Ask` replay if a step reads what you removed.
-
-- `options.maxEntries`: Cap trace length; overflow is counted in `dropped`.
-- `options.stack`: Record stack traces for thrown errors (off by default).
+A replay rebuilds the flow from the redacted input and context, so a field a step checks, such as a password, needs a stand-in the check treats the same way, as the recording example in [Recording in Production](#recording-in-production) does, and a context field an `Ask` reads should stay.
 
 #### `recordEffect(flowFn, initialInput, options?)`
 
-Runs a flow for real while recording, returning `{ result, trace }`. Accepts `recorder` options plus `context` and `version`. For tests and scripts. To record an application without changing call sites, use the wiring in `examples/recording-example.js`, which gives each run its own recorder.
+Runs a flow for real while recording, returning `{ result, trace }`. Accepts `recorder` options plus `context` and `version`. For tests and scripts. To record an application without changing call sites, use the wiring in [`examples/recording-example.js`](https://github.com/aycangulez/pure-effect/blob/main/examples/recording-example.js), which gives each run its own recorder.
 
 #### `replayEffect(effect, traceOrResolver, options?)`
 
-Replays a flow, feeding recorded results to Commands instead of running them. Returns `{ result, unreached }`: the flow's outcome, and the recorded entries the flow never asked for (empty when every step was reached). A flow that stops early raises no `TimeParadox`, so `unreached` is where that shows up. With a resolver, only `{ result }` is returned, since a resolver cannot list what it holds.
+Runs a flow with each Command answered from a trace instead of run, and returns `{ result, unreached }`: the flow's outcome, and the recorded steps it never asked for, which is where a flow that stops early shows up. A flow that no longer matches the trace ends in a `Failure` whose `error` is a `TimeParadox`, or a `ReplayError` for a step the trace lacks. Neither is thrown, so a test checks `error.name`, which tells them apart, and not only `result.type`. A malformed trace rejects with a `ReplayError`.
 
-- `traceOrResolver`: a trace (or bare entries array) to replay directly, or a resolver function for traces stored in some other shape. A resolver returns `{ result }`, `{ error }`, or `undefined` if the step is unrecorded. A resolver is also asked about each `Parallel`, with `step.type` set to `'Parallel'`: answering with `{ result }` holding the recorded cancellation replays it as production decided, and anything else replays that `Parallel` by timing, as before. A malformed trace rejects with a `ReplayError`.
-- `options.context`: context for `Ask`. With a trace it defaults to the context the trace recorded, so pass one only to replay with a different one. A resolver has no recorded context, so pass it one if the flow reads `Ask`.
-- `options.onMissing`: `'throw'` (default) fails on an unrecorded step; `'execute'` runs the real Command, giving a recorded prefix with a live tail. Use it for a trace that was cut short, such as one capped by `maxEntries`. After a flow changes shape, for example when a Command is newly wrapped in `Retry`, its steps sit at new positions, so `'execute'` would run all of them live and leave the recorded ones unused: record the flow again instead.
+- `traceOrResolver`: a trace, its bare entries, or a resolver, a function that answers each step with `{ result }`, `{ error }`, or `undefined` for a step it has no record of, so a trace stored in any shape can be replayed. With a resolver, `unreached` is absent, since a resolver cannot list what it holds. A resolver is also asked about each `Parallel`, with `step.type` set to `'Parallel'`: answering with the recorded cancellation as `{ result }` replays it as production decided, and anything else replays it by timing.
+- `options.context`: the context for `Ask`, by default the one the trace recorded. A resolver has none, so pass one if the flow reads `Ask`.
+- `options.onMissing`: `'throw'` (default) stops at a step the trace lacks. `'execute'` runs its Command for real, so use it only where Commands reach test doubles or only read. A trace can lack a step because a hook vetoed it in production, because it was added to the flow since the recording, or because the recorder dropped it under `maxEntries`; a trace that dropped entries refuses `'execute'`, so record the flow again with a higher `maxEntries`. After a flow changes shape, as when a Command is newly wrapped in `Retry`, every step sits at a new position and `'execute'` would run them all live: record the flow again instead.
 - `options.fastRetry` (default `true`): strip `Retry` delays.
-- `options.hooks` (default `false`): run the replay inside the configured hooks, so they see the replayed steps, a configured recorder included. When off, the configured hooks are skipped, so a replay cannot reach a telemetry backend or a trace sink.
-- `options.onResolved(step, outcome)`: observe each replayed step. If it throws, the replay stops there and `replayEffect` rejects with that error; it never changes a step's outcome.
+- `options.hooks` (default `false`): run the replay inside the configured hooks, a configured recorder included, so they see the replayed steps. Off, a replay cannot reach a telemetry backend or a trace sink.
+- `options.onResolved(step, outcome)`: observes each replayed step. A throw stops the replay, and `replayEffect` rejects with it; it never changes an outcome.
 
-A trace whose entries carry no `path` (written by hand, or recorded before paths existed) is matched by position, which works for a sequential flow; a `Parallel` step in such a trace is refused with a `ReplayError`, since the order branches finish in cannot tell them apart.
+A trace whose entries have no `path`, written by hand or recorded before paths existed, is matched by position. That works for a sequential flow, and a `Parallel` step in such a trace is refused with a `ReplayError`, since the order branches finish in cannot tell them apart.
 
 #### `timeTravel(flowFn, traceLog, options?)`
 
-Replays a trace and narrates each step with its recorded duration, naming any recorded steps that were never reached and warning when the trace's `version` differs from `options.version`. Returns the flow's outcome; for the unreached entries as data, use `replayEffect`. Takes `options.context` to override the trace's, and `options.log` in place of `console.log`.
+Replays a trace and narrates each step with its recorded duration, naming any recorded steps that were never reached, and warning when the trace's `version` differs from `options.version` or when steps are named `'anonymous'`. Returns the flow's outcome; for the unreached entries as data, use `replayEffect`. Takes `options.context` to override the trace's, and `options.log` in place of `console.log`.
 
 ## Limitations
 

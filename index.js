@@ -111,11 +111,15 @@ const Command = (cmd, next, meta) => {
 /**
  * The name a Command is known by: what a trace records, what replay matches on, and what a
  * telemetry span is called. A non-empty string `meta.name`, else `cmd.name`, else 'anonymous'.
+ * Exported so a test walking a flow checks each step by the same rule.
  *
  * @param {CommandState} eff
  * @returns {string}
  */
 const commandName = (eff) => {
+    if (eff?.type !== 'Command') {
+        throw malformed(`commandName expects a Command, got ${describeArgument(eff)}.`, eff);
+    }
     const meta = eff.meta;
     const named = isObject(meta) ? meta.name : undefined;
     return typeof named === 'string' && named !== '' ? named : eff.cmd.name || 'anonymous';
@@ -198,11 +202,22 @@ const Parallel = (effects, nextOrOptions, maybeOptions) => {
     const hasNext = typeof nextOrOptions === 'function';
     // A caller forwarding an absent `next` still passes its options third, as the signature reads.
     const nextSkipped = nextOrOptions == null;
-    if (!hasNext && !nextSkipped && !isOptionsObject(nextOrOptions)) {
+    const optionsSecond = !hasNext && !nextSkipped;
+    if (optionsSecond && !isOptionsObject(nextOrOptions)) {
         const got = describeArgument(nextOrOptions);
         throw malformed(`Parallel's second argument must be next or the options, got ${got}.`, nextOrOptions);
     }
-    const options = hasNext || nextSkipped ? maybeOptions : nextOrOptions;
+    // Nothing reads a third argument after the options, so a `next` passed there would silently be skipped.
+    if (optionsSecond && maybeOptions != null) {
+        throw malformed(
+            typeof maybeOptions === 'function'
+                ? "Parallel's next goes second and its options third: Parallel(effects, next, options)."
+                : `Parallel takes one options object, and with the options second its third argument, ` +
+                      `${describeArgument(maybeOptions)}, would be ignored.`,
+            maybeOptions
+        );
+    }
+    const options = optionsSecond ? nextOrOptions : maybeOptions;
     if (options != null && !isOptionsObject(options)) {
         throw malformed(`Parallel's options must be an object, got ${describeArgument(options)}.`, options);
     }
@@ -344,6 +359,16 @@ const effectTypeError = (value, source) =>
     );
 
 /**
+ * Names the node whose `next` returned a value, for an error message: a Command by its name, any other by its type.
+ * @param {Effect} node
+ * @returns {string}
+ */
+const nextOf = (node) =>
+    node.type === 'Command'
+        ? `The next of Command '${commandName(node)}'`
+        : `The next of ${node.type === 'Ask' ? 'an' : 'a'} ${node.type}`;
+
+/**
  * A Success or a Failure: a flow with nothing left to run.
  * @param {any} value
  * @returns {value is SuccessState | FailureState}
@@ -380,16 +405,18 @@ const asEffect = (value, source) => {
  * @param {Effect} effect - The current Effect object
  * @param {(value: any) => Effect} fn - The next function to run if the current effect is a Success
  * @param {any} [initialInput] - The pipeline's starting value, stamped on every node but a Success
+ * @param {Effect} [from] - The node whose `next` returned `effect`, which an error names
  * @returns {Effect} The composed Effect
  */
-const chain = (effect, fn, initialInput) => {
+const chain = (effect, fn, initialInput, from) => {
+    const source = () => (from ? nextOf(from) : 'A continuation');
     // Overwrites a sub-pipeline's own stamp, so the root and a Failure at any depth carry the input of the
     // flow that was actually called. A Success stays bare, so `deepEqual(result, Success(v))` always holds.
     const withII = (/** @type {Effect} */ e) =>
         initialInput !== undefined && e.type !== 'Success' ? { ...e, initialInput } : e;
 
     // Checked before `effect.type` is read, which would otherwise throw a bare TypeError naming no step.
-    if (effect == null) return asEffect(effect, 'A continuation');
+    if (effect == null) return asEffect(effect, source());
 
     switch (effect.type) {
         case 'Success':
@@ -397,23 +424,23 @@ const chain = (effect, fn, initialInput) => {
         case 'Failure':
             return withII(effect);
         case 'Command': {
-            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput);
+            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput, effect);
             return withII(Command(effect.cmd, next, effect.meta));
         }
         case 'Ask': {
-            const next = (/** @type {any} */ ctx) => chain(effect.next(ctx), fn, initialInput);
+            const next = (/** @type {any} */ ctx) => chain(effect.next(ctx), fn, initialInput, effect);
             return withII(Ask(next));
         }
         case 'Retry': {
-            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput);
+            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput, effect);
             return withII({ ...effect, next });
         }
         case 'Parallel': {
-            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput);
+            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput, effect);
             return withII({ ...effect, next });
         }
         default:
-            return asEffect(effect, 'A continuation');
+            return asEffect(effect, source());
     }
 };
 
@@ -817,10 +844,13 @@ const interpret =
          */
         async function execute(eff, signal, path = '') {
             let step = 0;
+            /** @type {Effect | undefined} The node whose `next` returned `eff`, which an error names. */
+            let from;
             while (isPending(eff)) {
                 // Checked before every node: a Command already in flight cannot be stopped, but the next never starts.
                 if (signal?.aborted) return cancelledBranch(eff.initialInput);
                 if (eff.type === 'Ask') {
+                    from = eff;
                     eff = eff.next(context);
                     continue;
                 }
@@ -834,10 +864,11 @@ const interpret =
                 if (outcome.type !== 'Success') return outcome;
                 // Outside every catch: `next` and the pure steps it reaches are code, not I/O, so a throw there
                 // rejects the run.
+                from = eff;
                 eff = eff.next(outcome.value);
             }
             if (isOutcome(eff)) return eff;
-            throw effectTypeError(eff, 'The flow');
+            throw effectTypeError(eff, from ? nextOf(from) : 'The flow');
         }
 
         /**
@@ -1615,7 +1646,9 @@ const fromTrace = (traceLog, options = {}) => {
  *           reach a telemetry backend or a guardrail that performs I/O.
  * @property {'throw' | 'execute'} [onMissing] - What to do when the resolver has no recording for a step.
  *           `'throw'` (default) fails the replay, which makes side effects impossible for the whole run.
- *           `'execute'` runs the real Command, giving partial replay: recorded prefix, live tail.
+ *           `'execute'` runs the real Command, so pass it only where the Commands reach test doubles or only
+ *           read. A trace that dropped entries under `maxEntries` refuses it, since a step it lacks may be one
+ *           production ran.
  * @property {(step: ReplayStep, outcome: ReplayOutcome | undefined) => void} [onResolved] - Observes each step.
  */
 
@@ -1661,10 +1694,22 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     const { resolve, missing } = fromResolver
         ? { resolve: traceOrResolver, missing: undefined }
         : fromTrace(traceOrResolver, { onEntry: (entry) => void reached.add(entry) });
+    // Only a trace log carries metadata; a bare entries array and a Resolver carry none.
+    const traceLog = fromResolver || Array.isArray(traceOrResolver) ? undefined : traceOrResolver;
     // Defaults to the trace's context: an `Ask` gate replayed with another one takes another branch, and
     // no paradox flags it.
-    const recorded = fromResolver || Array.isArray(traceOrResolver) ? undefined : traceOrResolver.context;
-    const context = options.context ?? recorded ?? {};
+    const context = options.context ?? traceLog?.context ?? {};
+    // A trace capped by `maxEntries` lacks steps production ran, so running a missing step live repeats
+    // production's I/O: a billing batch replayed that way charged and invoiced subscriptions again.
+    const droppedEntries = Number(traceLog?.dropped) || 0;
+    const capped = droppedEntries > 0;
+    if (capped && onMissing === 'execute') {
+        throw replayError(
+            `The trace dropped ${droppedEntries} entries under maxEntries, so a step it lacks may be one ` +
+                "production ran, and onMissing: 'execute' would run it again. Replay without it to stop at the " +
+                'first missing step, or record the flow with a higher maxEntries.'
+        );
+    }
     let index = 0;
     // What `onResolved` threw. It stops the replay, which rejects with it, rather than counting as the
     // Command failing, which would let a Retry ask for an attempt production never made. Cast rather than
@@ -1692,15 +1737,21 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
         if (outcome === undefined) {
             if (onMissing !== 'execute') {
                 const what = missing ? missing(step) : `No recorded outcome for '${name}' at step ${step.index}`;
-                // The option is named with its one safe use, since a step with no entry may be one production
-                // never ran, and running it live would do I/O production refused.
-                throw replayError(
-                    `${what}; refusing to run the real Command. Production may never have run it: a Command ` +
-                        'an onBeforeCommand hook vetoed leaves no entry, and neither does a step added since the ' +
-                        "recording. Pass onMissing: 'execute' to run unrecorded steps live only when the trace was " +
-                        'cut short, as by maxEntries.',
-                    { command: name, index: step.index, path }
-                );
+                // Why the step may be missing decides the fix. A capped trace needs a higher cap, since the step
+                // may be one production ran; any other missing step may be one production never ran, and
+                // running it live against production would do I/O production refused.
+                const why = capped
+                    ? `The trace dropped ${droppedEntries} entries under maxEntries, so production may have run ` +
+                      'this step and the recorder not kept it; record the flow with a higher maxEntries to ' +
+                      'replay past it.'
+                    : 'Production may never have run it: a Command an onBeforeCommand hook vetoed leaves no ' +
+                      "entry, and neither does a step added since the recording. onMissing: 'execute' runs such " +
+                      'steps for real, so pass it only where the Commands reach test doubles or only read.';
+                throw replayError(`${what}; refusing to run the real Command. ${why}`, {
+                    command: name,
+                    index: step.index,
+                    path
+                });
             }
             return await op();
         }
@@ -1767,6 +1818,15 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
                 'installed as a hook finds the input only on a flow built with effectPipe.'
         );
     }
+    // A replay tells steps apart by name, so two anonymous Commands that swapped places replay without complaint.
+    const anonymous = trace.filter((e) => e.command === 'anonymous').length;
+    if (anonymous > 0) {
+        log(
+            `Warning: ${anonymous} of the recorded steps are named 'anonymous', usually inline arrow Commands, so ` +
+                'this replay cannot tell them apart and would not notice two of them trading places. Name them with ' +
+                'a const or meta.name.'
+        );
+    }
     // Parallel decisions are not narrated as steps, so the header counts Commands to match the lines below.
     const commandCount = trace.filter((e) => !isDecisionEntry(e)).length;
     const stepsText = commandCount === 1 ? 'step' : 'steps';
@@ -1821,5 +1881,6 @@ export {
     recorder,
     recordEffect,
     replayEffect,
-    timeTravel
+    timeTravel,
+    commandName
 };

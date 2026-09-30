@@ -11,27 +11,20 @@ export type FailureState<E = unknown> = {
 };
 
 /**
- * Metadata attached to a Command. A string `name` is read by the interpreter as the Command's
- * identity for traces, replay matching, and telemetry spans; every other key is carried through
- * untouched for `onBeforeCommand`.
+ * Metadata for a Command. `name` is its name in traces, replays and spans; other keys reach `onBeforeCommand` as they
+ * are.
  */
 export type CommandMeta = { name?: string } & Record<string, unknown>;
 
 export type CommandState<R, T, E = unknown, Ctx = unknown> = {
     type: 'Command';
     /**
-     * Performs the side effect. Inside a `Parallel` branch it receives an `AbortSignal` that fires when a
-     * sibling branch fails; forward it to `fetch`, a driver, or an `AbortController`-aware client to have
-     * the work cancelled in flight. Ignoring it is fine and is what every thunk written before this did:
-     * the interpreter still refuses to start any *later* Command in a cancelled branch. Outside a
-     * `Parallel` no argument is passed at all.
+     * Makes the call. Inside a `Parallel` it gets an `AbortSignal` that fires when a sibling branch fails; pass it on
+     * to cancel the work.
      */
     cmd: (signal?: AbortSignal) => Promise<R> | R;
-    /**
-     * Method syntax, not a function-typed property, on every state's `next`: `strictFunctionTypes`
-     * checks a property's parameter contravariantly, which made a `CommandState<never, ...>` (a `cmd`
-     * that only throws) unassignable to `Effect`. Method parameters are bivariant, so it is accepted.
-     */
+    // A method rather than a function property, so a `cmd` that only throws still fits `Effect`.
+    /** Receives `cmd`'s result and returns the next step. */
     next(result: R): Effect<T, E, Ctx>;
     meta?: CommandMeta;
     initialInput?: unknown;
@@ -44,34 +37,31 @@ export type AskState<T, E = unknown, Ctx = unknown> = {
 };
 
 export type RetryOptions = {
+    /** Tries after the first, so `2` makes at most 3 calls. A positive integer, 3 by default. */
     attempts?: number;
+    /** Milliseconds before the first retry, 100 by default. */
     delay?: number;
+    /** Multiplies the wait before each later retry, so `2` doubles it. 1 by default, the same wait each time. */
     backoff?: number;
 };
 
 /**
- * `E` is the error the node contributes to its pipeline. A Retry contributes two kinds: an abort the
- * wrapped tree returned, which is not retried and leaves unwrapped, and the exhaustion failure that
- * follows an I/O fault the retry loop could not get past.
+ * `E` is what the Retry can fail with: an abort from the steps it wraps, or the exhaustion after its last attempt. `R`
+ * is what the retried steps succeed with, which `next` receives; it differs from `T` once a pipeline continues past it.
  */
-export type RetryState<T, E = unknown, Ctx = unknown> = {
+export type RetryState<T, E = unknown, Ctx = unknown, R = T> = {
     type: 'Retry';
-    effect: Effect<T, any, Ctx>;
-    options: RetryOptions & { onExhausted?: (error: RetryExhaustedError) => Effect<T, any, Ctx> };
-    next(value: T): Effect<T, E, Ctx>;
+    effect: Effect<R, any, Ctx>;
+    options: RetryOptions & { onExhausted?: (error: RetryExhaustedError) => Effect<R, any, Ctx> };
+    next(value: R): Effect<T, E, Ctx>;
     initialInput?: unknown;
 };
 
-/**
- * The error a `Retry` fails with once every attempt has hit an I/O fault. `lastError` is what the last
- * attempt threw: a Command's function throwing, or a nested `Retry` running out. It is never a `Failure`
- * a step returned, since that is an abort and is not retried, so the wrapped tree's error type cannot
- * reach it. Nothing declares what a function throws, so `Retry` leaves `Thrown` as `unknown`; pass it
- * only to annotate a value whose thrown type you already know.
- */
+/** The error a `Retry` fails with once every attempt has thrown. `lastError` is what the last attempt threw. */
 export type RetryExhaustedError<Thrown = unknown> = {
     retryExhausted: true;
     lastError: Thrown;
+    /** The `attempts` option: tries after the first, so the retried steps ran one more time than this. */
     attempts: number;
 };
 
@@ -82,24 +72,17 @@ export type ParallelOptions = {
     settled?: boolean;
 };
 
-/** What a settled `Parallel` hands to `next`: one outcome per branch, in array order. */
-export type ParallelOutcomes<T extends readonly unknown[], E> = {
-    [K in keyof T]: SuccessState<T[K]> | FailureState<E>;
-};
-
-/**
- * `V` is what `next` receives, which is the branch values normally and the branch outcomes under
- * `settled`. It defaults to `T`, so every non-settled use reads as it always did.
- */
+/** `V` is what `next` receives: the branch values, or their outcomes under `settled`. `BranchError` types `effects`. */
 export type ParallelState<
     T extends readonly unknown[],
     R,
     E = unknown,
     Ctx = unknown,
-    V extends readonly unknown[] = T
+    V extends readonly unknown[] = T,
+    BranchError = E
 > = {
     type: 'Parallel';
-    effects: { [K in keyof T]: Effect<T[K], E, Ctx> };
+    effects: { [K in keyof T]: Effect<T[K], BranchError, Ctx> };
     next(values: [...V]): Effect<R, E, Ctx>;
     options?: ParallelOptions;
     initialInput?: unknown;
@@ -110,1100 +93,1160 @@ export type Effect<T, E = unknown, Ctx = unknown> =
     | FailureState<E>
     | CommandState<any, T, E, Ctx>
     | AskState<T, E, Ctx>
-    | RetryState<T, E, Ctx>
-    | ParallelState<any, T, E, Ctx>;
+    | RetryState<T, E, Ctx, any>
+    | ParallelState<any, T, E, Ctx, any, any>;
 
+// No type parameters, so as the constraint on a callback's return it gives a call written inline there nothing to infer.
+/** Any Effect: a `Success`, `Failure`, `Command`, `Ask`, `Retry` or `Parallel`. */
+export type AnyEffect = { readonly type: 'Success' | 'Failure' | 'Command' | 'Ask' | 'Retry' | 'Parallel' };
+
+/** The value an Effect succeeds with. */
+export type EffectValue<X> =
+    X extends SuccessState<infer T>
+        ? T
+        : X extends CommandState<any, infer T, any, any>
+          ? T
+          : X extends AskState<infer T, any, any>
+            ? T
+            : X extends RetryState<infer T, any, any, any>
+              ? T
+              : X extends ParallelState<any, infer T, any, any, any, any>
+                ? T
+                : never;
+
+/** The error an Effect can fail with: what it returns as a `Failure`, not what a Command's function throws. */
+export type EffectError<X> =
+    X extends FailureState<infer E>
+        ? E
+        : X extends CommandState<any, any, infer E, any>
+          ? E
+          : X extends AskState<any, infer E, any>
+            ? E
+            : X extends RetryState<any, infer E, any, any>
+              ? E
+              : X extends ParallelState<any, any, infer E, any, any, any>
+                ? E
+                : never;
+
+/** The context an Effect reads, which is `unknown` for a `Success` or `Failure`, since they read none. */
+export type EffectContext<X> = [X] extends [SuccessState<any> | FailureState<any>]
+    ? unknown
+    : X extends CommandState<any, any, any, infer C>
+      ? C
+      : X extends AskState<any, any, infer C>
+        ? C
+        : X extends RetryState<any, any, infer C, any>
+          ? C
+          : X extends ParallelState<any, any, any, infer C, any, any>
+            ? C
+            : never;
+
+// Checked by a conditional, not a constraint: a constraint types an inline Ask's or Retry's error as any.
+/** The branches `Parallel` accepts: each one an Effect. */
+export type ParallelBranches<B> = B &
+    (B extends readonly Effect<any, any, any>[] ? unknown : readonly Effect<any, any, any>[]);
+
+/** The value of each branch, in array order: what `next` receives. */
+export type ParallelValues<B extends readonly unknown[]> = { -readonly [K in keyof B]: EffectValue<B[K]> };
+
+/** What a settled `Parallel` hands to `next`: one outcome per branch, in array order, with that branch's error. */
+export type ParallelOutcomes<B extends readonly unknown[]> = {
+    -readonly [K in keyof B]: SuccessState<EffectValue<B[K]>> | FailureState<EffectError<B[K]>>;
+};
+
+/** Every branch's context together, which is what `runEffect` needs for a `Parallel`. */
+export type ParallelContext<B extends readonly unknown[]> = {
+    [K in keyof B]: (context: EffectContext<B[K]>) => void;
+}[number] extends (context: infer Ctx) => void
+    ? Ctx
+    : unknown;
+
+/** Wraps a value for the next step. */
 export declare function Success<T>(value: T): SuccessState<T>;
 
-export declare function Failure<E = unknown>(error: E, initialInput?: unknown): FailureState<E>;
+/** Stops the pipeline with `error`. A literal keeps its exact type, and an object or array error is readonly. */
+export declare function Failure<const E = unknown>(error: E, initialInput?: unknown): FailureState<E>;
 
 /**
- * `next` is optional and defaults to `(result) => Success(result)`, which is what most Commands want.
- *
- * A `meta.name` becomes this Command's identity, which keeps it independent of how `cmd` was declared
- * and immune to minification. Without one the identity falls back to `cmd.name`, then to 'anonymous'.
- *
- * The first overload is the default `next`, where the value is the function's result. Without it, a
- * `Command(fn)` inside a step with an annotated return type had its value type inferred from the
- * annotation, as `unknown`, rather than from `fn`, and `Retry(Command(fn))` failed to compile there.
+ * Defers a side effect: `cmd` makes the call and `next` decides what follows; without `next` the result passes through.
+ * `meta.name` names it, else `cmd.name`.
  */
-export declare function Command<R, E = unknown, Ctx = unknown>(
+export declare function Command<R>(
     cmd: (signal?: AbortSignal) => Promise<R> | R,
     next?: undefined,
     meta?: CommandMeta
-): CommandState<R, R, E, Ctx>;
+): CommandState<R, R, never>;
 
+// `N` is what `next` returns, whole, so Failures of different shapes join; given explicitly, `T`, `E` and `Ctx` build it.
+export declare function Command<R, T = never, E = never, Ctx = unknown, N extends AnyEffect = Effect<T, E, Ctx>>(
+    cmd: (signal?: AbortSignal) => Promise<R> | R,
+    next?: (result: R) => N,
+    meta?: CommandMeta
+): CommandState<R, EffectValue<N>, EffectError<N>, EffectContext<N>>;
+
+/** For `Command<User | null>(fetchJson, next)`: given some type arguments, TypeScript infers none of the rest. */
 export declare function Command<R, T = R, E = unknown, Ctx = unknown>(
     cmd: (signal?: AbortSignal) => Promise<R> | R,
     next?: (result: R) => Effect<T, E, Ctx>,
     meta?: CommandMeta
 ): CommandState<R, T, E, Ctx>;
 
-export declare function Ask<T, E = unknown, Ctx = unknown>(
-    next: (context: Ctx) => Effect<T, E, Ctx>
-): AskState<T, E, Ctx>;
+/** The name a Command is known by in traces, replays and spans: `meta.name`, else `cmd.name`, else `'anonymous'`. */
+export declare function commandName(command: CommandState<any, any, any, any>): string;
+
+/** Reads the context passed to `runEffect`. Give the value, error and context types, or none. */
+export declare function Ask<T = never, E = never, Ctx = unknown, N extends AnyEffect = Effect<T, E, Ctx>>(
+    next: (context: Ctx) => N
+): AskState<EffectValue<N>, EffectError<N>, Ctx & EffectContext<N>>;
 
 /**
- * With `onExhausted`, the exhaustion failure never escapes: the fallback Effect runs instead, its
- * success feeds `next`, and its failure propagates unwrapped, so the node's declared error is the
- * fallback's own error type alongside `E`, since an abort the wrapped tree returned reaches neither
- * the retry loop nor the fallback and leaves as itself. `onExhausted` is a per-use option, and so is every other retry
- * option: there are no configured defaults for one to be carried by.
+ * Runs `effect` again when a Command in it throws, then runs `onExhausted` once the attempts run out. Give every type
+ * argument or none.
  */
-export declare function Retry<T, E = unknown, E2 = unknown, Ctx = unknown>(
+export declare function Retry<T, E = never, E2 = never, Ctx = unknown, N extends AnyEffect = Effect<T, E2, Ctx>>(
     effect: Effect<T, E, Ctx>,
-    options: RetryOptions & { onExhausted: (error: RetryExhaustedError) => Effect<T, E2, Ctx> }
-): RetryState<T, E | E2, Ctx>;
+    options: RetryOptions & { onExhausted: (error: RetryExhaustedError) => N }
+): RetryState<T | EffectValue<N>, E | EffectError<N>, Ctx & EffectContext<N>>;
 
 /**
- * Without `onExhausted`, an I/O fault the retry loop cannot get past arrives as
- * `Failure({ retryExhausted: true, lastError, attempts })`, with whatever was thrown as `lastError`.
- * An abort the wrapped tree returned is not retried and is not wrapped, so `E` reaches the pipeline
- * as itself and never as `lastError`.
+ * Runs `effect` again when a Command in it throws, and fails with `RetryExhaustedError` once the attempts run out. Give
+ * every type argument or none.
  */
-export declare function Retry<T, E = unknown, Ctx = unknown>(
+export declare function Retry<T, E = never, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     options?: RetryOptions
 ): RetryState<T, E | RetryExhaustedError, Ctx>;
 
+// `settled?: false` keeps a `settled` known only as boolean from matching; `| []` infers tuples on TypeScript 5.1.
 /**
- * `next` is optional and defaults to `(values) => Success(values)`, same as `Command`'s default,
- * so a bare `Parallel(effects)` resolves to the ordered array of success values. The second argument
- * is `next` or the options, whichever it looks like.
- *
- * The non-settled overloads accept only `settled?: false`. A `settled` known only as a `boolean`, from a
- * shared options object or a caller's `ParallelOptions`, could be `true` at runtime, and matching it to
- * an overload that types `next` as the values let a batch compile while it read outcome objects as
- * values. It matches no overload instead: write `settled: true` inline, or add `as const`.
+ * Runs the branches at the same time and hands `next` their values in order. The first to fail cancels the rest, unless
+ * `settled`, which hands `next` every outcome.
  */
-export declare function Parallel<T extends readonly unknown[], E = unknown, Ctx = unknown>(
-    effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
+export declare function Parallel<B extends readonly unknown[] | []>(
+    effects: ParallelBranches<B>,
     options: ParallelOptions & { settled: true }
-): ParallelState<[...T], ParallelOutcomes<T, E>, E, Ctx, ParallelOutcomes<T, E>>;
+): ParallelState<
+    ParallelValues<B>,
+    ParallelOutcomes<B>,
+    never,
+    ParallelContext<B>,
+    ParallelOutcomes<B>,
+    EffectError<B[number]>
+>;
 
-export declare function Parallel<T extends readonly unknown[], R, E = unknown, Ctx = unknown>(
-    effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
-    next: (values: ParallelOutcomes<T, E>) => Effect<R, E, Ctx>,
+export declare function Parallel<B extends readonly unknown[] | [], N extends AnyEffect = never>(
+    effects: ParallelBranches<B>,
+    next: (outcomes: ParallelOutcomes<B>) => N,
     options: ParallelOptions & { settled: true }
-): ParallelState<[...T], R, E, Ctx, ParallelOutcomes<T, E>>;
+): ParallelState<
+    ParallelValues<B>,
+    EffectValue<N>,
+    EffectError<N>,
+    ParallelContext<B> & EffectContext<N>,
+    ParallelOutcomes<B>,
+    EffectError<B[number]>
+>;
 
-export declare function Parallel<T extends readonly unknown[], E = unknown, Ctx = unknown>(
-    effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
+export declare function Parallel<B extends readonly unknown[] | []>(
+    effects: ParallelBranches<B>,
     options?: ParallelOptions & { settled?: false }
-): ParallelState<[...T], [...T], E, Ctx>;
+): ParallelState<ParallelValues<B>, ParallelValues<B>, EffectError<B[number]>, ParallelContext<B>>;
 
-export declare function Parallel<T extends readonly unknown[], R, E = unknown, Ctx = unknown>(
-    effects: { [K in keyof T]: Effect<T[K], E, Ctx> },
-    next: (values: [...T]) => Effect<R, E, Ctx>,
+export declare function Parallel<B extends readonly unknown[] | [], N extends AnyEffect = never>(
+    effects: ParallelBranches<B>,
+    next: (values: ParallelValues<B>) => N,
     options?: ParallelOptions & { settled?: false }
-): ParallelState<[...T], R, E, Ctx>;
+): ParallelState<
+    ParallelValues<B>,
+    EffectValue<N>,
+    EffectError<B[number]> | EffectError<N>,
+    ParallelContext<B> & EffectContext<N>
+>;
 
+// BEGIN effectPipe overloads, generated by scripts/effect-pipe-overloads.js: edit it, then npm run generate.
 /**
- * Composes steps into a pipeline: each step receives the previous step's success value, and a Failure
- * from any step stops the pipeline. Typed for 1 to 20 steps, the same ceiling as Effect-TS's `pipe`. A
- * pipeline is itself a step, so a longer one nests: `effectPipe(effectPipe(s1, s2), effectPipe(s3, s4))`.
- * Each step's context type is its own, and the pipeline's is all of them together, so a step that reads
- * no context does not erase a later step's, and `runEffect` asks for every context a step reads.
+ * Composes steps into a pipeline: each step gets the previous step's value, and a `Failure` stops it.
+ * Typed for up to 20 steps; nest pipelines for more.
  */
-export declare function effectPipe<T0, T1, E1 = unknown, C1 = unknown>(
-    f1: (value: T0) => Effect<T1, E1, C1>
-): (start: T0) => Effect<T1, E1, C1>;
+export declare function effectPipe<T0, R1 extends AnyEffect = never>(
+    f1: (value: T0) => R1
+): (start: T0) => Effect<EffectValue<R1>, EffectError<R1>, EffectContext<R1>>;
 
-export declare function effectPipe<T0, T1, T2, E1 = unknown, E2 = unknown, C1 = unknown, C2 = unknown>(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>
-): (start: T0) => Effect<T2, E1 | E2, C1 & C2>;
-
-export declare function effectPipe<
-    T0,
-    T1,
-    T2,
-    T3,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown
->(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>
-): (start: T0) => Effect<T3, E1 | E2 | E3, C1 & C2 & C3>;
+export declare function effectPipe<T0, R1 extends AnyEffect = never, R2 extends AnyEffect = never>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2
+): (start: T0) => Effect<EffectValue<R2>, EffectError<R1> | EffectError<R2>, EffectContext<R1> & EffectContext<R2>>;
 
 export declare function effectPipe<
     T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>
-): (start: T0) => Effect<T4, E1 | E2 | E3 | E4, C1 & C2 & C3 & C4>;
-
-export declare function effectPipe<
-    T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    T5,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    E5 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown
->(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>
-): (start: T0) => Effect<T5, E1 | E2 | E3 | E4 | E5, C1 & C2 & C3 & C4 & C5>;
-
-export declare function effectPipe<
-    T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    T5,
-    T6,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    E5 = unknown,
-    E6 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown
->(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>
-): (start: T0) => Effect<T6, E1 | E2 | E3 | E4 | E5 | E6, C1 & C2 & C3 & C4 & C5 & C6>;
-
-export declare function effectPipe<
-    T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    T5,
-    T6,
-    T7,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    E5 = unknown,
-    E6 = unknown,
-    E7 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown
->(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>
-): (start: T0) => Effect<T7, E1 | E2 | E3 | E4 | E5 | E6 | E7, C1 & C2 & C3 & C4 & C5 & C6 & C7>;
-
-export declare function effectPipe<
-    T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    T5,
-    T6,
-    T7,
-    T8,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    E5 = unknown,
-    E6 = unknown,
-    E7 = unknown,
-    E8 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown
->(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>
-): (start: T0) => Effect<T8, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8, C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8>;
-
-export declare function effectPipe<
-    T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    T5,
-    T6,
-    T7,
-    T8,
-    T9,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    E5 = unknown,
-    E6 = unknown,
-    E7 = unknown,
-    E8 = unknown,
-    E9 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown
->(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>
-): (start: T0) => Effect<T9, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9, C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9>;
-
-export declare function effectPipe<
-    T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    T5,
-    T6,
-    T7,
-    T8,
-    T9,
-    T10,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    E5 = unknown,
-    E6 = unknown,
-    E7 = unknown,
-    E8 = unknown,
-    E9 = unknown,
-    E10 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown
->(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>
-): (
-    start: T0
-) => Effect<T10, E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10, C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10>;
-
-export declare function effectPipe<
-    T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    T5,
-    T6,
-    T7,
-    T8,
-    T9,
-    T10,
-    T11,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    E5 = unknown,
-    E6 = unknown,
-    E7 = unknown,
-    E8 = unknown,
-    E9 = unknown,
-    E10 = unknown,
-    E11 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown
->(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3
 ): (
     start: T0
 ) => Effect<
-    T11,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11
+    EffectValue<R3>,
+    EffectError<R1> | EffectError<R2> | EffectError<R3>,
+    EffectContext<R1> & EffectContext<R2> & EffectContext<R3>
 >;
 
 export declare function effectPipe<
     T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    T5,
-    T6,
-    T7,
-    T8,
-    T9,
-    T10,
-    T11,
-    T12,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    E5 = unknown,
-    E6 = unknown,
-    E7 = unknown,
-    E8 = unknown,
-    E9 = unknown,
-    E10 = unknown,
-    E11 = unknown,
-    E12 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4
 ): (
     start: T0
 ) => Effect<
-    T12,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12
+    EffectValue<R4>,
+    EffectError<R1> | EffectError<R2> | EffectError<R3> | EffectError<R4>,
+    EffectContext<R1> & EffectContext<R2> & EffectContext<R3> & EffectContext<R4>
 >;
 
 export declare function effectPipe<
     T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    T5,
-    T6,
-    T7,
-    T8,
-    T9,
-    T10,
-    T11,
-    T12,
-    T13,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    E5 = unknown,
-    E6 = unknown,
-    E7 = unknown,
-    E8 = unknown,
-    E9 = unknown,
-    E10 = unknown,
-    E11 = unknown,
-    E12 = unknown,
-    E13 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown,
-    C13 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>,
-    f13: (value: T12) => Effect<T13, E13, C13>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5
 ): (
     start: T0
 ) => Effect<
-    T13,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13
+    EffectValue<R5>,
+    EffectError<R1> | EffectError<R2> | EffectError<R3> | EffectError<R4> | EffectError<R5>,
+    EffectContext<R1> & EffectContext<R2> & EffectContext<R3> & EffectContext<R4> & EffectContext<R5>
 >;
 
 export declare function effectPipe<
     T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    T5,
-    T6,
-    T7,
-    T8,
-    T9,
-    T10,
-    T11,
-    T12,
-    T13,
-    T14,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    E5 = unknown,
-    E6 = unknown,
-    E7 = unknown,
-    E8 = unknown,
-    E9 = unknown,
-    E10 = unknown,
-    E11 = unknown,
-    E12 = unknown,
-    E13 = unknown,
-    E14 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown,
-    C13 = unknown,
-    C14 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>,
-    f13: (value: T12) => Effect<T13, E13, C13>,
-    f14: (value: T13) => Effect<T14, E14, C14>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6
 ): (
     start: T0
 ) => Effect<
-    T14,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14
+    EffectValue<R6>,
+    EffectError<R1> | EffectError<R2> | EffectError<R3> | EffectError<R4> | EffectError<R5> | EffectError<R6>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6>
 >;
 
 export declare function effectPipe<
     T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    T5,
-    T6,
-    T7,
-    T8,
-    T9,
-    T10,
-    T11,
-    T12,
-    T13,
-    T14,
-    T15,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    E5 = unknown,
-    E6 = unknown,
-    E7 = unknown,
-    E8 = unknown,
-    E9 = unknown,
-    E10 = unknown,
-    E11 = unknown,
-    E12 = unknown,
-    E13 = unknown,
-    E14 = unknown,
-    E15 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown,
-    C13 = unknown,
-    C14 = unknown,
-    C15 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>,
-    f13: (value: T12) => Effect<T13, E13, C13>,
-    f14: (value: T13) => Effect<T14, E14, C14>,
-    f15: (value: T14) => Effect<T15, E15, C15>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7
 ): (
     start: T0
 ) => Effect<
-    T15,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15
+    EffectValue<R7>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7>
 >;
 
 export declare function effectPipe<
     T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    T5,
-    T6,
-    T7,
-    T8,
-    T9,
-    T10,
-    T11,
-    T12,
-    T13,
-    T14,
-    T15,
-    T16,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    E5 = unknown,
-    E6 = unknown,
-    E7 = unknown,
-    E8 = unknown,
-    E9 = unknown,
-    E10 = unknown,
-    E11 = unknown,
-    E12 = unknown,
-    E13 = unknown,
-    E14 = unknown,
-    E15 = unknown,
-    E16 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown,
-    C13 = unknown,
-    C14 = unknown,
-    C15 = unknown,
-    C16 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>,
-    f13: (value: T12) => Effect<T13, E13, C13>,
-    f14: (value: T13) => Effect<T14, E14, C14>,
-    f15: (value: T14) => Effect<T15, E15, C15>,
-    f16: (value: T15) => Effect<T16, E16, C16>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8
 ): (
     start: T0
 ) => Effect<
-    T16,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16
+    EffectValue<R8>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8>
 >;
 
 export declare function effectPipe<
     T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    T5,
-    T6,
-    T7,
-    T8,
-    T9,
-    T10,
-    T11,
-    T12,
-    T13,
-    T14,
-    T15,
-    T16,
-    T17,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    E5 = unknown,
-    E6 = unknown,
-    E7 = unknown,
-    E8 = unknown,
-    E9 = unknown,
-    E10 = unknown,
-    E11 = unknown,
-    E12 = unknown,
-    E13 = unknown,
-    E14 = unknown,
-    E15 = unknown,
-    E16 = unknown,
-    E17 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown,
-    C13 = unknown,
-    C14 = unknown,
-    C15 = unknown,
-    C16 = unknown,
-    C17 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>,
-    f13: (value: T12) => Effect<T13, E13, C13>,
-    f14: (value: T13) => Effect<T14, E14, C14>,
-    f15: (value: T14) => Effect<T15, E15, C15>,
-    f16: (value: T15) => Effect<T16, E16, C16>,
-    f17: (value: T16) => Effect<T17, E17, C17>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9
 ): (
     start: T0
 ) => Effect<
-    T17,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16 & C17
+    EffectValue<R9>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9>
 >;
 
 export declare function effectPipe<
     T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    T5,
-    T6,
-    T7,
-    T8,
-    T9,
-    T10,
-    T11,
-    T12,
-    T13,
-    T14,
-    T15,
-    T16,
-    T17,
-    T18,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    E5 = unknown,
-    E6 = unknown,
-    E7 = unknown,
-    E8 = unknown,
-    E9 = unknown,
-    E10 = unknown,
-    E11 = unknown,
-    E12 = unknown,
-    E13 = unknown,
-    E14 = unknown,
-    E15 = unknown,
-    E16 = unknown,
-    E17 = unknown,
-    E18 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown,
-    C13 = unknown,
-    C14 = unknown,
-    C15 = unknown,
-    C16 = unknown,
-    C17 = unknown,
-    C18 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>,
-    f13: (value: T12) => Effect<T13, E13, C13>,
-    f14: (value: T13) => Effect<T14, E14, C14>,
-    f15: (value: T14) => Effect<T15, E15, C15>,
-    f16: (value: T15) => Effect<T16, E16, C16>,
-    f17: (value: T16) => Effect<T17, E17, C17>,
-    f18: (value: T17) => Effect<T18, E18, C18>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10
 ): (
     start: T0
 ) => Effect<
-    T18,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17 | E18,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16 & C17 & C18
+    EffectValue<R10>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10>
 >;
 
 export declare function effectPipe<
     T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    T5,
-    T6,
-    T7,
-    T8,
-    T9,
-    T10,
-    T11,
-    T12,
-    T13,
-    T14,
-    T15,
-    T16,
-    T17,
-    T18,
-    T19,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    E5 = unknown,
-    E6 = unknown,
-    E7 = unknown,
-    E8 = unknown,
-    E9 = unknown,
-    E10 = unknown,
-    E11 = unknown,
-    E12 = unknown,
-    E13 = unknown,
-    E14 = unknown,
-    E15 = unknown,
-    E16 = unknown,
-    E17 = unknown,
-    E18 = unknown,
-    E19 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown,
-    C13 = unknown,
-    C14 = unknown,
-    C15 = unknown,
-    C16 = unknown,
-    C17 = unknown,
-    C18 = unknown,
-    C19 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>,
-    f13: (value: T12) => Effect<T13, E13, C13>,
-    f14: (value: T13) => Effect<T14, E14, C14>,
-    f15: (value: T14) => Effect<T15, E15, C15>,
-    f16: (value: T15) => Effect<T16, E16, C16>,
-    f17: (value: T16) => Effect<T17, E17, C17>,
-    f18: (value: T17) => Effect<T18, E18, C18>,
-    f19: (value: T18) => Effect<T19, E19, C19>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11
 ): (
     start: T0
 ) => Effect<
-    T19,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17 | E18 | E19,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16 & C17 & C18 & C19
+    EffectValue<R11>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11>
 >;
 
 export declare function effectPipe<
     T0,
-    T1,
-    T2,
-    T3,
-    T4,
-    T5,
-    T6,
-    T7,
-    T8,
-    T9,
-    T10,
-    T11,
-    T12,
-    T13,
-    T14,
-    T15,
-    T16,
-    T17,
-    T18,
-    T19,
-    T20,
-    E1 = unknown,
-    E2 = unknown,
-    E3 = unknown,
-    E4 = unknown,
-    E5 = unknown,
-    E6 = unknown,
-    E7 = unknown,
-    E8 = unknown,
-    E9 = unknown,
-    E10 = unknown,
-    E11 = unknown,
-    E12 = unknown,
-    E13 = unknown,
-    E14 = unknown,
-    E15 = unknown,
-    E16 = unknown,
-    E17 = unknown,
-    E18 = unknown,
-    E19 = unknown,
-    E20 = unknown,
-    C1 = unknown,
-    C2 = unknown,
-    C3 = unknown,
-    C4 = unknown,
-    C5 = unknown,
-    C6 = unknown,
-    C7 = unknown,
-    C8 = unknown,
-    C9 = unknown,
-    C10 = unknown,
-    C11 = unknown,
-    C12 = unknown,
-    C13 = unknown,
-    C14 = unknown,
-    C15 = unknown,
-    C16 = unknown,
-    C17 = unknown,
-    C18 = unknown,
-    C19 = unknown,
-    C20 = unknown
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never
 >(
-    f1: (value: T0) => Effect<T1, E1, C1>,
-    f2: (value: T1) => Effect<T2, E2, C2>,
-    f3: (value: T2) => Effect<T3, E3, C3>,
-    f4: (value: T3) => Effect<T4, E4, C4>,
-    f5: (value: T4) => Effect<T5, E5, C5>,
-    f6: (value: T5) => Effect<T6, E6, C6>,
-    f7: (value: T6) => Effect<T7, E7, C7>,
-    f8: (value: T7) => Effect<T8, E8, C8>,
-    f9: (value: T8) => Effect<T9, E9, C9>,
-    f10: (value: T9) => Effect<T10, E10, C10>,
-    f11: (value: T10) => Effect<T11, E11, C11>,
-    f12: (value: T11) => Effect<T12, E12, C12>,
-    f13: (value: T12) => Effect<T13, E13, C13>,
-    f14: (value: T13) => Effect<T14, E14, C14>,
-    f15: (value: T14) => Effect<T15, E15, C15>,
-    f16: (value: T15) => Effect<T16, E16, C16>,
-    f17: (value: T16) => Effect<T17, E17, C17>,
-    f18: (value: T17) => Effect<T18, E18, C18>,
-    f19: (value: T18) => Effect<T19, E19, C19>,
-    f20: (value: T19) => Effect<T20, E20, C20>
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12
 ): (
     start: T0
 ) => Effect<
-    T20,
-    E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9 | E10 | E11 | E12 | E13 | E14 | E15 | E16 | E17 | E18 | E19 | E20,
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 & C12 & C13 & C14 & C15 & C16 & C17 & C18 & C19 & C20
+    EffectValue<R12>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12>
 >;
+
+export declare function effectPipe<
+    T0,
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never,
+    R13 extends AnyEffect = never
+>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12,
+    f13: (value: EffectValue<R12>) => R13
+): (
+    start: T0
+) => Effect<
+    EffectValue<R13>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>
+    | EffectError<R13>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12> &
+        EffectContext<R13>
+>;
+
+export declare function effectPipe<
+    T0,
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never,
+    R13 extends AnyEffect = never,
+    R14 extends AnyEffect = never
+>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12,
+    f13: (value: EffectValue<R12>) => R13,
+    f14: (value: EffectValue<R13>) => R14
+): (
+    start: T0
+) => Effect<
+    EffectValue<R14>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>
+    | EffectError<R13>
+    | EffectError<R14>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12> &
+        EffectContext<R13> &
+        EffectContext<R14>
+>;
+
+export declare function effectPipe<
+    T0,
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never,
+    R13 extends AnyEffect = never,
+    R14 extends AnyEffect = never,
+    R15 extends AnyEffect = never
+>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12,
+    f13: (value: EffectValue<R12>) => R13,
+    f14: (value: EffectValue<R13>) => R14,
+    f15: (value: EffectValue<R14>) => R15
+): (
+    start: T0
+) => Effect<
+    EffectValue<R15>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>
+    | EffectError<R13>
+    | EffectError<R14>
+    | EffectError<R15>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12> &
+        EffectContext<R13> &
+        EffectContext<R14> &
+        EffectContext<R15>
+>;
+
+export declare function effectPipe<
+    T0,
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never,
+    R13 extends AnyEffect = never,
+    R14 extends AnyEffect = never,
+    R15 extends AnyEffect = never,
+    R16 extends AnyEffect = never
+>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12,
+    f13: (value: EffectValue<R12>) => R13,
+    f14: (value: EffectValue<R13>) => R14,
+    f15: (value: EffectValue<R14>) => R15,
+    f16: (value: EffectValue<R15>) => R16
+): (
+    start: T0
+) => Effect<
+    EffectValue<R16>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>
+    | EffectError<R13>
+    | EffectError<R14>
+    | EffectError<R15>
+    | EffectError<R16>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12> &
+        EffectContext<R13> &
+        EffectContext<R14> &
+        EffectContext<R15> &
+        EffectContext<R16>
+>;
+
+export declare function effectPipe<
+    T0,
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never,
+    R13 extends AnyEffect = never,
+    R14 extends AnyEffect = never,
+    R15 extends AnyEffect = never,
+    R16 extends AnyEffect = never,
+    R17 extends AnyEffect = never
+>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12,
+    f13: (value: EffectValue<R12>) => R13,
+    f14: (value: EffectValue<R13>) => R14,
+    f15: (value: EffectValue<R14>) => R15,
+    f16: (value: EffectValue<R15>) => R16,
+    f17: (value: EffectValue<R16>) => R17
+): (
+    start: T0
+) => Effect<
+    EffectValue<R17>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>
+    | EffectError<R13>
+    | EffectError<R14>
+    | EffectError<R15>
+    | EffectError<R16>
+    | EffectError<R17>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12> &
+        EffectContext<R13> &
+        EffectContext<R14> &
+        EffectContext<R15> &
+        EffectContext<R16> &
+        EffectContext<R17>
+>;
+
+export declare function effectPipe<
+    T0,
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never,
+    R13 extends AnyEffect = never,
+    R14 extends AnyEffect = never,
+    R15 extends AnyEffect = never,
+    R16 extends AnyEffect = never,
+    R17 extends AnyEffect = never,
+    R18 extends AnyEffect = never
+>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12,
+    f13: (value: EffectValue<R12>) => R13,
+    f14: (value: EffectValue<R13>) => R14,
+    f15: (value: EffectValue<R14>) => R15,
+    f16: (value: EffectValue<R15>) => R16,
+    f17: (value: EffectValue<R16>) => R17,
+    f18: (value: EffectValue<R17>) => R18
+): (
+    start: T0
+) => Effect<
+    EffectValue<R18>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>
+    | EffectError<R13>
+    | EffectError<R14>
+    | EffectError<R15>
+    | EffectError<R16>
+    | EffectError<R17>
+    | EffectError<R18>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12> &
+        EffectContext<R13> &
+        EffectContext<R14> &
+        EffectContext<R15> &
+        EffectContext<R16> &
+        EffectContext<R17> &
+        EffectContext<R18>
+>;
+
+export declare function effectPipe<
+    T0,
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never,
+    R13 extends AnyEffect = never,
+    R14 extends AnyEffect = never,
+    R15 extends AnyEffect = never,
+    R16 extends AnyEffect = never,
+    R17 extends AnyEffect = never,
+    R18 extends AnyEffect = never,
+    R19 extends AnyEffect = never
+>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12,
+    f13: (value: EffectValue<R12>) => R13,
+    f14: (value: EffectValue<R13>) => R14,
+    f15: (value: EffectValue<R14>) => R15,
+    f16: (value: EffectValue<R15>) => R16,
+    f17: (value: EffectValue<R16>) => R17,
+    f18: (value: EffectValue<R17>) => R18,
+    f19: (value: EffectValue<R18>) => R19
+): (
+    start: T0
+) => Effect<
+    EffectValue<R19>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>
+    | EffectError<R13>
+    | EffectError<R14>
+    | EffectError<R15>
+    | EffectError<R16>
+    | EffectError<R17>
+    | EffectError<R18>
+    | EffectError<R19>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12> &
+        EffectContext<R13> &
+        EffectContext<R14> &
+        EffectContext<R15> &
+        EffectContext<R16> &
+        EffectContext<R17> &
+        EffectContext<R18> &
+        EffectContext<R19>
+>;
+
+export declare function effectPipe<
+    T0,
+    R1 extends AnyEffect = never,
+    R2 extends AnyEffect = never,
+    R3 extends AnyEffect = never,
+    R4 extends AnyEffect = never,
+    R5 extends AnyEffect = never,
+    R6 extends AnyEffect = never,
+    R7 extends AnyEffect = never,
+    R8 extends AnyEffect = never,
+    R9 extends AnyEffect = never,
+    R10 extends AnyEffect = never,
+    R11 extends AnyEffect = never,
+    R12 extends AnyEffect = never,
+    R13 extends AnyEffect = never,
+    R14 extends AnyEffect = never,
+    R15 extends AnyEffect = never,
+    R16 extends AnyEffect = never,
+    R17 extends AnyEffect = never,
+    R18 extends AnyEffect = never,
+    R19 extends AnyEffect = never,
+    R20 extends AnyEffect = never
+>(
+    f1: (value: T0) => R1,
+    f2: (value: EffectValue<R1>) => R2,
+    f3: (value: EffectValue<R2>) => R3,
+    f4: (value: EffectValue<R3>) => R4,
+    f5: (value: EffectValue<R4>) => R5,
+    f6: (value: EffectValue<R5>) => R6,
+    f7: (value: EffectValue<R6>) => R7,
+    f8: (value: EffectValue<R7>) => R8,
+    f9: (value: EffectValue<R8>) => R9,
+    f10: (value: EffectValue<R9>) => R10,
+    f11: (value: EffectValue<R10>) => R11,
+    f12: (value: EffectValue<R11>) => R12,
+    f13: (value: EffectValue<R12>) => R13,
+    f14: (value: EffectValue<R13>) => R14,
+    f15: (value: EffectValue<R14>) => R15,
+    f16: (value: EffectValue<R15>) => R16,
+    f17: (value: EffectValue<R16>) => R17,
+    f18: (value: EffectValue<R17>) => R18,
+    f19: (value: EffectValue<R18>) => R19,
+    f20: (value: EffectValue<R19>) => R20
+): (
+    start: T0
+) => Effect<
+    EffectValue<R20>,
+    | EffectError<R1>
+    | EffectError<R2>
+    | EffectError<R3>
+    | EffectError<R4>
+    | EffectError<R5>
+    | EffectError<R6>
+    | EffectError<R7>
+    | EffectError<R8>
+    | EffectError<R9>
+    | EffectError<R10>
+    | EffectError<R11>
+    | EffectError<R12>
+    | EffectError<R13>
+    | EffectError<R14>
+    | EffectError<R15>
+    | EffectError<R16>
+    | EffectError<R17>
+    | EffectError<R18>
+    | EffectError<R19>
+    | EffectError<R20>,
+    EffectContext<R1> &
+        EffectContext<R2> &
+        EffectContext<R3> &
+        EffectContext<R4> &
+        EffectContext<R5> &
+        EffectContext<R6> &
+        EffectContext<R7> &
+        EffectContext<R8> &
+        EffectContext<R9> &
+        EffectContext<R10> &
+        EffectContext<R11> &
+        EffectContext<R12> &
+        EffectContext<R13> &
+        EffectContext<R14> &
+        EffectContext<R15> &
+        EffectContext<R16> &
+        EffectContext<R17> &
+        EffectContext<R18> &
+        EffectContext<R19> &
+        EffectContext<R20>
+>;
+// END effectPipe overloads.
 
 /**
- * Wraps one Command execution, or one `Parallel` (`type` `'Parallel'`, `name` `'Parallel'`), whose `op`
- * runs its branches and returns its decision, even when a branch threw: the run rejects with the throw
- * once the hook has returned. A hook must call `op` for a `Parallel`; returning without
- * calling it is legitimate only for a Command, which is how replay works. Only a replay passes `op` an
- * argument, the recorded decision. `path` is the step's position in the Effect tree rather than its
- * position in completion order, so it is the same in a replay as in the recorded run even when
- * `Parallel` branches finish in a different order. Hooks that take three parameters are unaffected. The
- * interpreter always passes `path`, so it is declared as present, and a wrapper that calls another
- * `StepRunner` has to pass it on: a trace recorded without paths cannot replay a `Parallel`.
+ * Wraps each Command, and each `Parallel`. Call `op` and return its result; a hook that calls another passes `path` on.
  */
 export type StepRunner = (
     name: string,
@@ -1212,11 +1255,7 @@ export type StepRunner = (
     path: string
 ) => Promise<unknown>;
 
-/**
- * Which branch, if any, cancelled a `Parallel`: what a `Parallel`'s step returns and what its trace entry
- * records, so a replay reproduces the decision rather than recomputing it from timing. `branch: null`
- * means an enclosing `Parallel` cancelled it.
- */
+/** Which branch, if any, cancelled a `Parallel`; `branch: null` means an enclosing one did. */
 export type ParallelDecision = { cancelled: false } | { cancelled: true; branch: number | null };
 
 /** `flowName` is `context.flowName`, or `''` when the context has none; the interpreter always passes it. */
@@ -1226,12 +1265,8 @@ export type RunWrapper = (
     flowName: string
 ) => Promise<SuccessState<unknown> | FailureState<unknown>>;
 
-/**
- * Runs before each Command; throw to abort. The interpreter awaits whatever it returns, so it need not be
- * async. A union of two function types rather than one returning `Promise<void> | void`: in a JavaScript
- * file, a JSDoc `@type` on an async function is its declared signature, and an async function's declared
- * return type has to be a `Promise`, so the single signature broke every JSDoc-annotated async interceptor.
- */
+// A union, so a JSDoc `@type` on an async function fits it too.
+/** Runs before each Command; throw to stop it. It need not be async. */
 export type CommandInterceptor =
     | ((command: CommandState<unknown, unknown>, context?: any) => Promise<void>)
     | ((command: CommandState<unknown, unknown>, context?: any) => void);
@@ -1242,110 +1277,68 @@ export interface EffectConfiguration {
     onBeforeCommand?: CommandInterceptor;
 }
 
-/**
- * Adds a layer to the global runner's wiring and returns a function that removes it. Layers merge:
- * `onStep` and `onRun` nest with the earliest layer outermost, `onBeforeCommand` interceptors all run
- * in the order installed. Several configurations passed
- * to one call form one layer, which is the same as installing them in separate calls. Calling with no
- * arguments at all removes every layer; a call whose arguments are all `undefined` adds and removes nothing.
- *
- * A `retry` key throws a `TypeError`: retry options are per-use, passed to `Retry(effect, options)`.
- */
+/** Adds a layer of hooks and returns a function that removes it. With no arguments, removes every layer. */
 export declare function configureEffect(...configs: (EffectConfiguration | undefined)[]): () => void;
 
-/**
- * A per-call configuration for `runEffect`. With `inherit: true` (default) the call's hooks are added to
- * the wiring `configureEffect` installed: where both define a hook the two nest, global outermost. With
- * `inherit: false` the global wiring is ignored, so an unset hook falls back to the library default.
- * A `retry` key throws a `TypeError`, as it does for `configureEffect`.
- */
+/** Hooks for one `runEffect` call, inside the installed ones; `inherit: false` leaves those out. */
 export type CallConfiguration = EffectConfiguration & { inherit?: boolean };
 
-/**
- * A flow whose context type is not `unknown` reads one through `Ask`, so the context is required for it;
- * the runtime would otherwise hand `Ask` an empty object.
- */
+/** The context a run is given: what the flow reads, and a `flowName` naming the run in traces and spans. */
+export type RunContext<Ctx> = unknown extends Ctx ? Ctx : Ctx extends object ? Ctx & { flowName?: string } : Ctx;
+
+/** Runs a flow and returns its `Success` or `Failure`. A flow that reads a context requires one. */
 export declare function runEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     ...args: unknown extends Ctx
         ? [context?: Ctx, callConfig?: CallConfiguration]
-        : [context: Ctx, callConfig?: CallConfiguration]
+        : [context: RunContext<Ctx>, callConfig?: CallConfiguration]
 ): Promise<SuccessState<T> | FailureState<E>>;
 
 export type ReplayStep = {
-    /**
-     * Zero-based position in this run's completion order. Not stable for a flow containing `Parallel`,
-     * whose branches finish in whatever order they finish in. Prefer `path`.
-     */
+    /** Position in completion order, which varies with a `Parallel`; prefer `path`. */
     index: number;
     /** `meta.name`, `cmd.name`, or 'anonymous'; 'Parallel' for a `Parallel`'s step. */
     name: string;
-    /**
-     * 'Command', or 'Parallel' for the step a `Parallel` records its decision under. A Resolver that
-     * answers a 'Parallel' step with `{ result: ParallelDecision }` has it reproduced; anything else
-     * replays that `Parallel` under timing. A 'Parallel' step does not advance `index`.
-     */
+    /** `'Command'`, or `'Parallel'` for a `Parallel`'s decision. */
     type: string;
-    /**
-     * The Command's position in the Effect tree, stable across runs: steps are numbered within a
-     * subtree, and each `Parallel` branch and `Retry` attempt opens its own prefix. This is what a
-     * replay matches on, and what a Resolver should key off. Every step has one; it is a recorded
-     * `TraceEntry` that can lack a path, when it was written by hand or recorded before paths existed.
-     */
+    /** The step's position in the flow, the same in every run; a Resolver should key off it. */
     path: string;
 };
 
 /**
- * What production observed for a step. `{ result }` feeds the Command's `next`;
- * `{ error }` is thrown so the interpreter produces a Failure. A Resolver returning
- * `undefined` means "not recorded", which is distinct from `{ result: undefined }`.
+ * What production got for a step: `{ result }` or `{ error }`. A Resolver returns `undefined` for a step it has no
+ * record of.
  */
 export type ReplayOutcome = { result: unknown } | { error: unknown };
 
 export type Resolver = (step: ReplayStep) => ReplayOutcome | undefined;
 
-/**
- * A recorded step: a Command's result or error, or a `Parallel`'s decision, whose `command` is
- * 'Parallel', whose `path` ends in the `Parallel`'s `p` marker, and whose `result` is a `ParallelDecision`.
- */
+/** One recorded step: a Command's result or error, or a `Parallel`'s decision. */
 export type TraceEntry = {
     command: string;
-    /**
-     * The Command's position in the Effect tree. Order-independent, so a replay lines a recorded step
-     * up with the step that asked for it even when `Parallel` branches finish out of order.
-     */
+    /** The step's position in the flow, which a replay matches on. */
     path?: string;
     result?: unknown;
-    /**
-     * Marks a step that threw. The `error` key alone cannot, since JSON drops it when the value is
-     * `undefined`, as it is for `reject()` with no argument. An entry with an `error` and no `threw`, as
-     * older traces have, still replays as a throw.
-     */
-    threw?: true;
+    /** Marks a step that threw; `false` is the same as leaving it out. */
+    threw?: boolean;
     error?: unknown;
     /** How long the Command took in production, rounded to microseconds. */
     durationMs?: number;
 };
 
-/** The reference trace format. A convenience, not a contract: write a Resolver for any other shape. */
-export type TraceLog = {
+/** The reference trace format; for any other, write a Resolver. `I` and `C` are the input and context types. */
+export type TraceLog<I = unknown, C = unknown> = {
     flowName?: string;
     version?: string;
-    initialInput?: unknown;
-    context?: unknown;
+    initialInput?: I;
+    context?: C;
     dropped?: number;
     trace: TraceEntry[];
 };
 
 export interface RecorderOptions {
     /**
-     * Scrubs every value a trace holds: each Command's result, each serialized error, and the
-     * `initialInput` and `context` stored on the trace itself. `kind` is `'result'`, `'error'`,
-     * `'initialInput'`, or `'context'`; `name` is the Command's name for the first two and the kind for
-     * the last two. This is the single place PII is kept out of a trace, which is why it sees all four.
-     * It is handed a copy, so changing the value in place never reaches the run.
-     * `value` is `any` rather than `unknown` because a redact nearly always spreads or reads it, as in
-     * `{ ...value, password: '[redacted]' }`, and it can be any value a flow handles.
+     * Scrubs each value before it enters a trace; `kind` says which. It gets a copy, so editing it in place is safe.
      */
     redact?: (value: any, name: string, kind: 'result' | 'error' | 'initialInput' | 'context') => unknown;
     /** Cap trace length; further steps are counted in `dropped`, not stored. */
@@ -1354,75 +1347,59 @@ export interface RecorderOptions {
     stack?: boolean;
 }
 
-export interface TraceMeta {
-    initialInput?: unknown;
+/** The trace's own fields, as `toTrace` takes them; the returned trace keeps the input's and context's types. */
+export interface TraceMeta<I = unknown, C = unknown> {
+    initialInput?: I;
     flowName?: string;
-    context?: unknown;
+    context?: C;
     /** Accepts `undefined`, so `process.env.BUILD_ID` passes under `exactOptionalPropertyTypes`. */
     version?: string | undefined;
 }
 
+/** An `onStep` hook that records each step, and `toTrace` to package the recording as a trace. */
 export declare function recorder(options?: RecorderOptions): {
     onStep: StepRunner;
     entries: TraceEntry[];
-    toTrace(meta?: TraceMeta): TraceLog;
+    toTrace<I = unknown, C = unknown>(meta?: TraceMeta<I, C>): TraceLog<I, C>;
 };
 
 /** `recordEffect`'s options: recorder options, plus the context the run gets and a build id. */
-export type RecordOptions<Ctx = unknown> = RecorderOptions & { context?: Ctx; version?: string | undefined };
+export type RecordOptions<Ctx = unknown> = RecorderOptions & {
+    context?: RunContext<Ctx>;
+    version?: string | undefined;
+};
 
-/**
- * The input is checked against what the flow takes. A flow whose context type is not `unknown` reads
- * one through `Ask`, so recording it requires `options.context`.
- */
+/** Runs a flow for real and returns its outcome with a trace, which keeps the input's type for the replay. */
 export declare function recordEffect<I, T, E = unknown, Ctx = unknown>(
     flowFn: (input: I) => Effect<T, E, Ctx>,
     initialInput: I,
-    ...options: unknown extends Ctx ? [options?: RecordOptions<Ctx>] : [options: RecordOptions<Ctx> & { context: Ctx }]
-): Promise<{ result: SuccessState<T> | FailureState<E>; trace: TraceLog }>;
+    ...options: unknown extends Ctx
+        ? [options?: RecordOptions<Ctx>]
+        : [options: RecordOptions<Ctx> & { context: RunContext<Ctx> }]
+): Promise<{ result: SuccessState<T> | FailureState<E>; trace: TraceLog<I, Ctx> & { initialInput: I } }>;
 
 export interface ReplayOptions<Ctx = unknown> {
-    /**
-     * Context for `Ask`. With a trace it defaults to the context the trace recorded, so pass one only to
-     * replay with a different one. A Resolver has no recorded context, so pass it one if the flow reads `Ask`.
-     */
-    context?: Ctx;
+    /** Context for `Ask`; defaults to the one the trace recorded. */
+    context?: RunContext<Ctx>;
     /** Strip `Retry` delays so a replay does not wait out production backoff (default `true`). */
     fastRetry?: boolean;
-    /**
-     * Run the replay inside the global hooks, resolver innermost, so configured hooks observe it
-     * (default `false`, which ignores the global hooks). Retry options are per-use, so a replay reads the
-     * same ones the recorded run did.
-     */
+    /** Runs the replay inside the installed hooks, so they see it. Off by default. */
     hooks?: boolean;
     /**
-     * What to do when the Resolver has no recording for a step.
-     * `'throw'` (default) fails the replay, making side effects impossible.
-     * `'execute'` runs the real Command: recorded prefix, live tail.
+     * `'throw'` (default) fails on a step the trace lacks. `'execute'` runs it for real: use it only against test
+     * doubles.
      */
     onMissing?: 'throw' | 'execute';
     onResolved?: (step: ReplayStep, outcome: ReplayOutcome | undefined) => void;
 }
 
-/**
- * What a replay returns: the flow's own outcome and, for a trace, the recorded entries the flow
- * never asked for. A flow that stops issuing Commands early mismatches nothing, so `result` can be a
- * `Success` with steps left over; `unreached` is where that shows. It is absent for a Resolver,
- * since only a trace knows what it holds.
- */
+/** The replay's outcome and, for a trace, the recorded steps the flow never asked for. */
 export interface Replay<T, E = unknown> {
     result: SuccessState<T> | FailureState<E>;
     unreached: TraceEntry[];
 }
 
-/**
- * Pass a trace to replay it directly, or a Resolver when traces are stored in some other
- * shape. To observe a replay rather than change how it resolves, use `onResolved`.
- * A malformed trace rejects with a `ReplayError`.
- *
- * Three overloads: a trace yields `unreached`, a Resolver yields none, and a source only known
- * as the union of the two (a wrapper forwarding whatever it was handed) yields it as optional.
- */
+/** Replays a flow from a trace, or from a Resolver for other storage, with no I/O. */
 export declare function replayEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     trace: TraceLog | TraceEntry[],
@@ -1439,8 +1416,9 @@ export declare function replayEffect<T, E = unknown, Ctx = unknown>(
     options?: ReplayOptions<Ctx>
 ): Promise<Omit<Replay<T, E>, 'unreached'> & { unreached?: TraceEntry[] }>;
 
+/** Replays a trace and logs each step with its recorded timing, warning about what will not replay as recorded. */
 export declare function timeTravel<T, E = unknown, Ctx = unknown>(
     flowFn: (input: any) => Effect<T, E, Ctx>,
     traceLog: TraceLog,
-    options?: { log?: (...args: any[]) => void; context?: Ctx; version?: string | undefined }
+    options?: { log?: (...args: any[]) => void; context?: RunContext<Ctx>; version?: string | undefined }
 ): Promise<SuccessState<T> | FailureState<E>>;
