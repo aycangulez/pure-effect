@@ -111,11 +111,15 @@ const Command = (cmd, next, meta) => {
 /**
  * The name a Command is known by: what a trace records, what replay matches on, and what a
  * telemetry span is called. A non-empty string `meta.name`, else `cmd.name`, else 'anonymous'.
+ * Exported so a test walking a flow checks each step by the same rule.
  *
  * @param {CommandState} eff
  * @returns {string}
  */
 const commandName = (eff) => {
+    if (eff?.type !== 'Command') {
+        throw malformed(`commandName expects a Command, got ${describeArgument(eff)}.`, eff);
+    }
     const meta = eff.meta;
     const named = isObject(meta) ? meta.name : undefined;
     return typeof named === 'string' && named !== '' ? named : eff.cmd.name || 'anonymous';
@@ -1850,5 +1854,6 @@ export {
     recorder,
     recordEffect,
     replayEffect,
-    timeTravel
+    timeTravel,
+    commandName
 };

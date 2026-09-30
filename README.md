@@ -99,14 +99,16 @@ assert.deepEqual(ensureEmailAvailable(input).next(null), Success(input));
 assert.deepEqual(ensureEmailAvailable(input).next({ id: 1 }), Failure('Email already in use.'));
 ```
 
-Then test the flow: the right calls, in the right order.
+Then test the flow: the right calls, in the right order. `commandName` gives the name a Command is recorded under:
 
 ```js
+import { commandName } from 'pure-effect';
+
 const step1 = registerUserFlow(input);
-assert.equal(step1.cmd.name, 'cmdFindUser');
+assert.equal(commandName(step1), 'cmdFindUser');
 
 const step2 = step1.next(null); // pretend no user was found
-assert.equal(step2.cmd.name, 'cmdSaveUser');
+assert.equal(commandName(step2), 'cmdSaveUser');
 // The database was never touched.
 ```
 
@@ -122,12 +124,13 @@ Tests cannot see inside a Command's function without running it. If `cmdFindUser
 
 ```ts
 import assert from 'node:assert/strict';
+import { commandName } from 'pure-effect';
 import type { Effect } from 'pure-effect';
 
 // Fails unless the step is the Command named, and returns it typed as one.
 function assertCommand<T, E, C>(step: Effect<T, E, C>, name: string) {
     assert(step.type === 'Command', `expected ${name}, got ${step.type}`);
-    assert.equal(step.cmd.name, name);
+    assert.equal(commandName(step), name);
     return step;
 }
 
@@ -228,13 +231,13 @@ const payUnpaid = (customerId) => effectPipe(findUnpaidInvoices, payAll)(custome
 
 // The flow starts by getting the list, and hands what it gets to the loop.
 const flow = payUnpaid('cus_1');
-assert.equal(flow.cmd.name, 'cmdFindUnpaid');
+assert.equal(commandName(flow), 'cmdFindUnpaid');
 assert.equal(flow.next([{ id: 1 }, { id: 2 }]).effects.length, 2);
 
 // The body is tested on its own: the Retry holds only the charge, and the receipt comes after it.
 const body = payInvoice({ id: 1 });
-assert.equal(body.effect.cmd.name, 'cmdChargeInvoice');
-assert.equal(body.next({ id: 'receipt_1' }).cmd.name, 'cmdSendReceipt');
+assert.equal(commandName(body.effect), 'cmdChargeInvoice');
+assert.equal(commandName(body.next({ id: 'receipt_1' })), 'cmdSendReceipt');
 
 // An empty list runs nothing.
 assert.deepEqual(await runEffect(payAll([])), Success([]));
@@ -613,7 +616,7 @@ const order = { id: 'order_1', customerId: 'cus_1', items: [], total: 120 };
 
 // The card was charged, then the stock ran out: the flow refunds the charge and fails.
 const undoing = reserveAndCharge(order).next([Failure('out_of_stock'), Success('ch_1')]);
-assert.equal(undoing.effects[0].cmd.name, 'cmdRefundCharge');
+assert.equal(commandName(undoing.effects[0]), 'cmdRefundCharge');
 assert.deepEqual(undoing.next([null]), Failure('out_of_stock'));
 
 // Both succeeded, so there is nothing to undo.
@@ -827,6 +830,10 @@ Command(() => api.charge(), next); // 3. neither, so 'anonymous'
 ```
 
 Use `meta.name` in code that gets minified, since minifiers rename functions and would rename every step in every trace. Otherwise, naming the function is fine, and is what the examples do: an arrow assigned to a `const` first, as in `const cmdChargeCard = () => api.charge()`, takes the `const`'s name. An inline arrow does not, and a replay cannot tell two `'anonymous'` Commands apart, so a refactor that swaps two of them replays without complaint, each handed the other's recorded result.
+
+#### `commandName(command)`
+
+Returns a Command's name, chosen in the order above, so a test checks a step by the name its trace would record: `assert.equal(commandName(step), 'cmdFindUser')`. Anything but a Command throws an `EffectTypeError`.
 
 #### `Ask(nextFn)`
 

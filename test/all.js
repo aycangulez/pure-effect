@@ -14,7 +14,8 @@ import {
     recorder,
     recordEffect,
     replayEffect,
-    timeTravel
+    timeTravel,
+    commandName
 } from '../index.js';
 import * as lib from '../index.js';
 import ts from 'typescript';
@@ -89,11 +90,11 @@ describe('Core', function () {
         const input = { email: 'test@test.com', password: 'password123' };
         const step1 = registerUserFlow(input);
         assert.equal(step1.type, 'Command');
-        assert.equal(step1.cmd.name, 'cmdFindUser');
+        assert.equal(commandName(step1), 'cmdFindUser');
 
         const step2 = step1.next(null);
         assert.equal(step2.type, 'Command');
-        assert.equal(step2.cmd.name, 'cmdSaveUser');
+        assert.equal(commandName(step2), 'cmdSaveUser');
     });
 
     it('should access context through onBeforeCommand', async function () {
@@ -3121,6 +3122,33 @@ describe('Command identity', function () {
         const { result: replayed } = await replayEffect(flow({ id: 'x1' }), trace);
         assert.equal(replayed.type, 'Success', 'replay matching lines up on meta.name');
         assert.deepEqual(valueOf(replayed), valueOf(result));
+    });
+
+    it('should name a Command with commandName the way a trace does', function () {
+        // A test walking a flow read `cmd.name`, which is empty for an inline arrow named through meta.name,
+        // so the only way to check such a step was to copy the identity rule into the test.
+        const cmdInternalName = () => 'ok';
+        const cmdFallback = () => 'ok';
+        assert.equal(commandName(Command(cmdInternalName, undefined, { name: 'chargeCard' })), 'chargeCard');
+        assert.equal(commandName(Command(() => 'ok', undefined, { name: 'cmdInline' })), 'cmdInline');
+        assert.equal(commandName(Command(cmdFallback, undefined, { attempt: 1 })), 'cmdFallback');
+        assert.equal(commandName(Command(() => 'ok')), 'anonymous');
+        for (const meta of /** @type {any[]} */ (['a string', 42, null, { name: 7 }, { name: '' }])) {
+            assert.equal(commandName(Command(cmdFallback, undefined, meta)), 'cmdFallback', JSON.stringify(meta));
+        }
+    });
+
+    it('should refuse to name anything but a Command', function () {
+        // A walk that expected a Command and reached a Failure read `cmd.name` off undefined, and the
+        // TypeError named neither the step it got nor the one it expected.
+        assert.throws(() => commandName(/** @type {any} */ (Failure('Email already in use.'))), {
+            name: 'EffectTypeError',
+            message: /commandName expects a Command, got an Effect of type 'Failure'/
+        });
+        assert.throws(() => commandName(/** @type {any} */ (undefined)), {
+            name: 'EffectTypeError',
+            message: /commandName expects a Command, got undefined/
+        });
     });
 });
 

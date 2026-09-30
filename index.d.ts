@@ -179,6 +179,9 @@ export declare function Command<R, T = R, E = unknown, Ctx = unknown>(
     meta?: CommandMeta
 ): CommandState<R, T, E, Ctx>;
 
+/** The name a Command is known by in traces, replays and spans: `meta.name`, else `cmd.name`, else `'anonymous'`. */
+export declare function commandName(command: CommandState<any, any, any, any>): string;
+
 /** Reads the context passed to `runEffect`. Give every type argument or none. */
 export declare function Ask<T = never, E = never, Ctx = unknown>(
     next: (context: Ctx) => Effect<T, E, Ctx>

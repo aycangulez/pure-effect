@@ -12,7 +12,8 @@ import {
     recorder,
     recordEffect,
     replayEffect,
-    timeTravel
+    timeTravel,
+    commandName
 } from '../index.js';
 import type {
     SuccessState,
@@ -138,6 +139,15 @@ if (result.type === 'Success') {
 } else {
     expectType<never>(result.error);
 }
+
+// --- commandName ---
+
+// It takes a Command, as the runtime does, so a walk narrows each step first
+expectType<string>(commandName(cmd));
+const walked = flow({ email: 'a@b.com', password: 'secret123' });
+// @ts-expect-error a flow can start with a Success or a Failure, which has no name
+commandName(walked);
+if (walked.type === 'Command') expectType<string>(commandName(walked));
 
 // --- Failure error type flows through runEffect ---
 
