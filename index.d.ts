@@ -221,6 +221,19 @@ export declare function Command<R, T = never, E = never, Ctx = unknown>(
     meta?: CommandMeta
 ): CommandState<R, T, E, Ctx>;
 
+/**
+ * Reached only when some type arguments are given, as in `Command<User | null>(fetchJson, next)`. TypeScript then
+ * infers none of the rest, so they take their defaults, and the `never` defaults above refused a `next` that can
+ * fail. This overload keeps the defaults such a call had before them; a call that gives no type arguments matches
+ * an overload above first and keeps its exact types. `Ask` and `Retry` have no such overload: partial type
+ * arguments are rare there, and one more overload lengthens the error for their commonest mistake.
+ */
+export declare function Command<R, T = R, E = unknown, Ctx = unknown>(
+    cmd: (signal?: AbortSignal) => Promise<R> | R,
+    next?: (result: R) => Effect<T, E, Ctx>,
+    meta?: CommandMeta
+): CommandState<R, T, E, Ctx>;
+
 export declare function Ask<T = never, E = never, Ctx = unknown>(
     next: (context: Ctx) => Effect<T, E, Ctx>
 ): AskState<T, E, Ctx>;

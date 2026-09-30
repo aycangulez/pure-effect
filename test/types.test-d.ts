@@ -312,6 +312,39 @@ const compensateInPipeline = effectPipe(
 );
 expectType<(start: number) => Effect<number, 'declined'>>(compensateInPipeline);
 
+// Some type arguments given, as to type a JSON response: TypeScript infers none of the rest, so they take their
+// defaults. The never defaults refused a next that can fail in such a call, which compiled before them, so Command's
+// last overload keeps the defaults it had. Each call is assigned first, so expectType cannot feed its inference.
+declare function fetchJson(url: string): Promise<any>;
+const typedResponse = Command<SavedUser | null>(
+    () => fetchJson('/me'),
+    (u) => (u ? Success(u) : Failure('not_found'))
+);
+expectType<CommandState<SavedUser | null, SavedUser | null, unknown>>(typedResponse);
+// Ask and Retry have no such overload, since one more lengthens the error for their commonest mistake, so a step that
+// can fail there needs every type argument or none
+const mayFail = Command(
+    () => fetchJson('/me'),
+    (u: SavedUser) => (u.id ? Success(u) : Failure('no_id'))
+);
+// @ts-expect-error Ask given only its value refuses a callback that can fail
+Ask<SavedUser>(() => Failure('not_found'));
+// @ts-expect-error so does Retry given only its value
+Retry<SavedUser>(mayFail);
+// @ts-expect-error and with onExhausted
+Retry<SavedUser>(mayFail, { onExhausted: () => Failure('down') });
+const fullyTypedAsk = Ask<SavedUser, 'not_found'>(() => Failure('not_found'));
+expectType<AskState<SavedUser, 'not_found'>>(fullyTypedAsk);
+const toUserId = (u: SavedUser) => Success(u.id);
+// @ts-expect-error with only R given, the value defaults to R, so a next that changes it needs every argument or none
+Command<SavedUser>(() => fetchJson('/me'), toUserId);
+// Writing the function's result type instead keeps every other type inferred exactly
+const typedByReturn = Command(
+    (): Promise<SavedUser | null> => fetchJson('/me'),
+    (u) => (u ? Success(u) : Failure('not_found'))
+);
+expectType<CommandState<SavedUser | null, SavedUser, 'not_found'>>(typedByReturn);
+
 // --- long pipelines: typed for up to 20 steps, the same ceiling as Effect-TS ---
 
 const stepWith =
