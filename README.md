@@ -147,7 +147,7 @@ const step1 = assertCommand(registerUserFlow(input), 'cmdFindUser');
 assertCommand(step1.next(null), 'cmdSaveUser');
 ```
 
-Called on a step directly, as in `ensureEmailAvailable(input).next(found)`, `next` is checked against what the Command's function returns, so where the tests above pass `{ id: 1 }` for a user that was found, a TypeScript test passes a whole user, of the type `db.findUser` returns. A walk through the whole flow cannot check its answers, since the flow's type does not say which Command comes next, so there `next` accepts any value.
+For a step that returns its Command directly, as in `ensureEmailAvailable(input).next(found)`, `next` is checked against what the Command's function returns, so where the tests above pass `{ id: 1 }` for a user that was found, a TypeScript test passes a whole user, of the type `db.findUser` returns. A Command reached any other way, by walking the whole flow or through an `Ask`'s `next`, accepts any value, since its type does not say which Command it is.
 
 ## Coming from async/await
 
@@ -335,9 +335,9 @@ it('prod incident 8f3a: a 100% promo produces a $0 charge', async () => {
 });
 ```
 
-The test checks that the flow still takes the recorded path and handles the recorded outcomes the same way. If a refactor reorders or replaces a step, the replay raises a `TimeParadox` naming where it diverged. If the error handling changes, the assertion fails.
+The test checks that the flow still takes the recorded path and handles the recorded outcomes the same way. If a refactor reorders or replaces a step, the replay ends in a `Failure` whose error is a `TimeParadox` naming where it diverged. It is not thrown, so a test that expects a `Failure` should check the error too, as this one checks its `code`. If the error handling changes, the assertion fails.
 
-A flow that stops issuing Commands before the recording ends (for example, a fix that skips the charge) raises no `TimeParadox`, and the replay can end in `Success` with recorded steps left over. `replayEffect` returns those steps as `unreached`, so a test can assert which ones it expects to skip:
+A flow that stops issuing Commands before the recording ends (for example, a fix that skips the charge) produces no `TimeParadox`, and the replay can end in `Success` with recorded steps left over. `replayEffect` returns those steps as `unreached`, so a test can assert which ones it expects to skip:
 
 ```js
 it('incident 8f3a fixed: a 100% promo checks out without a charge', async () => {
@@ -383,7 +383,7 @@ await replayEffect(checkoutFlow(input), resolve);
 
 ## Recording in Production
 
-`recordEffect` suits tests and scripts, where one call covers the whole run. To record an application without changing any call site, install the hooks once at startup. The two files imported below are in the repository's [examples folder](https://github.com/aycangulez/pure-effect/blob/main/examples) rather than the npm package, so copy them into your project.
+`recordEffect` suits tests and scripts, where one call covers the whole run. To record an application without changing any call site, install the hooks once at startup. The two files imported below ship in the package's `examples` folder, `node_modules/pure-effect/examples`, and in the repository's [examples folder](https://github.com/aycangulez/pure-effect/blob/main/examples); copy them into your project.
 
 ```js
 import { randomUUID } from 'node:crypto';
@@ -580,7 +580,7 @@ const fetchProfileUncancellable = (userId) => Command(() => fetch(`/users/${user
 
 Outside a `Parallel`, the function is called with no arguments. A `Retry` inside a cancelled branch stops retrying.
 
-Which branch failed first and cancelled the others depends on timing, so it is recorded with the trace. A replay of a cancelled `Parallel` returns the same failure production did, and stops each other branch where production stopped it, rather than letting whichever branch the replay reaches first decide. The same holds when the branch that cancelled the others was a `next` function or a pure step that threw: the replay throws the same error. If the branch that cancelled the others no longer fails, or the `Parallel` no longer has that branch, the replay raises a `TimeParadox` naming it.
+Which branch failed first and cancelled the others depends on timing, so it is recorded with the trace. A replay of a cancelled `Parallel` returns the same failure production did, and stops each other branch where production stopped it, rather than letting whichever branch the replay reaches first decide. The same holds when the branch that cancelled the others was a `next` function or a pure step that threw: the replay throws the same error. If the branch that cancelled the others no longer fails, or the `Parallel` no longer has that branch, the replay ends in a `TimeParadox` naming it.
 
 **Undoing what succeeded when a branch fails.** Without `settled`, the failing branch's `Failure` is the whole result, and the values of the branches that succeeded are dropped. When one of them did something that has to be undone, such as charging a card for an order whose stock then ran out, the code that called `runEffect` no longer has the charge to refund. Use `settled: true`, so `next` sees every outcome, and have it return the steps that undo whatever succeeded, followed by the failure:
 
@@ -610,14 +610,14 @@ const reserveAndCharge = (order) =>
     Parallel(
         [reserveStock(order), chargeOrder(order)],
         ([reservation, charge]) => {
-            if (reservation.type === 'Success' && charge.type === 'Success') {
-                return Success({ order, reservationId: reservation.value, chargeId: charge.value });
+            if (reservation.type === 'Failure') {
+                const undo = charge.type === 'Success' ? [refundCharge(charge.value)] : [];
+                return Parallel(undo, () => Failure(reservation.error));
             }
-            const undo = [];
-            if (reservation.type === 'Success') undo.push(releaseStock(reservation.value));
-            if (charge.type === 'Success') undo.push(refundCharge(charge.value));
-            const failed = reservation.type === 'Failure' ? reservation : charge;
-            return Parallel(undo, () => Failure(failed.error));
+            if (charge.type === 'Failure') {
+                return Parallel([releaseStock(reservation.value)], () => Failure(charge.error));
+            }
+            return Success({ order, reservationId: reservation.value, chargeId: charge.value });
         },
         { settled: true }
     );
@@ -1019,11 +1019,11 @@ Runs a flow for real while recording, returning `{ result, trace }`. Accepts `re
 
 #### `replayEffect(effect, traceOrResolver, options?)`
 
-Replays a flow, feeding recorded results to Commands instead of running them. Returns `{ result, unreached }`: the flow's outcome, and the recorded entries the flow never asked for (empty when every step was reached). A flow that stops early raises no `TimeParadox`, so `unreached` is where that shows up. With a resolver, only `{ result }` is returned, since a resolver cannot list what it holds.
+Replays a flow, feeding recorded results to Commands instead of running them. Returns `{ result, unreached }`: the flow's outcome, and the recorded entries the flow never asked for (empty when every step was reached). A flow that stops early produces no `TimeParadox`, so `unreached` is where that shows up. A flow that no longer matches the trace ends in a `Failure` whose `error` is a `TimeParadox`, or a `ReplayError` for a step the trace lacks; neither is thrown, and `error.name` tells them apart. With a resolver, only `{ result }` is returned, since a resolver cannot list what it holds.
 
 - `traceOrResolver`: a trace (or bare entries array) to replay directly, or a resolver function for traces stored in some other shape. A resolver returns `{ result }`, `{ error }`, or `undefined` if the step is unrecorded. A resolver is also asked about each `Parallel`, with `step.type` set to `'Parallel'`: answering with `{ result }` holding the recorded cancellation replays it as production decided, and anything else replays that `Parallel` by timing, as before. A malformed trace rejects with a `ReplayError`.
 - `options.context`: context for `Ask`. With a trace it defaults to the context the trace recorded, so pass one only to replay with a different one. A resolver has no recorded context, so pass it one if the flow reads `Ask`.
-- `options.onMissing`: `'throw'` (default) stops at an unrecorded step, and `replayEffect` resolves to a `Failure` whose `error` is a `ReplayError`, so a test that only checks for a `Failure` passes; check the error too. `'execute'` runs the real Command instead, doing its I/O for real. A step can be unrecorded because a hook vetoed it in production, because it was added to the flow since the recording, or because production ran it and the recorder dropped it under `maxEntries`, so pass `'execute'` only where the Commands reach test doubles or only read, as when replaying locally past a step added since the recording. A trace that dropped entries refuses it: replay such a trace with the default, which stops at the first step it lacks, or record the flow again with a higher `maxEntries`. After a flow changes shape, for example when a Command is newly wrapped in `Retry`, its steps sit at new positions, so `'execute'` would run all of them live and leave the recorded ones unused: record the flow again instead.
+- `options.onMissing`: `'throw'` (default) stops at an unrecorded step with a `ReplayError`, so a test that only checks for a `Failure` passes; check the error too. `'execute'` runs the real Command instead, doing its I/O for real. A step can be unrecorded because a hook vetoed it in production, because it was added to the flow since the recording, or because production ran it and the recorder dropped it under `maxEntries`, so pass `'execute'` only where the Commands reach test doubles or only read, as when replaying locally past a step added since the recording. A trace that dropped entries refuses it: replay such a trace with the default, which stops at the first step it lacks, or record the flow again with a higher `maxEntries`. After a flow changes shape, for example when a Command is newly wrapped in `Retry`, its steps sit at new positions, so `'execute'` would run all of them live and leave the recorded ones unused: record the flow again instead.
 - `options.fastRetry` (default `true`): strip `Retry` delays.
 - `options.hooks` (default `false`): run the replay inside the configured hooks, so they see the replayed steps, a configured recorder included. When off, the configured hooks are skipped, so a replay cannot reach a telemetry backend or a trace sink.
 - `options.onResolved(step, outcome)`: observe each replayed step. If it throws, the replay stops there and `replayEffect` rejects with that error; it never changes a step's outcome.

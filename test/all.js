@@ -19,7 +19,10 @@ import {
 } from '../index.js';
 import * as lib from '../index.js';
 import ts from 'typescript';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync, copyFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { mock } from 'node:test';
 import { enableTelemetry, telemetryHooks } from '../examples/opentelemetry-example.js';
 import { enableRecording, recordingHooks } from '../examples/recording-example.js';
@@ -2347,9 +2350,41 @@ describe('Per-call inherit', function () {
     });
 });
 
+/**
+ * Imports an example as a user who copied it into their own project would: from a directory whose node_modules holds
+ * this library under its package name, and the example's other dependency.
+ * @param {string} file - The example's file name in examples/
+ * @returns {Promise<any>}
+ */
+const importCopiedExample = async (file) => {
+    const repo = fileURLToPath(new URL('..', import.meta.url));
+    const project = mkdtempSync(join(tmpdir(), 'pure-effect-example-'));
+    try {
+        mkdirSync(join(project, 'node_modules'));
+        symlinkSync(repo, join(project, 'node_modules', 'pure-effect'), 'dir');
+        symlinkSync(
+            join(repo, 'node_modules', '@opentelemetry'),
+            join(project, 'node_modules', '@opentelemetry'),
+            'dir'
+        );
+        writeFileSync(join(project, 'package.json'), '{ "type": "module" }');
+        copyFileSync(join(repo, 'examples', file), join(project, file));
+        return await import(pathToFileURL(join(project, file)).href);
+    } finally {
+        rmSync(project, { recursive: true, force: true });
+    }
+};
+
 describe('examples/recording-example.js', function () {
     beforeEach(() => configureEffect());
     afterEach(() => configureEffect());
+
+    it('should run as it is when copied into a project that installs the library', async function () {
+        // It imported '../index.js', a path that exists only in this repository, so every copy failed with
+        // `Cannot find module` until its import was edited. It imports the library by its package name instead.
+        const copied = await importCopiedExample('recording-example.js');
+        assert.equal(typeof copied.recordingHooks, 'function');
+    });
 
     const failing = (/** @type {any} */ input) =>
         effectPipe(
@@ -2732,6 +2767,13 @@ describe('examples/recording-example.js', function () {
 describe('examples/opentelemetry-example.js', function () {
     beforeEach(() => configureEffect());
     afterEach(() => configureEffect());
+
+    it('should run as it is when copied into a project that installs the library', async function () {
+        // It imported '../index.js', a path that exists only in this repository, so every copy failed with
+        // `Cannot find module` until its import was edited. It imports the library by its package name instead.
+        const copied = await importCopiedExample('opentelemetry-example.js');
+        assert.equal(typeof copied.telemetryHooks, 'function');
+    });
 
     /** A tracer stub, so the example is testable without standing up an SDK. */
     const fakeTracer = () => {
@@ -3974,7 +4016,10 @@ describe('Malformed flows', function () {
             )
         );
         assert.equal(e?.name, 'EffectTypeError');
-        assert.match(e.message, /A continuation returned undefined, which usually means a missing return/);
+        assert.match(
+            e.message,
+            /The next of Command 'cmdRead' returned undefined, which usually means a missing return/
+        );
     });
 
     it('should reject a Command continuation that returns nothing in the middle of a pipeline', async function () {
@@ -3993,7 +4038,7 @@ describe('Malformed flows', function () {
             )
         );
         assert.equal(e?.name, 'EffectTypeError');
-        assert.match(e.message, /A continuation returned undefined/);
+        assert.match(e.message, /The next of Command 'cmdRead' returned undefined/);
     });
 
     it('should reject a Command continuation that returns a plain value', async function () {
@@ -4009,7 +4054,15 @@ describe('Malformed flows', function () {
             )
         );
         assert.equal(e?.name, 'EffectTypeError');
-        assert.match(e.message, /returned the number 6/);
+        assert.match(e.message, /The next of Command 'cmdRead' returned the number 6/);
+    });
+
+    it('should name the node whose next returned something other than an Effect', async function () {
+        // The message said only that the flow or a continuation had, so finding the culprit meant reading every next.
+        const fromParallel = await errorFrom(() => runEffect(Parallel([Success(1)], /** @type {any} */ (() => 2))));
+        assert.match(fromParallel?.message, /The next of a Parallel returned the number 2/);
+        const fromAsk = await errorFrom(() => runEffect(Ask(/** @type {any} */ (() => 2))));
+        assert.match(fromAsk?.message, /The next of an Ask returned the number 2/);
     });
 
     it('should recognise a flow that was never called with its input', async function () {
@@ -4093,7 +4146,7 @@ describe('Malformed flows', function () {
             )
         );
         assert.equal(e?.name, 'EffectTypeError');
-        assert.match(e.message, /A continuation returned a Promise/);
+        assert.match(e.message, /The next of Command 'cmdFind' returned a Promise/);
     });
 
     it('should not leave a throwing async step as an unhandled rejection', async function () {

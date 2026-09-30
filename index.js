@@ -359,6 +359,16 @@ const effectTypeError = (value, source) =>
     );
 
 /**
+ * Names the node whose `next` returned a value, for an error message: a Command by its name, any other by its type.
+ * @param {Effect} node
+ * @returns {string}
+ */
+const nextOf = (node) =>
+    node.type === 'Command'
+        ? `The next of Command '${commandName(node)}'`
+        : `The next of ${node.type === 'Ask' ? 'an' : 'a'} ${node.type}`;
+
+/**
  * A Success or a Failure: a flow with nothing left to run.
  * @param {any} value
  * @returns {value is SuccessState | FailureState}
@@ -395,16 +405,18 @@ const asEffect = (value, source) => {
  * @param {Effect} effect - The current Effect object
  * @param {(value: any) => Effect} fn - The next function to run if the current effect is a Success
  * @param {any} [initialInput] - The pipeline's starting value, stamped on every node but a Success
+ * @param {Effect} [from] - The node whose `next` returned `effect`, which an error names
  * @returns {Effect} The composed Effect
  */
-const chain = (effect, fn, initialInput) => {
+const chain = (effect, fn, initialInput, from) => {
+    const source = () => (from ? nextOf(from) : 'A continuation');
     // Overwrites a sub-pipeline's own stamp, so the root and a Failure at any depth carry the input of the
     // flow that was actually called. A Success stays bare, so `deepEqual(result, Success(v))` always holds.
     const withII = (/** @type {Effect} */ e) =>
         initialInput !== undefined && e.type !== 'Success' ? { ...e, initialInput } : e;
 
     // Checked before `effect.type` is read, which would otherwise throw a bare TypeError naming no step.
-    if (effect == null) return asEffect(effect, 'A continuation');
+    if (effect == null) return asEffect(effect, source());
 
     switch (effect.type) {
         case 'Success':
@@ -412,23 +424,23 @@ const chain = (effect, fn, initialInput) => {
         case 'Failure':
             return withII(effect);
         case 'Command': {
-            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput);
+            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput, effect);
             return withII(Command(effect.cmd, next, effect.meta));
         }
         case 'Ask': {
-            const next = (/** @type {any} */ ctx) => chain(effect.next(ctx), fn, initialInput);
+            const next = (/** @type {any} */ ctx) => chain(effect.next(ctx), fn, initialInput, effect);
             return withII(Ask(next));
         }
         case 'Retry': {
-            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput);
+            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput, effect);
             return withII({ ...effect, next });
         }
         case 'Parallel': {
-            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput);
+            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput, effect);
             return withII({ ...effect, next });
         }
         default:
-            return asEffect(effect, 'A continuation');
+            return asEffect(effect, source());
     }
 };
 
@@ -832,10 +844,13 @@ const interpret =
          */
         async function execute(eff, signal, path = '') {
             let step = 0;
+            /** @type {Effect | undefined} The node whose `next` returned `eff`, which an error names. */
+            let from;
             while (isPending(eff)) {
                 // Checked before every node: a Command already in flight cannot be stopped, but the next never starts.
                 if (signal?.aborted) return cancelledBranch(eff.initialInput);
                 if (eff.type === 'Ask') {
+                    from = eff;
                     eff = eff.next(context);
                     continue;
                 }
@@ -849,10 +864,11 @@ const interpret =
                 if (outcome.type !== 'Success') return outcome;
                 // Outside every catch: `next` and the pure steps it reaches are code, not I/O, so a throw there
                 // rejects the run.
+                from = eff;
                 eff = eff.next(outcome.value);
             }
             if (isOutcome(eff)) return eff;
-            throw effectTypeError(eff, 'The flow');
+            throw effectTypeError(eff, from ? nextOf(from) : 'The flow');
         }
 
         /**

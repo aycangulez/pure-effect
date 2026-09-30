@@ -2,7 +2,7 @@
 
 All notable changes to pure-effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
-## [Unreleased]
+## [0.16.0] - 2026-10-01
 
 ### Added
 
@@ -12,6 +12,7 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 - **`EffectValue`, `EffectError` and `EffectContext` read the value, error and context of an Effect**, as in `EffectError<ReturnType<typeof checkoutFlow>>`. `Parallel`'s declaration is built on them, alongside `ParallelBranches`, `ParallelValues` and `ParallelContext`.
 - **The reference recording wiring warns about a capped trace.** `recordingHooks` reports the first kept trace of a flow that `maxEntries` cut short through `onWarning`, once per flow, since such a trace replays only up to the first step it lacks, and the default cap of 500 cuts a long batch run short.
 - **The reference recording wiring warns about anonymous steps.** `recordingHooks` reports the first kept trace of a flow with steps named `'anonymous'` through `onWarning`, once per flow, since a replay tells steps apart by name and two inline arrow Commands that trade places after a refactor replay without complaint.
+- **The reference integrations ship in the package.** `examples/recording-example.js` and `examples/opentelemetry-example.js` are in the npm package under `examples/`, so an application can copy them from `node_modules` rather than from the repository. They stay reference code: the package's exports offer only the library, and the telemetry example needs `@opentelemetry/api` installed.
 
 ### Changed
 
@@ -22,6 +23,7 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 - **`Failure` keeps the literal type of its error.** Its type parameter is `const`, so `Failure('invalid_email')` is typed `'invalid_email'` rather than `string`, and an inferred error union stays exact with no `as const`. An object error is typed as readonly with literal properties, which is still assignable to a mutable object type, and an array error as a readonly tuple, which a mutable array type does not accept. A value typed `string` stays `string`.
 - **A `next` that can only fail no longer widens a step's value.** `Command` with an explicit `next` declared its function's result as its value when `next` could only fail, and `Ask`, `Parallel` and `effectPipe` declared `unknown`, so a step that either succeeds or compensates and then fails, as in `ok ? Success(order) : Command(refund, () => Failure('declined'))`, did not compile in a pipeline, and a compensation written as a sub-pipeline failed the same way. Such a `next` now declares `never`, which adds nothing to the step's value.
 - **`Parallel` refuses a third argument after its options.** Nothing reads a third argument once the options come second, so `Parallel(effects, { limit: 1 }, next)` ran without its `next` and handed the branch values on as they were, which only TypeScript refused. It now throws an `EffectTypeError` that gives the order, and so does a second options object passed there. `undefined` or `null` in that place still counts as absent.
+- **An error for a `next` that returned something other than an Effect names whose `next` it was.** It said only that the flow or a continuation had returned it, so finding the culprit meant reading every `next`. It now reads, for example, `The next of Command 'cmdChargeCard' returned the number 2`, naming a Command by its name and an `Ask` or `Parallel` by its type.
 - **Node 22 or later.** `engines` says `>=22`, where it said `>=18`: Node 18 and 20 have reached their end of life, and the tests run on 22, 24 and 26. Nothing in the library needs a newer Node, so code on an older one keeps running, but it is no longer tested there.
 
 ### Fixed
@@ -224,7 +226,7 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 
 - Initial release: `Success`, `Failure`, `Command`, `effectPipe`, and `runEffect`.
 
-[Unreleased]: https://github.com/aycangulez/pure-effect/compare/v0.15.0...HEAD
+[0.16.0]: https://github.com/aycangulez/pure-effect/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/aycangulez/pure-effect/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/aycangulez/pure-effect/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/aycangulez/pure-effect/compare/v0.12.0...v0.13.0

@@ -1,9 +1,9 @@
 // @ts-check
 
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { configureEffect, recorder, Failure } from '../index.js';
+import { configureEffect, recorder, Failure } from 'pure-effect';
 
-/** @import { Effect, EffectConfiguration, RunWrapper, StepRunner, CommandInterceptor, TraceEntry, TraceLog, SuccessState, FailureState } from "../index.js" */
+/** @import { Effect, EffectConfiguration, RunWrapper, StepRunner, CommandInterceptor, TraceEntry, TraceLog, SuccessState, FailureState } from "pure-effect" */
 
 /**
  * Records every run of an application without touching any call site, one trace per run. `recordEffect` covers
