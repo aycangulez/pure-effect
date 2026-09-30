@@ -685,6 +685,19 @@ runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { wrong: 'thing'
 runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }));
 // a flow that reads no context still needs none
 runEffect(Success(1));
+// flowName names a run in traces and spans, so a typed context takes it beside what the flow reads, while a key the
+// flow does not read is still refused
+runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { db: 'conn', flowName: 'signup' });
+recordEffect(ctxFlow, { email: 'a@b.c', password: 'x' }, { context: { db: 'conn', flowName: 'signup' } });
+replayEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), [], { context: { db: 'conn', flowName: 'signup' } });
+timeTravel(ctxFlow, { trace: [] }, { context: { db: 'conn', flowName: 'signup' } });
+// @ts-expect-error a key the flow does not read is still refused
+runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { db: 'conn', flowname: 'signup' });
+// @ts-expect-error flowName is a string
+runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { db: 'conn', flowName: 1 });
+// a flow that reads no context takes any, as before, including an undefined one passed on with a call configuration
+runEffect(Success(1), { tenant: 'acme' });
+runEffect(Success(1), undefined, {});
 
 // each step contributes its own context, so a step that reads none does not erase a later step's
 const parseConnId = (raw: string): Effect<string, 'bad_id'> => (raw ? Success(raw) : Failure('bad_id'));

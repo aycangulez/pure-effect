@@ -37,8 +37,11 @@ export type AskState<T, E = unknown, Ctx = unknown> = {
 };
 
 export type RetryOptions = {
+    /** Tries after the first, so `2` makes at most 3 calls. A positive integer, 3 by default. */
     attempts?: number;
+    /** Milliseconds before the first retry, 100 by default. */
     delay?: number;
+    /** Multiplies the wait before each later retry, so `2` doubles it. 1 by default, the same wait each time. */
     backoff?: number;
 };
 
@@ -58,6 +61,7 @@ export type RetryState<T, E = unknown, Ctx = unknown, R = T> = {
 export type RetryExhaustedError<Thrown = unknown> = {
     retryExhausted: true;
     lastError: Thrown;
+    /** The `attempts` option: tries after the first, so the retried steps ran one more time than this. */
     attempts: number;
 };
 
@@ -1279,12 +1283,15 @@ export declare function configureEffect(...configs: (EffectConfiguration | undef
 /** Hooks for one `runEffect` call, inside the installed ones; `inherit: false` leaves those out. */
 export type CallConfiguration = EffectConfiguration & { inherit?: boolean };
 
+/** The context a run is given: what the flow reads, and a `flowName` naming the run in traces and spans. */
+export type RunContext<Ctx> = unknown extends Ctx ? Ctx : Ctx extends object ? Ctx & { flowName?: string } : Ctx;
+
 /** Runs a flow and returns its `Success` or `Failure`. A flow that reads a context requires one. */
 export declare function runEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     ...args: unknown extends Ctx
         ? [context?: Ctx, callConfig?: CallConfiguration]
-        : [context: Ctx, callConfig?: CallConfiguration]
+        : [context: RunContext<Ctx>, callConfig?: CallConfiguration]
 ): Promise<SuccessState<T> | FailureState<E>>;
 
 export type ReplayStep = {
@@ -1357,18 +1364,23 @@ export declare function recorder(options?: RecorderOptions): {
 };
 
 /** `recordEffect`'s options: recorder options, plus the context the run gets and a build id. */
-export type RecordOptions<Ctx = unknown> = RecorderOptions & { context?: Ctx; version?: string | undefined };
+export type RecordOptions<Ctx = unknown> = RecorderOptions & {
+    context?: RunContext<Ctx>;
+    version?: string | undefined;
+};
 
 /** Runs a flow for real and returns its outcome with a trace, which keeps the input's type for the replay. */
 export declare function recordEffect<I, T, E = unknown, Ctx = unknown>(
     flowFn: (input: I) => Effect<T, E, Ctx>,
     initialInput: I,
-    ...options: unknown extends Ctx ? [options?: RecordOptions<Ctx>] : [options: RecordOptions<Ctx> & { context: Ctx }]
+    ...options: unknown extends Ctx
+        ? [options?: RecordOptions<Ctx>]
+        : [options: RecordOptions<Ctx> & { context: RunContext<Ctx> }]
 ): Promise<{ result: SuccessState<T> | FailureState<E>; trace: TraceLog<I, Ctx> & { initialInput: I } }>;
 
 export interface ReplayOptions<Ctx = unknown> {
     /** Context for `Ask`; defaults to the one the trace recorded. */
-    context?: Ctx;
+    context?: RunContext<Ctx>;
     /** Strip `Retry` delays so a replay does not wait out production backoff (default `true`). */
     fastRetry?: boolean;
     /** Runs the replay inside the installed hooks, so they see it. Off by default. */
@@ -1408,5 +1420,5 @@ export declare function replayEffect<T, E = unknown, Ctx = unknown>(
 export declare function timeTravel<T, E = unknown, Ctx = unknown>(
     flowFn: (input: any) => Effect<T, E, Ctx>,
     traceLog: TraceLog,
-    options?: { log?: (...args: any[]) => void; context?: Ctx; version?: string | undefined }
+    options?: { log?: (...args: any[]) => void; context?: RunContext<Ctx>; version?: string | undefined }
 ): Promise<SuccessState<T> | FailureState<E>>;

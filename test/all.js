@@ -4209,6 +4209,24 @@ describe('Constructor arguments', function () {
         );
     });
 
+    it('should refuse a third argument that a Parallel given its options second would ignore', function () {
+        // With the options second nothing reads a third argument, so `Parallel(effects, { limit: 1 }, next)` ran
+        // without its next and handed the values on unchanged. Only TypeScript refused it.
+        const parallel = /** @type {any} */ (Parallel);
+        const next = (/** @type {any[]} */ values) => Success(values.length);
+        assert.match(
+            messageFrom(() => parallel([Success(1)], { limit: 1 }, next)),
+            /next goes second and its options third: Parallel\(effects, next, options\)/
+        );
+        assert.match(
+            messageFrom(() => parallel([Success(1)], { limit: 1 }, { settled: true })),
+            /one options object.*a plain object, would be ignored/
+        );
+        // An absent third argument, as a caller forwarding one may pass, is still fine.
+        assert.doesNotThrow(() => parallel([Success(1)], { limit: 1 }, undefined));
+        assert.doesNotThrow(() => parallel([Success(1)], { limit: 1 }, null));
+    });
+
     it('should refuse a Retry given the step instead of its Effect, or a bare number of attempts', function () {
         const fetchPrice = () => Success(1);
         assert.match(

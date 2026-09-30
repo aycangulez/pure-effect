@@ -118,6 +118,15 @@ For example, if the email guard returned `Success(true)` instead of `Success(inp
 
 A step tested on its own returns a `Failure` without `initialInput`. That is why the assertion above is `Failure('Email already in use.')`, while the validation one is `Failure('Invalid email.', badInput)`: `effectPipe` adds the input when it builds a flow.
 
+A walk stops at each Command to be handed its answer. To run the whole flow instead, `Retry` and `Parallel` included, hand `replayEffect` a function that answers each Command by name. Nothing is called and a retry does not wait, and answering `{ error }` makes that Command throw, which is how a test reaches a `Retry`'s fallback:
+
+```js
+const answers = { cmdFindUser: null, cmdSaveUser: { id: 1, ...input } };
+const answer = (step) => (step.name in answers ? { result: answers[step.name] } : undefined);
+const { result } = await replayEffect(registerUserFlow(input), answer);
+assert.deepEqual(result, Success({ id: 1, ...input }));
+```
+
 Tests cannot see inside a Command's function without running it. If `cmdFindUser` said `db.findUser(input.name)` instead of `input.email`, every test on this page would still pass. Keep those functions to a single call, and let an integration test cover them.
 
 **In TypeScript**, a flow is typed as any kind of step it could start with, since validation may already have returned a `Success` or a `Failure`, so `.cmd` and `.next` compile only after the test checks that the step is a Command. `node:assert`'s `assert(step.type === 'Command')` is such a check, and TypeScript follows it. Jest's and Vitest's `expect` is not, so a walk needs a check at every step, and a small helper makes that one line per step with any test framework:
@@ -138,7 +147,7 @@ const step1 = assertCommand(registerUserFlow(input), 'cmdFindUser');
 assertCommand(step1.next(null), 'cmdSaveUser');
 ```
 
-The answer handed to `next` has to match what the Command's function returns, so where the tests above pass `{ id: 1 }` for a user that was found, a TypeScript test passes a whole user, of the type `db.findUser` returns.
+Called on a step directly, as in `ensureEmailAvailable(input).next(found)`, `next` is checked against what the Command's function returns, so where the tests above pass `{ id: 1 }` for a user that was found, a TypeScript test passes a whole user, of the type `db.findUser` returns. A walk through the whole flow cannot check its answers, since the flow's type does not say which Command comes next, so there `next` accepts any value.
 
 ## Coming from async/await
 
@@ -347,6 +356,8 @@ This works when the removed step is the last one the flow reaches. Remove a step
 
 **Replay checks the path, not the values.** It shows that the flow asks for the same Commands in the same order and handles the same answers. It cannot check what the flow computes, because every Command's result comes from the recording, not from the new code. If you fix how a refund amount is calculated and replay the bad run, the charge step gets the old amount from the recording: the replay reports `Success`, returns the value from before the fix, and flags nothing. Test a change to a value against the pure step that computes it.
 
+**A replay cannot check a fix inside a Command's function either.** The function never runs, so the replay hands the flow what it returned or threw before the fix: catch a duplicate-key error inside the function and return it as data, and the old trace still replays the throw. Cover such a fix with an integration test. And when a Command's result changes shape, rename the Command, since a trace matches it by name: under the old name, an old trace hands the new code a result in the old shape, which it can take for another answer without any `TimeParadox`.
+
 **A trace records what each Command returned, not the arguments it was called with.** Given the recorded input and results, the flow does the same thing again, so replaying up to a step rebuilds the arguments that Command ran with. You can inspect them in a debugger, but you cannot assert on them. Storing arguments would also double what `redact` has to cover, since arguments are usually the sensitive part of a call.
 
 **Put anything that varies between runs inside a Command.** For replay, the current time or a random ID counts as I/O. Wrapped in a Command, it is recorded and replayed like any other result. A step that calls `Date.now()` directly gets a new value on every replay and drifts from the trace.
@@ -372,9 +383,10 @@ await replayEffect(checkoutFlow(input), resolve);
 
 ## Recording in Production
 
-`recordEffect` suits tests and scripts, where one call covers the whole run. To record an application without changing any call site, install the hooks once at startup (see `examples/recording-example.js`).
+`recordEffect` suits tests and scripts, where one call covers the whole run. To record an application without changing any call site, install the hooks once at startup. The two files imported below are in the repository's [examples folder](https://github.com/aycangulez/pure-effect/blob/main/examples) rather than the npm package, so copy them into your project.
 
 ```js
+import { randomUUID } from 'node:crypto';
 import { configureEffect } from 'pure-effect';
 import { recordingHooks } from './recording-example.js';
 import { telemetryHooks } from './opentelemetry-example.js';
@@ -382,8 +394,10 @@ import { telemetryHooks } from './opentelemetry-example.js';
 configureEffect(
     telemetryHooks(),
     recordingHooks({
-        sink: (trace) => putObject(`traces/${trace.flowName}/${requestId}.json`, JSON.stringify(trace)),
-        redact: (value, name, kind) => (kind === 'initialInput' ? { ...value, password: '[redacted]' } : value),
+        sink: (trace) => putObject(`traces/${trace.flowName}/${randomUUID()}.json`, JSON.stringify(trace)),
+        // A replay runs validation again on the stored input, so the stand-in keeps the password rule's verdict.
+        redact: (value, name, kind) =>
+            kind === 'initialInput' ? { ...value, password: value.password.length >= 8 ? '[redacted]' : '' } : value,
         maxEntries: 500,
         keep: (result) => result.type === 'Failure' // the default; keep everything, or sample
     })
@@ -421,7 +435,7 @@ app.post('/checkout', async (req, res) => {
 });
 ```
 
-Recording stores the context alongside the trace, so `Ask` replays with the values the original request saw.
+Recording stores the context alongside the trace, so `Ask` replays with the values the original request saw. It is copied once per run, so read a value that can change while a run is under way, such as a switch an operator can flip to stop a batch, in a Command, whose result the trace records each time.
 
 ## Retrying Transient Failures
 
@@ -855,7 +869,7 @@ An option set to `undefined` keeps its default.
 
 Returns `{ type: 'Parallel', effects, next, options }`. Runs all effects at the same time. `next` receives the array of success values, in order, and is optional, defaulting to `(values) => Success(values)` as with `Command`. The first branch to fail cancels the others and its `Failure` is returned; `next` is not called. Which branch fails first depends on timing, so it is recorded, and a replay returns the same one. Each branch's Commands receive an `AbortSignal` as their only argument, so I/O that accepts it can be stopped while running; see [Running Effects in Parallel](#running-effects-in-parallel).
 
-The second argument can be `next` or the options, so `Parallel(effects, { limit: 5 })` works.
+The second argument can be `next` or the options, so `Parallel(effects, { limit: 5 })` works. With the options second, a third argument throws, since nothing would read it.
 
 - `limit`: the most branches running at once. Results and recorded paths stay in array order, so a limit changes only the pacing. A value that is not a positive integer throws a `TypeError`.
 - `settled`: run every branch to the end and pass `next` one outcome per branch, `Success` or `Failure`, in array order. No branch cancels the others, and the `Parallel` never fails because of a branch. An `EffectTypeError` still escapes, because a malformed flow is a bug, not a branch outcome.
@@ -969,7 +983,7 @@ onStep            C.onStep( K.onStep( cmd ) )    K.onStep
 
 #### `recorder(options?)`
 
-Returns `{ onStep, entries, toTrace }`. Pass `onStep` to `runEffect` to record what every Command returned. A recorder holds the steps of every run it sees, so installed with `configureEffect` for a whole application it mixes requests into one trace, which a replay refuses; give each run its own recorder, as `examples/recording-example.js` does. `toTrace(meta)` packages the trace, and it copies the `initialInput` and `context` you give it at the moment you call it. A value that cannot be copied whole, such as a context holding a logger function, is copied around the parts that cannot be copied, which are kept as they are. If a Command can change either, for example an ORM save that adds an id to the object it was given, call `toTrace` with them before the run and take `trace` and `dropped` from a second call afterwards, as `recordEffect` does.
+Returns `{ onStep, entries, toTrace }`. Pass `onStep` to `runEffect` to record what every Command returned. A recorder holds the steps of every run it sees, so installed with `configureEffect` for a whole application it mixes requests into one trace, which a replay refuses; give each run its own recorder, as [`examples/recording-example.js`](https://github.com/aycangulez/pure-effect/blob/main/examples/recording-example.js) does. `toTrace(meta)` packages the trace, and it copies the `initialInput` and `context` you give it at the moment you call it. A value that cannot be copied whole, such as a context holding a logger function, is copied around the parts that cannot be copied, which are kept as they are. If a Command can change either, for example an ORM save that adds an id to the object it was given, call `toTrace` with them before the run and take `trace` and `dropped` from a second call afterwards, as `recordEffect` does.
 
 Each entry is `{ command, path, result, durationMs }`, or `{ command, path, threw: true, error, durationMs }` when the Command threw, so a trace also shows which step was slow. `threw` is what marks a step that threw, since a JSON copy of the trace drops `error` when the Command threw `undefined`; an entry with `error` and no `threw`, as older traces have, still counts as one. `path` is the Command's position in the flow, which is what a replay matches on. Each `Parallel` adds one entry, `{ command: 'Parallel', path, result }`, whose result says which branch, if any, cancelled the others: `{ cancelled: false }`, `{ cancelled: true, branch: 0 }`, or `branch: null` when an enclosing `Parallel` cancelled it. `redact` is not called for it, since it holds no data from your flow. Results are copied when recorded, so a later step that changes a returned object does not change the trace, and copied again when a replay hands them to the flow. In a value that cannot be copied whole, such as an object holding a function, the parts that cannot be copied are kept as they are. The copy keeps data but not classes; see [Recording in Production](#recording-in-production). Recording never changes the outcome of a run: if `redact` throws, the step is recorded as `'[redaction failed]'` and the flow carries on.
 
@@ -994,14 +1008,14 @@ assert.equal(redact('card_declined', 'cmdCharge', 'error'), 'card_declined'); //
 
 Check the value before replacing a field in it. `{ ...value, email: '[redacted]' }` turns a `null` into an object, so a lookup that found nothing replays as one that found a user, and the flow takes the other branch. It also turns an error thrown as a string into an object holding its letters.
 
-For `'result'` and `'error'`, `name` is the Command's name; for `'initialInput'` and `'context'`, it is the kind. Redacting `initialInput` rarely breaks replay, since Commands are not run; it matters only if a step branches on the removed field. Redacting `context` breaks `Ask` replay if a step reads what you removed.
+For `'result'` and `'error'`, `name` is the Command's name; for `'initialInput'` and `'context'`, it is the kind. A replay rebuilds the flow from the redacted `initialInput`, so a step that checks a redacted field, such as a password rule, checks the stand-in instead: replace such a field with one the check treats the same way, or the replay takes the other branch. Redacting `context` breaks `Ask` replay if a step reads what you removed.
 
 - `options.maxEntries`: Cap trace length; overflow is counted in `dropped`. A capped trace replays only up to the first step it lacks, since the steps it dropped are ones production ran.
 - `options.stack`: Record stack traces for thrown errors (off by default).
 
 #### `recordEffect(flowFn, initialInput, options?)`
 
-Runs a flow for real while recording, returning `{ result, trace }`. Accepts `recorder` options plus `context` and `version`. For tests and scripts. To record an application without changing call sites, use the wiring in `examples/recording-example.js`, which gives each run its own recorder.
+Runs a flow for real while recording, returning `{ result, trace }`. Accepts `recorder` options plus `context` and `version`. For tests and scripts. To record an application without changing call sites, use the wiring in [`examples/recording-example.js`](https://github.com/aycangulez/pure-effect/blob/main/examples/recording-example.js), which gives each run its own recorder.
 
 #### `replayEffect(effect, traceOrResolver, options?)`
 
@@ -1009,7 +1023,7 @@ Replays a flow, feeding recorded results to Commands instead of running them. Re
 
 - `traceOrResolver`: a trace (or bare entries array) to replay directly, or a resolver function for traces stored in some other shape. A resolver returns `{ result }`, `{ error }`, or `undefined` if the step is unrecorded. A resolver is also asked about each `Parallel`, with `step.type` set to `'Parallel'`: answering with `{ result }` holding the recorded cancellation replays it as production decided, and anything else replays that `Parallel` by timing, as before. A malformed trace rejects with a `ReplayError`.
 - `options.context`: context for `Ask`. With a trace it defaults to the context the trace recorded, so pass one only to replay with a different one. A resolver has no recorded context, so pass it one if the flow reads `Ask`.
-- `options.onMissing`: `'throw'` (default) fails on an unrecorded step; `'execute'` runs the real Command instead, doing its I/O for real. A step can be unrecorded because a hook vetoed it in production, because it was added to the flow since the recording, or because production ran it and the recorder dropped it under `maxEntries`, so pass `'execute'` only where the Commands reach test doubles or only read, as when replaying locally past a step added since the recording. A trace that dropped entries refuses it: replay such a trace with the default, which stops at the first step it lacks, or record the flow again with a higher `maxEntries`. After a flow changes shape, for example when a Command is newly wrapped in `Retry`, its steps sit at new positions, so `'execute'` would run all of them live and leave the recorded ones unused: record the flow again instead.
+- `options.onMissing`: `'throw'` (default) stops at an unrecorded step, and `replayEffect` resolves to a `Failure` whose `error` is a `ReplayError`, so a test that only checks for a `Failure` passes; check the error too. `'execute'` runs the real Command instead, doing its I/O for real. A step can be unrecorded because a hook vetoed it in production, because it was added to the flow since the recording, or because production ran it and the recorder dropped it under `maxEntries`, so pass `'execute'` only where the Commands reach test doubles or only read, as when replaying locally past a step added since the recording. A trace that dropped entries refuses it: replay such a trace with the default, which stops at the first step it lacks, or record the flow again with a higher `maxEntries`. After a flow changes shape, for example when a Command is newly wrapped in `Retry`, its steps sit at new positions, so `'execute'` would run all of them live and leave the recorded ones unused: record the flow again instead.
 - `options.fastRetry` (default `true`): strip `Retry` delays.
 - `options.hooks` (default `false`): run the replay inside the configured hooks, so they see the replayed steps, a configured recorder included. When off, the configured hooks are skipped, so a replay cannot reach a telemetry backend or a trace sink.
 - `options.onResolved(step, outcome)`: observe each replayed step. If it throws, the replay stops there and `replayEffect` rejects with that error; it never changes a step's outcome.

@@ -202,11 +202,22 @@ const Parallel = (effects, nextOrOptions, maybeOptions) => {
     const hasNext = typeof nextOrOptions === 'function';
     // A caller forwarding an absent `next` still passes its options third, as the signature reads.
     const nextSkipped = nextOrOptions == null;
-    if (!hasNext && !nextSkipped && !isOptionsObject(nextOrOptions)) {
+    const optionsSecond = !hasNext && !nextSkipped;
+    if (optionsSecond && !isOptionsObject(nextOrOptions)) {
         const got = describeArgument(nextOrOptions);
         throw malformed(`Parallel's second argument must be next or the options, got ${got}.`, nextOrOptions);
     }
-    const options = hasNext || nextSkipped ? maybeOptions : nextOrOptions;
+    // Nothing reads a third argument after the options, so a `next` passed there would silently be skipped.
+    if (optionsSecond && maybeOptions != null) {
+        throw malformed(
+            typeof maybeOptions === 'function'
+                ? "Parallel's next goes second and its options third: Parallel(effects, next, options)."
+                : `Parallel takes one options object, and with the options second its third argument, ` +
+                      `${describeArgument(maybeOptions)}, would be ignored.`,
+            maybeOptions
+        );
+    }
+    const options = optionsSecond ? nextOrOptions : maybeOptions;
     if (options != null && !isOptionsObject(options)) {
         throw malformed(`Parallel's options must be an object, got ${describeArgument(options)}.`, options);
     }
