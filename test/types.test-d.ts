@@ -80,7 +80,7 @@ expectType<SuccessState<User> | FailureState<'invalid_email' | 'weak_password'>>
 // --- Command ---
 
 // next is optional, defaulting to Success
-expectType<CommandState<number, number>>(Command(() => 42));
+expectType<CommandState<number, number, never>>(Command(() => 42));
 expectType<CommandState<number, string>>(
     Command(
         () => 42,
@@ -345,7 +345,7 @@ const typedByReturn = Command(
 );
 expectType<CommandState<SavedUser | null, SavedUser, 'not_found'>>(typedByReturn);
 
-// --- long pipelines: typed for up to 20 steps, the same ceiling as Effect-TS ---
+// --- long pipelines: typed for up to 20 steps ---
 
 const stepWith =
     <E extends string>(error: E) =>
@@ -749,16 +749,31 @@ const rec = recorder({ redact: (value, name, kind) => value, maxEntries: 100, st
 expectType<StepRunner>(rec.onStep);
 expectType<TraceEntry[]>(rec.entries);
 expectType<TraceLog>(rec.toTrace());
-expectType<TraceLog>(rec.toTrace({ initialInput: 1, flowName: 'f', context: {}, version: 'v' }));
+// toTrace keeps the types of the input and context it is given, as recordEffect's trace does
+const packaged = rec.toTrace({ initialInput: 1, flowName: 'f', context: { tenant: 't' }, version: 'v' });
+expectType<TraceLog<number, { tenant: string }>>(packaged);
+const typedHead: TraceLog<{ id: string }> = rec.toTrace({ initialInput: { id: 'a' } });
 expectAssignable<EffectConfiguration>({ onStep: rec.onStep });
 expectAssignable<TraceMeta>({ version: 'abc' });
 
 // an entry for a step that threw says so, and one without the flag, as older traces have, is still an entry
-expectType<true | undefined>(rec.entries[0].threw);
+expectType<boolean | undefined>(rec.entries[0].threw);
 expectAssignable<TraceEntry>({ command: 'cmdCharge', path: '0', threw: true, durationMs: 1 });
 expectAssignable<TraceEntry>({ command: 'cmdCharge', path: '0', error: 'card_declined' });
-// @ts-expect-error `threw` is only ever `true`; a step that returned has no flag
-expectAssignable<TraceEntry>({ command: 'cmdCharge', threw: false });
+// A trace imported as a JSON module has `threw: boolean`, since JSON imports widen `true`, and it has to replay:
+// `threw: true` once refused every fixture with a failed step, which is how an incident becomes a regression test
+declare const importedFixture: {
+    initialInput: { email: string; password: string };
+    trace: {
+        command: string;
+        path: string;
+        threw: boolean;
+        error: { name: string; message: string };
+        durationMs: number;
+    }[];
+};
+expectAssignable<TraceLog>(importedFixture);
+replayEffect(typedFlow(importedFixture.initialInput), importedFixture);
 
 // redact sees every kind of value a trace holds, and only those kinds
 const redactor: RecorderOptions['redact'] = (value, name, kind) => {
@@ -776,9 +791,17 @@ recorder({ redact: (value, name, kind) => (kind === 'initialInput' ? { ...value,
 (async () => {
     const recorded = await recordEffect(typedFlow, { email: 'a@b.c', password: 'x' }, { version: 'v1' });
     expectType<SuccessState<SavedUser> | FailureState<ValidationError | DbError>>(recorded.result);
-    expectType<TraceLog>(recorded.trace);
+    // The trace keeps the input's type, so a replay rebuilds the flow from it with no cast
+    expectType<TraceLog<User, unknown> & { initialInput: User }>(recorded.trace);
+    expectType<User>(recorded.trace.initialInput);
+    const replayedFromMemory = await replayEffect(typedFlow(recorded.trace.initialInput), recorded.trace);
+    expectType<SuccessState<SavedUser> | FailureState<ValidationError | DbError>>(replayedFromMemory.result);
     const withCtx = await recordEffect(ctxFlow, { email: 'a@b.c', password: 'x' }, { context: { db: 'conn' } });
     expectType<SuccessState<{ email: string; password: string; conn: string }> | FailureState<never>>(withCtx.result);
+    expectType<AppCtx | undefined>(withCtx.trace.context);
+    // A trace read back from storage is untyped until the caller says otherwise
+    const stored: TraceLog = JSON.parse(JSON.stringify(recorded.trace));
+    expectType<unknown>(stored.initialInput);
 })();
 // @ts-expect-error context does not match the flow's Ctx
 recordEffect(ctxFlow, { email: 'a@b.c', password: 'x' }, { context: { db: 42 } });

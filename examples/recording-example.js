@@ -3,12 +3,11 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { configureEffect, recorder, Failure } from '../index.js';
 
-/** @import { EffectConfiguration, RunWrapper, StepRunner, CommandInterceptor, TraceLog, SuccessState, FailureState } from "../index.js" */
+/** @import { Effect, EffectConfiguration, RunWrapper, StepRunner, CommandInterceptor, TraceEntry, TraceLog, SuccessState, FailureState } from "../index.js" */
 
 /**
- * Example wiring for recording every run of an application.
- * `recordEffect` covers tests and scripts, where one call site holds the whole run. This
- * exists for the other case: recording without touching any call site.
+ * Records every run of an application without touching any call site, one trace per run. `recordEffect` covers
+ * tests and scripts, where one call holds the whole run.
  */
 
 /**
@@ -20,32 +19,26 @@ import { configureEffect, recorder, Failure } from '../index.js';
 
 /**
  * @typedef {Object} RecordingOptions
- * @property {(trace: TraceLog) => Promise<void> | void} [sink] - Receives a finished trace. Writing to
- *           S3 or a database fit here. Prefer not to await slow I/O inside
- *           a request: hand the trace to a queue or a background task instead.
- * @property {(value: any, name: string, kind: string) => any} [redact] - Runs before any value enters the
- *           trace, so nothing sensitive reaches the sink even in memory. It sees results, serialized errors,
- *           and the `initialInput` and `context` the trace stores, distinguished by `kind`. It is handed a copy,
- *           so changing the value in place never reaches the run.
- * @property {number} [maxEntries] - Caps trace length; the overflow count is reported as `dropped`.
+ * @property {(trace: TraceLog) => Promise<void> | void} [sink] - Receives each kept trace, to write to S3 or a
+ *           database. Hand slow writes to a queue rather than awaiting them inside a request.
+ * @property {(value: any, name: string, kind: string) => any} [redact] - Scrubs every value before it enters the
+ *           trace: results, serialized errors, and the stored `initialInput` and `context`, told apart by `kind`.
+ *           It receives a copy, so changing it in place never reaches the run.
+ * @property {number} [maxEntries] - Caps trace length, 500 by default; the overflow is reported as `dropped`.
  * @property {boolean} [stack] - Records stack traces for thrown errors.
- * @property {(result: SuccessState<any> | FailureState<any>) => boolean} [keep] - Decides which runs
- *           reach the sink. Defaults to failures only. Return `true` always to keep everything, or
- *           sample successes with a probability check. A run that rejected, because the flow's own code
- *           threw, is offered as a Failure carrying the thrown error, so the default keeps it.
- * @property {(error: unknown, flowName?: string) => void} [onSinkError] - Receives an error thrown by `keep`
- *           or `sink`, which would otherwise have replaced the run's outcome. Defaults to `console.error`.
- * @property {(message: string, flowName?: string) => void} [onWarning] - Receives a warning about a trace that
- *           will not replay as recorded: one whose flow carried no input, or one `maxEntries` cut short, each
- *           reported once per flow. Defaults to `console.warn`.
+ * @property {(result: SuccessState<any> | FailureState<any>) => boolean} [keep] - Decides which runs reach the sink:
+ *           failures only by default. Return `true` to keep everything, or sample. A run whose own code threw is
+ *           offered as a Failure carrying the thrown error.
+ * @property {(error: unknown, flowName?: string) => void} [onSinkError] - Receives an error thrown by `keep` or
+ *           `sink`. Defaults to `console.error`.
+ * @property {(message: string, flowName?: string) => void} [onWarning] - Receives a warning, once per flow, about a
+ *           kept trace that will not replay as recorded: it has no input, `maxEntries` cut it short, or some of its
+ *           steps are named 'anonymous'. Defaults to `console.warn`.
  */
 
 /**
- * Builds the three hooks that record each run, without installing them.
- *
- * Returning a configuration leaves the caller in charge of where recording sits relative to tracing:
- * passed to one `configureEffect` call together, or installed as separate layers, the two merge the
- * same way, and the caller holds the function that removes each.
+ * Builds the three hooks that record each run, without installing them, so the caller decides where recording sits
+ * among its other hooks.
  *
  * @param {RecordingOptions} [options]
  * @returns {EffectConfiguration}
@@ -60,31 +53,18 @@ export function recordingHooks(options = {}) {
         onSinkError = (error, flowName) => console.error(`Recording failed for '${flowName || 'flow'}':`, error),
         onWarning = (message) => console.warn(message)
     } = options;
+    // One recorder per run, found through async-local scope: a single shared recorder would mix concurrent runs.
     /** @type {AsyncLocalStorage<RecordingStore>} */
     const scope = new AsyncLocalStorage();
-    /** Flows already warned about, one set per warning, so each comes once per flow rather than once per run. */
+    /** Warnings already given, as `kind:flowName`. */
     const warned = new Set();
-    const warnedCapped = new Set();
 
-    /**
-     * One recorder per run, held in async-local scope so `onStep` can find the right one without a
-     * recorder being threaded through any business-logic signature. A single module-level recorder
-     * would interleave the steps of concurrent runs into one trace.
-     * @type {RunWrapper}
-     */
+    /** @type {RunWrapper} */
     const onRun = async (effect, pipeline, flowName) => {
         const rec = recorder({ redact, maxEntries, stack });
-        // `toTrace` copies the input when it is called, so it is called now: a Command that assigns an id to
-        // the object it was handed would otherwise rewrite what the trace says production received. The input
-        // is read off the flow, where only `effectPipe` puts it, so a flow whose outermost node is a bare
-        // Command, Ask, Retry, or Parallel records none; wrap it in a one-step pipeline to record it.
-        const head = rec.toTrace({ flowName, initialInput: /** @type {any} */ (effect).initialInput });
-        /** @type {RecordingStore} */
-        const store = { rec, head, contextCaptured: false };
-        return scope.run(store, async () => {
-            // A run rejects when the flow's own code throws, a TypeError after an API changed shape for one, and
-            // that is the run most worth replaying: the trace reproduces the throw offline. So it is offered to
-            // `keep` as a Failure carrying the thrown error, and still rejects once the trace has been handled.
+        // Packaged before the run, so a Command that changes its input cannot rewrite what the trace says it received.
+        const head = rec.toTrace({ flowName, initialInput: effect.initialInput });
+        return scope.run({ rec, head, contextCaptured: false }, async () => {
             /** @type {{ result: SuccessState<any> | FailureState<any> } | { error: unknown }} */
             let outcome;
             try {
@@ -92,42 +72,17 @@ export function recordingHooks(options = {}) {
             } catch (error) {
                 outcome = { error };
             }
+            // A run whose own code threw is kept as a Failure: it is the one most worth replaying.
             const result = 'result' in outcome ? outcome.result : Failure(outcome.error);
-            // Recording must never decide a run's outcome, the rule the telemetry example keeps as well. `keep`
-            // and `sink` are the application's code, and a sink that serializes the trace throws on a circular
-            // value such as an HTTP client's error, so a failure is reported rather than returned.
+            // Recording never decides the outcome: a keep or sink that throws is reported, not returned.
             try {
                 if (keep(result)) {
-                    // Said when the first such trace is kept, before an incident needs a replay it cannot give.
-                    if (effect.initialInput === undefined && !warned.has(flowName)) {
-                        warned.add(flowName);
-                        onWarning(
-                            `Recording '${flowName || 'flow'}': the flow carries no input, so its traces hold none ` +
-                                'and timeTravel rebuilds it from undefined. Build the outermost flow with effectPipe, ' +
-                                'even as a one-step pipeline.',
-                            flowName
-                        );
-                    }
-                    const { dropped, trace } = rec.toTrace();
-                    // A capped trace lacks steps production ran, so it replays only up to the first of them, and
-                    // replaying past it by running the missing steps live would repeat production's I/O.
-                    if (dropped && dropped > 0 && !warnedCapped.has(flowName)) {
-                        warnedCapped.add(flowName);
-                        onWarning(
-                            `Recording '${flowName || 'flow'}': a kept trace dropped ${dropped} entries under ` +
-                                `maxEntries (${maxEntries}), so it replays only up to the first step it lacks. ` +
-                                'Raise maxEntries for this flow to replay whole runs.',
-                            flowName
-                        );
-                    }
+                    const { dropped = 0, trace } = rec.toTrace();
+                    warnAboutReplay(flowName, effect, dropped, trace);
                     await sink({ ...head, dropped, trace });
                 }
             } catch (error) {
-                try {
-                    onSinkError(error, flowName);
-                } catch {
-                    // A reporter that throws does not get to change the run either.
-                }
+                reportSinkError(error, flowName);
             }
             if ('error' in outcome) throw outcome.error;
             return outcome.result;
@@ -135,9 +90,53 @@ export function recordingHooks(options = {}) {
     };
 
     /**
-     * Outside a recorded run there is no store, so the Command runs untouched. The fourth argument,
-     * `path`, has to be forwarded: it is what a replay matches on, and a trace without it cannot tell
-     * `Parallel` branches apart.
+     * Warns, once per flow, about a kept trace that will not replay as recorded.
+     * @param {string} flowName
+     * @param {Effect<any, any, any>} effect
+     * @param {number} dropped
+     * @param {TraceEntry[]} trace
+     */
+    const warnAboutReplay = (flowName, effect, dropped, trace) => {
+        const warnOnce = (/** @type {string} */ kind, /** @type {string} */ message) => {
+            if (warned.has(`${kind}:${flowName}`)) return;
+            warned.add(`${kind}:${flowName}`);
+            onWarning(`Recording '${flowName || 'flow'}': ${message}`, flowName);
+        };
+        if (effect.initialInput === undefined) {
+            warnOnce(
+                'input',
+                'the flow carries no input, so its traces hold none and timeTravel rebuilds it from undefined. ' +
+                    'Build the outermost flow with effectPipe, even as a one-step pipeline.'
+            );
+        }
+        if (dropped > 0) {
+            warnOnce(
+                'capped',
+                `a kept trace dropped ${dropped} entries under maxEntries (${maxEntries}), so it replays only up to ` +
+                    'the first step it lacks. Raise maxEntries for this flow to replay whole runs.'
+            );
+        }
+        const anonymous = trace.filter((entry) => entry.command === 'anonymous').length;
+        if (anonymous > 0) {
+            warnOnce(
+                'anonymous',
+                `${anonymous} of its steps are named 'anonymous', usually inline arrow Commands, so a replay cannot ` +
+                    'tell them apart and would not notice two of them trading places. Name them with a const, as in ' +
+                    'const cmdLoadOrder = () => ..., or with meta.name.'
+            );
+        }
+    };
+
+    /** A reporter that throws does not change the run either. */
+    const reportSinkError = (/** @type {unknown} */ error, /** @type {string} */ flowName) => {
+        try {
+            onSinkError(error, flowName);
+        } catch {}
+    };
+
+    /**
+     * Outside a recorded run there is no store, so the Command runs untouched. `path` must be passed on: a replay
+     * matches steps on it.
      * @type {StepRunner}
      */
     const onStep = async (name, type, op, path) => {
@@ -146,10 +145,8 @@ export function recordingHooks(options = {}) {
     };
 
     /**
-     * `onRun` never sees the context, so it is captured from the first Command of the run, and copied there,
-     * before that Command can write to it. A run that stops before any Command, at a validation step or an
-     * `Ask` check, records no context, and its replay can take another branch and report `Trace exhausted`.
-     * Such a run did no I/O, so running the flow again with its input and the logged context reproduces it.
+     * `onRun` never sees the context, so it is copied from the run's first Command, before that Command can change
+     * it. A run that stops before any Command records none.
      * @type {CommandInterceptor}
      */
     const onBeforeCommand = async (command, context) => {
@@ -163,10 +160,8 @@ export function recordingHooks(options = {}) {
 }
 
 /**
- * Installs recording as its own layer on top of whatever is configured, and returns the function that
- * removes it again. Call it once per process: layers stack, so a second call records every Command
- * twice and writes two traces per run. A setup path that can run again (a reloading dev server, a
- * per-suite bootstrap) should hold the remover and call it before installing a fresh layer.
+ * Installs recording as its own layer and returns the function that removes it. Call it once per process: layers
+ * stack, so a second call records every run twice.
  *
  * @param {RecordingOptions} [options]
  */

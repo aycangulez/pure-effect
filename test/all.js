@@ -2566,6 +2566,33 @@ describe('examples/recording-example.js', function () {
         assert.match(warnings[0][0], /dropped 1 entries under maxEntries \(2\)/);
     });
 
+    it('should warn once per flow when it keeps a trace with anonymous steps', async function () {
+        // A replay tells steps apart by name, and inline arrow Commands are all 'anonymous', so a refactor that swapped
+        // two of them replayed as a Success with each handed the other's recorded result, and nothing flagged it.
+        /** @type {[string, string | undefined][]} */
+        const warnings = [];
+        enableRecording({
+            keep: () => true,
+            onWarning: (message, flowName) => void warnings.push([message, flowName])
+        });
+        const inline = effectPipe(
+            () => Command(() => 1),
+            () => Command(() => 2)
+        );
+        const named = effectPipe(() =>
+            Command(function cmdNamed() {
+                return 1;
+            })
+        );
+        await runEffect(inline({ id: 1 }), { flowName: 'inline' });
+        await runEffect(inline({ id: 2 }), { flowName: 'inline' });
+        await runEffect(named({ id: 3 }), { flowName: 'named' });
+        assert.equal(warnings.length, 1);
+        assert.equal(warnings[0][1], 'inline');
+        assert.match(warnings[0][0], /2 of its steps are named 'anonymous'/);
+        assert.match(warnings[0][0], /meta\.name/);
+    });
+
     it('should give concurrent runs separate traces', async function () {
         /** @type {any[]} */
         const written = [];

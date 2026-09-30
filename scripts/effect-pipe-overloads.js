@@ -25,13 +25,8 @@ export const END = '// END effectPipe overloads.';
 const declarationsPath = fileURLToPath(new URL('../index.d.ts', import.meta.url));
 
 const docComment = `/**
- * Composes steps into a pipeline: each step receives the previous step's success value, and a Failure
- * from any step stops the pipeline. Typed for 1 to ${MAX_STEPS} steps, the same ceiling as Effect-TS's \`pipe\`. A
- * pipeline is itself a step, so a longer one nests: \`effectPipe(effectPipe(s1, s2), effectPipe(s3, s4))\`.
- * Each step's context type is its own, and the pipeline's is all of them together, so a step that reads
- * no context does not erase a later step's, and \`runEffect\` asks for every context a step reads. The error
- * union is built the same way: a step that cannot return a Failure contributes \`never\`, not \`unknown\`, and a
- * pipeline whose last step can only fail has \`never\` as its value.
+ * Composes steps into a pipeline: each step gets the previous step's value, and a \`Failure\` stops it.
+ * Typed for up to ${MAX_STEPS} steps; nest pipelines for more.
  */`;
 
 /** `[1, 2, ..., n]` */
