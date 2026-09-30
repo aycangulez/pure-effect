@@ -1787,6 +1787,15 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
                 'installed as a hook finds the input only on a flow built with effectPipe.'
         );
     }
+    // A replay tells steps apart by name, so two anonymous Commands that swapped places replay without complaint.
+    const anonymous = trace.filter((e) => e.command === 'anonymous').length;
+    if (anonymous > 0) {
+        log(
+            `Warning: ${anonymous} of the recorded steps are named 'anonymous', usually inline arrow Commands, so ` +
+                'this replay cannot tell them apart and would not notice two of them trading places. Name them with ' +
+                'a const or meta.name.'
+        );
+    }
     // Parallel decisions are not narrated as steps, so the header counts Commands to match the lines below.
     const commandCount = trace.filter((e) => !isDecisionEntry(e)).length;
     const stepsText = commandCount === 1 ? 'step' : 'steps';

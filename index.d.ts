@@ -1402,7 +1402,7 @@ export declare function replayEffect<T, E = unknown, Ctx = unknown>(
     options?: ReplayOptions<Ctx>
 ): Promise<Omit<Replay<T, E>, 'unreached'> & { unreached?: TraceEntry[] }>;
 
-/** Replays a trace and logs each step, with its recorded timing. */
+/** Replays a trace and logs each step with its recorded timing, warning about what will not replay as recorded. */
 export declare function timeTravel<T, E = unknown, Ctx = unknown>(
     flowFn: (input: any) => Effect<T, E, Ctx>,
     traceLog: TraceLog,

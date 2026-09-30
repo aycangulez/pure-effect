@@ -125,14 +125,14 @@ import assert from 'node:assert/strict';
 import type { Effect } from 'pure-effect';
 
 // Fails unless the step is the Command named, and returns it typed as one.
-function command<T, E, C>(step: Effect<T, E, C>, name: string) {
+function assertCommand<T, E, C>(step: Effect<T, E, C>, name: string) {
     assert(step.type === 'Command', `expected ${name}, got ${step.type}`);
     assert.equal(step.cmd.name, name);
     return step;
 }
 
-const step1 = command(registerUserFlow(input), 'cmdFindUser');
-command(step1.next(null), 'cmdSaveUser');
+const step1 = assertCommand(registerUserFlow(input), 'cmdFindUser');
+assertCommand(step1.next(null), 'cmdSaveUser');
 ```
 
 The answer handed to `next` has to match what the Command's function returns, so where the tests above pass `{ id: 1 }` for a user that was found, a TypeScript test passes a whole user, of the type `db.findUser` returns.
@@ -1011,7 +1011,7 @@ A trace whose entries carry no `path` (written by hand, or recorded before paths
 
 #### `timeTravel(flowFn, traceLog, options?)`
 
-Replays a trace and narrates each step with its recorded duration, naming any recorded steps that were never reached and warning when the trace's `version` differs from `options.version`. Returns the flow's outcome; for the unreached entries as data, use `replayEffect`. Takes `options.context` to override the trace's, and `options.log` in place of `console.log`.
+Replays a trace and narrates each step with its recorded duration, naming any recorded steps that were never reached, and warning when the trace's `version` differs from `options.version` or when steps are named `'anonymous'`. Returns the flow's outcome; for the unreached entries as data, use `replayEffect`. Takes `options.context` to override the trace's, and `options.log` in place of `console.log`.
 
 ## Limitations
 

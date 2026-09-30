@@ -465,6 +465,36 @@ const errorOf = (/** @type {any} */ result) => result.error;
 describe('Recording and replay', function () {
     beforeEach(() => configureEffect());
 
+    it('should warn in timeTravel when recorded steps are anonymous', async function () {
+        // Inline arrow Commands are all 'anonymous', and a replay tells steps apart by name, so a refactor that swapped
+        // two of them replayed as a Success with each handed the other's recorded result.
+        const inline = effectPipe(
+            () => Command(() => 1),
+            () => Command(() => 2)
+        );
+        const named = effectPipe(() =>
+            Command(function cmdNamed() {
+                return 1;
+            })
+        );
+        for (const [flow, expected] of /** @type {const} */ ([
+            [inline, true],
+            [named, false]
+        ])) {
+            const { trace } = await recordEffect(flow, { id: 1 });
+            /** @type {string[]} */
+            const lines = [];
+            await timeTravel(flow, trace, { log: (/** @type {string} */ line) => void lines.push(line) });
+            const warning = lines.find((l) => l.includes("named 'anonymous'"));
+            assert.equal(Boolean(warning), expected);
+            if (warning) {
+                assert.match(warning, /2 of the recorded steps/);
+                assert.match(warning, /cannot tell them apart/);
+                assert.match(warning, /a const or meta\.name/);
+            }
+        }
+    });
+
     it('should record and replay the registration flow end to end', async function () {
         const input = { email: 'replay@test.com', password: 'password123' };
         const { result, trace } = await recordEffect(registerUserFlow, input);
