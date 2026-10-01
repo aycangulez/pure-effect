@@ -1413,8 +1413,79 @@ describe('Recording and replay', function () {
         const { result: replayed } = await replayEffect(flow({ id: 'x' }), trace);
         const error = /** @type {Error} */ (errorOf(replayed));
         assert.match(error.message, /onBeforeCommand hook vetoed/);
-        assert.match(error.message, /only where the Commands reach test doubles or only read/);
+        assert.match(error.message, /only where every Command the flow can still reach goes to a test double/);
         assert.deepEqual(calls, { read: 0, write: 0 });
+    });
+
+    it("should warn that onMissing: 'execute' after an added step runs the steps after it live too", async function () {
+        // The message advised 'execute' where the Commands only read, so a replay that met a newly added lookup ran it
+        // with 'execute', and the steps after it, which had all moved to new paths, ran live as well: a receipt
+        // was sent and the event marked processed.
+        const calls = { read: 0, check: 0, write: 0 };
+        const read = () =>
+            Command(function cmdRead() {
+                calls.read++;
+                return { row: 'x' };
+            });
+        const check = (/** @type {any} */ row) =>
+            Command(
+                function cmdCheck() {
+                    calls.check++;
+                    return true;
+                },
+                () => Success(row)
+            );
+        const write = () =>
+            Retry(
+                Command(function cmdWrite() {
+                    calls.write++;
+                    return 'written';
+                }),
+                { delay: 0 }
+            );
+        const before = effectPipe(read, write);
+        const after = effectPipe(read, check, write);
+        const { trace } = await recordEffect(before, { id: 'x' });
+        Object.assign(calls, { read: 0, check: 0, write: 0 });
+
+        const { result } = await replayEffect(after({ id: 'x' }), trace);
+        const error = /** @type {Error} */ (errorOf(result));
+        assert.match(error.message, /no step at path '1' for 'cmdCheck'/);
+        assert.match(error.message, /after an added step every step that follows it, since they all move to new paths/);
+        assert.deepEqual(calls, { read: 0, check: 0, write: 0 });
+
+        // What the message warns of: the added lookup runs, and so does the write after it.
+        const { result: executed } = await replayEffect(after({ id: 'x' }), trace, { onMissing: 'execute' });
+        assert.deepEqual(executed, Success('written'));
+        assert.deepEqual(calls, { read: 0, check: 1, write: 1 });
+    });
+
+    it('should refuse an option name recording or replay does not read', async function () {
+        // A misspelt option ran with its default: `onMising: 'execute'` stopped at the first missing step, and a
+        // `verison` passed to timeTravel never warned about a stale trace.
+        const { flow, calls } = makeFlow();
+        assert.throws(() => recorder(/** @type {any} */ ({ maxEntry: 10 })), {
+            name: 'TypeError',
+            message: /recorder has no option named 'maxEntry'; its options are redact, maxEntries and stack\./
+        });
+        await assert.rejects(recordEffect(flow, { id: 'x' }, /** @type {any} */ ({ ctx: {} })), {
+            name: 'TypeError',
+            message:
+                /recordEffect has no option named 'ctx'; its options are context, version, redact, maxEntries and stack\./
+        });
+        assert.deepEqual(calls, { read: 0, write: 0 }, 'refused before the flow runs');
+
+        const { trace } = await recordEffect(flow, { id: 'x' });
+        await assert.rejects(replayEffect(flow({ id: 'x' }), trace, /** @type {any} */ ({ onMising: 'execute' })), {
+            name: 'TypeError',
+            message:
+                /replayEffect has no option named 'onMising'; its options are context, fastRetry, hooks, onMissing and onResolved\./
+        });
+        const log = () => {};
+        await assert.rejects(timeTravel(flow, trace, /** @type {any} */ ({ log, verison: 'b2' })), {
+            name: 'TypeError',
+            message: /timeTravel has no option named 'verison'; its options are log, context and version\./
+        });
     });
 
     it('should give a trace without paths a live tail under onMissing: execute', async function () {
@@ -4296,6 +4367,29 @@ describe('Constructor arguments', function () {
         );
     });
 
+    it('should refuse an option name a Retry or Parallel does not read', function () {
+        // A name it does not read ran with the default and nothing to say so: `{ concurrency: 4 }`, the word p-limit
+        // uses, ran a batch with no limit, `{ settle: true }` ran it fail-fast, and `{ attemps: 5 }` got 3 attempts.
+        const effects = [Success(1)];
+        assert.match(
+            messageFrom(() => Parallel(effects, /** @type {any} */ ({ concurrency: 4 }))),
+            /Parallel has no option named 'concurrency'; its options are limit and settled\./
+        );
+        // Cast: the declarations take a next function second whenever options come third.
+        const parallel = /** @type {any} */ (Parallel);
+        assert.match(
+            messageFrom(() => parallel(effects, undefined, { settle: true })),
+            /'settle'/
+        );
+        assert.match(
+            messageFrom(() => Retry(Success(1), /** @type {any} */ ({ attemps: 5 }))),
+            /Retry has no option named 'attemps'; its options are attempts, delay, backoff and onExhausted\./
+        );
+        // An option set to undefined is still one it reads, which is how an absent config key arrives.
+        assert.doesNotThrow(() => Retry(Success(1), { attempts: undefined, delay: undefined }));
+        assert.doesNotThrow(() => Parallel(effects, { limit: undefined, settled: undefined }));
+    });
+
     it('should name the position of an effectPipe step that is not a function', function () {
         const validate = (/** @type {any} */ input) => Success(input);
         assert.match(
@@ -6092,8 +6186,69 @@ describe('Where a throw comes from', function () {
                     return { id: 2 };
                 })
         )({ email: 'taken@x.com' });
-        await assert.rejects(runEffect(flow), (e) => e instanceof TypeError && /'cmdFindUser'/.test(e.message));
+        // Matched up to "although", since a hook that did not wait for op is told so in the same place.
+        await assert.rejects(
+            runEffect(flow),
+            (e) =>
+                e instanceof TypeError && /'cmdFindUser' at path '0' and returned undefined, although/.test(e.message)
+        );
         assert.equal(saves, 0, 'the flow must not continue as though no user was found');
+    });
+
+    it('should reject when an onStep hook calls op without waiting for it, rather than hand next undefined', async function () {
+        // The same hook without its await. The check ran when the hook returned, while a Command that took any
+        // time was still running, so the found user still became undefined and the duplicate was saved.
+        let saves = 0;
+        configureEffect({
+            onStep: async (name, type, op) => {
+                op();
+            }
+        });
+        const flow = effectPipe(
+            () =>
+                Command(
+                    async function cmdFindUser() {
+                        await new Promise((r) => setTimeout(r, 5));
+                        return { id: 1 };
+                    },
+                    (found) => (found ? Failure('Email already in use.') : Success('free'))
+                ),
+            () =>
+                Command(async function cmdSaveUser() {
+                    await new Promise((r) => setTimeout(r, 5));
+                    saves++;
+                    return { id: 2 };
+                })
+        )({ email: 'taken@x.com' });
+        await assert.rejects(
+            runEffect(flow),
+            (e) => e instanceof TypeError && /'cmdFindUser'.*before op had finished/.test(e.message)
+        );
+        assert.equal(saves, 0, 'the flow must not continue as though no user was found');
+    });
+
+    it('should treat a throw from an op the hook did not wait for as an I/O fault', async function () {
+        // Judged as though the hook had awaited op, which a hook missing only its return does. The throw was
+        // otherwise left unobserved, so the step passed as a success and the rejection went unhandled.
+        let calls = 0;
+        configureEffect({
+            onStep: async (name, type, op) => {
+                op();
+            }
+        });
+        const result = await runEffect(
+            Retry(
+                Command(async function cmdFlaky() {
+                    calls++;
+                    await new Promise((r) => setTimeout(r, 5));
+                    throw new Error('socket reset');
+                }),
+                { attempts: 1, delay: 0 }
+            )
+        );
+        assert.equal(/** @type {any} */ (result).error.retryExhausted, true);
+        assert.equal(/** @type {any} */ (result).error.lastError.message, 'socket reset');
+        assert.equal(calls, 2);
     });
 
     it('should let a hook return undefined when there was no result to lose', async function () {
@@ -6112,6 +6267,13 @@ describe('Where a throw comes from', function () {
             onStep: /** @type {import('../index.js').StepRunner} */ (async (n, t, op) => void (await op()))
         };
         assert.deepEqual(await runEffect(nothing, {}, forgetful), Success(undefined));
+
+        const slowNothing = Command(async function cmdSlowNothing() {
+            await new Promise((r) => setTimeout(r, 5));
+            return undefined;
+        });
+        const unwaiting = { onStep: /** @type {import('../index.js').StepRunner} */ (async (n, t, op) => void op()) };
+        assert.deepEqual(await runEffect(slowNothing, {}, unwaiting), Success(undefined));
 
         /** @type {import('../index.js').StepRunner} */
         const dropsOnlyParallel = async (name, type, op) => {

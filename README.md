@@ -9,7 +9,7 @@
 - Inject context without touching function signatures
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks
-- Zero dependencies, about 7 KB minified and gzipped
+- Zero dependencies, under 8 KB minified and gzipped
 - Works in JavaScript, and in TypeScript 5.1 or later (full generics, bundled `.d.ts`)
 
 ## Table of Contents
@@ -817,6 +817,8 @@ Timings are from Node 22 on a MacBook Pro with M4 Pro CPU:
 
 ## API Reference
 
+Every `options` argument below throws for a name it does not read, so a misspelt option fails instead of running with its default.
+
 ### Building blocks
 
 #### `Success(value)`
@@ -931,7 +933,7 @@ remove();
 - `onRun(effect, pipeline, flowName)`: wraps the whole run. It must `await pipeline()` and return its result.
 - `onStep(name, type, op, path)`: wraps each Command, and each `Parallel` with `name` and `type` both `'Parallel'`. It must `await op()` and return its result, and pass `path` on to any hook it calls, since a replay matches steps on it.
     - For a Command, `op()` returns a promise, even for a synchronous function. Returning a value without calling `op()` answers for the Command, which is how replay works, and throwing without calling it counts as the Command failing.
-    - A throw after `op()` succeeded, or `undefined` returned in place of its value, as a hook that forgot its `return` does, is a bug in the hook: the run rejects, and `Retry` does not run the Command again.
+    - A throw after `op()` succeeded, or `undefined` returned in place of its value, as a hook that forgot its `return` or its `await` does, is a bug in the hook: the run rejects, and `Retry` does not run the Command again.
     - For a `Parallel`, `op()` runs the branches, so a hook must call it or the run rejects with a `TypeError`. It returns which branch, if any, cancelled the others, as in `{ cancelled: true, branch: 0 }`, even when a branch threw.
 - `onBeforeCommand(command, context)`: runs before each Command. A throw vetoes the Command: the run returns a `Failure` carrying the thrown error, and `Retry` does not retry it.
 

@@ -164,6 +164,9 @@ const Retry = (effect, options) => {
         const hint = typeof options === 'number' ? `: write Retry(effect, { attempts: ${options} })` : '';
         throw malformed(`Retry's options must be an object, got ${describeArgument(options)}${hint}.`, options);
     }
+    rejectUnknownOptions(options, 'Retry', ['attempts', 'delay', 'backoff', 'onExhausted'], (m) =>
+        malformed(m, options)
+    );
     return { type: 'Retry', effect, options: options ?? {}, next: (value) => Success(value) };
 };
 
@@ -221,6 +224,7 @@ const Parallel = (effects, nextOrOptions, maybeOptions) => {
     if (options != null && !isOptionsObject(options)) {
         throw malformed(`Parallel's options must be an object, got ${describeArgument(options)}.`, options);
     }
+    rejectUnknownOptions(options, 'Parallel', ['limit', 'settled'], (m) => malformed(m, options));
     return {
         type: 'Parallel',
         effects,
@@ -254,6 +258,22 @@ const isFiniteNonNegative = (value) => Number.isFinite(value) && value >= 0;
  * @returns {boolean}
  */
 const isOptionsObject = (value) => isObject(value) && !Array.isArray(value) && !isEffect(value);
+
+/**
+ * Refuses an option name a function does not read. A misspelt name, or one borrowed from another library, as
+ * `concurrency` is from p-limit, otherwise ran with the default and nothing to say so.
+ * @param {any} options
+ * @param {string} source - The function that takes them, as the message names it
+ * @param {string[]} known
+ * @param {(message: string) => Error} [raise] - Builds the error; a constructor's argument errors are EffectTypeErrors
+ */
+const rejectUnknownOptions = (options, source, known, raise = (message) => new TypeError(message)) => {
+    const name = isObject(options) ? Object.keys(options).find((key) => !known.includes(key)) : undefined;
+    if (name !== undefined) {
+        const list = `${known.slice(0, -1).join(', ')} and ${known[known.length - 1]}`;
+        throw raise(`${source} has no option named '${name}'; its options are ${list}.`);
+    }
+};
 
 /**
  * Describes a value for an error message, leading with the mistake it most likely is.
@@ -1118,12 +1138,22 @@ const interpret =
             // The signal is passed only inside a Parallel. There it is still the first argument, so a function
             // passed by name with an optional first parameter, `nanoid(size = 21)` say, takes the signal for it:
             // a documented sharp edge. Async, so a hook always gets a promise, even from a synchronous function.
-            const op = async () => {
+            // The latest call is kept, with whether it is still running, so a hook that does not wait for it is caught.
+            /** @type {Promise<unknown> | undefined} */
+            let call;
+            let running = false;
+            const run = async () => {
                 succeeded = false;
-                value = await (signal ? cmd(signal) : cmd());
-                succeeded = true;
-                return value;
+                running = true;
+                try {
+                    value = await (signal ? cmd(signal) : cmd());
+                    succeeded = true;
+                    return value;
+                } finally {
+                    running = false;
+                }
             };
+            const op = () => (call = run());
             try {
                 await localCommandInterceptor(command, context);
             } catch (e) {
@@ -1133,8 +1163,15 @@ const interpret =
             // Again, since an interceptor can wait (a rate limiter, say) while a sibling fails.
             if (signal?.aborted) return cancelledBranch(initialInput);
             let returned;
+            let unwaited = false;
             try {
                 returned = await localStepRunner(cmdName, 'Command', op, cmdPath);
+                // A hook that called `op` without waiting for it returned while the Command ran, so the check below
+                // would have nothing to check yet. Waiting here judges the step as though the hook had awaited `op`.
+                if (returned === undefined && running) {
+                    unwaited = true;
+                    await call;
+                }
             } catch (e) {
                 // A step production never ran, in a branch a Parallel cancelled: stop here, as production did.
                 if (hasMark(e, replayCut)) return cancelledBranch(initialInput);
@@ -1149,8 +1186,9 @@ const interpret =
             // refused, so a hook that returns a copy of the result still works.
             if (returned === undefined && succeeded && value !== undefined) {
                 throw new TypeError(
-                    `An onStep hook called op for '${cmdName}' at path '${cmdPath}' and returned undefined, although ` +
-                        'the Command returned a value. A hook has to return what op returns.'
+                    `An onStep hook called op for '${cmdName}' at path '${cmdPath}' and returned undefined` +
+                        `${unwaited ? ' before op had finished' : ''}, although the Command returned a value. ` +
+                        'A hook has to await op() and return what it returns.'
                 );
             }
             return Success(returned);
@@ -1418,6 +1456,7 @@ const snapshot = (value) => {
  * @returns {{ onStep: StepRunner, entries: TraceEntry[], toTrace: (meta?: TraceMeta) => TraceLog }}
  */
 const recorder = (options = {}) => {
+    rejectUnknownOptions(options, 'recorder', ['redact', 'maxEntries', 'stack']);
     const { redact = (/** @type {any} */ r) => r, maxEntries = Infinity, stack = false } = options;
     /** @type {TraceEntry[]} */
     const entries = [];
@@ -1493,6 +1532,7 @@ const recorder = (options = {}) => {
  * @returns {Promise<{ result: SuccessState | FailureState, trace: TraceLog }>}
  */
 const recordEffect = async (flowFn, initialInput, options = {}) => {
+    rejectUnknownOptions(options, 'recordEffect', ['context', 'version', 'redact', 'maxEntries', 'stack']);
     const { context = {}, version, ...recorderOptions } = options;
     const rec = recorder(recorderOptions);
     // Packaged before the run, so a Command that writes to the input or the context, as an ORM save
@@ -1685,6 +1725,7 @@ const fromTrace = (traceLog, options = {}) => {
  */
 // `async` so a malformed trace arrives as a rejection rather than a synchronous throw.
 const replayEffect = async (effect, traceOrResolver, options = {}) => {
+    rejectUnknownOptions(options, 'replayEffect', ['context', 'fastRetry', 'hooks', 'onMissing', 'onResolved']);
     const { fastRetry = true, hooks = false, onMissing = 'throw', onResolved } = options;
     // A trace is data and a Resolver is a function, so nothing else is needed to tell them
     // apart, including the bare entries array that `fromTrace` also accepts.
@@ -1745,8 +1786,10 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
                       'this step and the recorder not kept it; record the flow with a higher maxEntries to ' +
                       'replay past it.'
                     : 'Production may never have run it: a Command an onBeforeCommand hook vetoed leaves no ' +
-                      "entry, and neither does a step added since the recording. onMissing: 'execute' runs such " +
-                      'steps for real, so pass it only where the Commands reach test doubles or only read.';
+                      'entry, and neither does a step added since the recording or one the flow reaches now that ' +
+                      "it did not then. onMissing: 'execute' runs such a step for real, and after an added step " +
+                      'every step that follows it, since they all move to new paths, so pass it only where every ' +
+                      'Command the flow can still reach goes to a test double or only reads.';
                 throw replayError(`${what}; refusing to run the real Command. ${why}`, {
                     command: name,
                     index: step.index,
@@ -1795,6 +1838,7 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
  *          a caller who wants the unreached entries as data uses `replayEffect`.
  */
 const timeTravel = async (flowFn, traceLog, options = {}) => {
+    rejectUnknownOptions(options, 'timeTravel', ['log', 'context', 'version']);
     const { log = console.log, context, version } = options;
     const { initialInput, trace, flowName, version: traceVersion } = traceLog;
     // `message` is non-enumerable on Error, so JSON.stringify alone would drop it. JSON.stringify throws on

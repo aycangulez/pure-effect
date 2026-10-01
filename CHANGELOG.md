@@ -2,6 +2,17 @@
 
 All notable changes to pure-effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
+## [Unreleased]
+
+### Changed
+
+- **An `options` argument refuses a name it does not read.** `Retry`, `Parallel`, `recorder`, `recordEffect`, `replayEffect` and `timeTravel` ignored any other name, so a misspelt or borrowed one ran with the default and nothing said so: `Parallel(batch, { concurrency: 4 })`, the name p-limit uses, ran with no limit, `{ settle: true }` ran fail-fast so one bad record cancelled the batch, and `{ attemps: 5 }` got 3 attempts. Such a name now throws, naming it and the options the function reads; `Retry` and `Parallel` throw an `EffectTypeError` as the flow is built, the others a `TypeError`. TypeScript already refused most of them in an object literal written in the call. An option set to `undefined` is still accepted.
+- **The message for a step a trace lacks says what `onMissing: 'execute'` would run.** It advised `'execute'` where the Commands only read, so a replay that met a newly added lookup could run it that way, and every step after it, which had moved to a new path, ran live too. The message now says so, and advises `'execute'` only where every Command the flow can still reach goes to a test double or only reads.
+
+### Fixed
+
+- **An `onStep` hook that calls `op()` without awaiting it can no longer replace a Command's result with `undefined`.** A hook that returned `undefined` in place of the Command's value made the run reject, but the check ran as soon as the hook returned, while a Command that took any time was still running, so a found user still reached `next` as `undefined` and the flow took the branch for a missing one. The interpreter now waits for a Command the hook left running before it judges the step: the run rejects if the Command returned a value, a throw from it is an I/O fault, as it is for a hook that awaited `op`, and nothing is left running unobserved.
+
 ## [0.16.0] - 2026-10-01
 
 ### Added
@@ -223,6 +234,7 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 
 - Initial release: `Success`, `Failure`, `Command`, `effectPipe`, and `runEffect`.
 
+[Unreleased]: https://github.com/aycangulez/pure-effect/compare/v0.16.0...HEAD
 [0.16.0]: https://github.com/aycangulez/pure-effect/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/aycangulez/pure-effect/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/aycangulez/pure-effect/compare/v0.13.0...v0.14.0
