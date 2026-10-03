@@ -1,5 +1,20 @@
 // @ts-check
 
+// Contents. Each section is a `#region`, so an editor can fold it.
+//
+// 1. Types: the JSDoc shapes of the nodes a flow is made of.
+// 2. Building flows: the constructors; the checks, error messages and kinds of failure the later sections
+//    share; and `effectPipe`, with the `chain` that joins its steps.
+// 3. Configuration: the hook types and the library's defaults, `configureEffect` and its layers, and
+//    `chainHooks`, which merges them.
+// 4. Running flows: the helpers `Retry` and `Parallel` run on, the interpreter, and `runEffect`.
+// 5. Recording and replay: the trace format and replay errors, copying values and errors into a trace,
+//    `recorder`, built on `observeSteps`, and `recordEffect`, then `fromTrace`, `replayEffect` and `timeTravel`.
+//
+// A new definition goes in the section it serves, which is usually the one that calls it.
+
+// #region Types
+
 /** @typedef {{ type: 'Success', value: any, initialInput?: any }} SuccessState */
 /** @typedef {{ type: 'Failure', error: any, initialInput?: any }} FailureState */
 /**
@@ -54,6 +69,9 @@
  * The Union type for all possible states
  * @typedef {SuccessState | FailureState | CommandState | AskState | RetryState | ParallelState} Effect
  */
+
+// #endregion
+// #region Building flows
 
 /**
  * Represents a successful computation
@@ -491,6 +509,9 @@ const effectPipe = (...fns) => {
     };
 };
 
+// #endregion
+// #region Configuration
+
 /**
  * Wraps one Command execution, or one Parallel: `type` is 'Parallel', and `op` runs the branches and
  * returns the Parallel's decision, even when a branch threw, so a hook must call it. Only a replay passes
@@ -595,59 +616,6 @@ const configureEffect = (...configs) => {
 };
 
 /**
- * @typedef {Object} StepStart
- * @property {string} name - The Command's identity: `meta.name`, else `cmd.name`, else 'anonymous'.
- * @property {string} type - 'Command', or 'Parallel' for a Parallel's decision.
- * @property {string} [path] - The Command's position in the Effect tree.
- */
-
-/**
- * @typedef {Object} StepEnd
- * @property {string} name
- * @property {string} type
- * @property {string} [path]
- * @property {any} [result] - What the Command returned, when it succeeded.
- * @property {any} [error] - What it threw, when it did not.
- * @property {number} durationMs
- */
-
-const now = () => (typeof performance === 'object' ? performance.now() : Date.now());
-
-/**
- * Wraps a step observer into an `onStep` that cannot change the run: `op` always runs, its result is
- * returned, its error propagates, and anything the observer throws is dropped.
- *
- * @param {(start: StepStart) => (end: StepEnd) => void} handler - Returns a finisher for the outcome
- * @returns {StepRunner}
- */
-const observeSteps = (handler) => async (name, type, op, path) => {
-    /** @type {((end: StepEnd) => void) | undefined} */
-    let finish;
-    try {
-        finish = handler({ name, type, path });
-    } catch {
-        finish = undefined;
-    }
-    const report = (/** @type {StepEnd} */ end) => {
-        try {
-            if (finish) finish(end);
-        } catch {
-            // Observation does not get to decide the outcome, so a broken observer is dropped.
-        }
-    };
-
-    const started = now();
-    try {
-        const result = await op();
-        report({ name, type, path, result, durationMs: now() - started });
-        return result;
-    } catch (error) {
-        report({ name, type, path, error, durationMs: now() - started });
-        throw error;
-    }
-};
-
-/**
  * Merges several configurations into one, so independent concerns can share the hooks.
  *
  * `onStep` and `onRun` are wrappers around an `op`, so they nest: the first config given is the
@@ -688,6 +656,9 @@ const chainHooks = (...configs) => {
     }
     return merged;
 };
+
+// #endregion
+// #region Running flows
 
 /**
  * The Failure a cancelled `Parallel` branch stops with. Its error is named so it is never mistaken for
@@ -1217,6 +1188,9 @@ const interpret =
  */
 const runEffect = (effect, context, callConfig) => interpret(effect, context, callConfig);
 
+// #endregion
+// #region Recording and replay
+
 /**
  * The step a replay is asking about. `path` is the Command's position in the Effect tree and is stable
  * across runs; `index` is its position in this run's completion order, which is not stable for a flow
@@ -1443,6 +1417,59 @@ const snapshot = (value) => {
         return typeof structuredClone === 'function' ? structuredClone(value) : JSON.parse(JSON.stringify(value));
     } catch {
         return copyAround(value, new Map());
+    }
+};
+
+/**
+ * @typedef {Object} StepStart
+ * @property {string} name - The Command's identity: `meta.name`, else `cmd.name`, else 'anonymous'.
+ * @property {string} type - 'Command', or 'Parallel' for a Parallel's decision.
+ * @property {string} [path] - The Command's position in the Effect tree.
+ */
+
+/**
+ * @typedef {Object} StepEnd
+ * @property {string} name
+ * @property {string} type
+ * @property {string} [path]
+ * @property {any} [result] - What the Command returned, when it succeeded.
+ * @property {any} [error] - What it threw, when it did not.
+ * @property {number} durationMs
+ */
+
+const now = () => (typeof performance === 'object' ? performance.now() : Date.now());
+
+/**
+ * Wraps a step observer into an `onStep` that cannot change the run: `op` always runs, its result is
+ * returned, its error propagates, and anything the observer throws is dropped.
+ *
+ * @param {(start: StepStart) => (end: StepEnd) => void} handler - Returns a finisher for the outcome
+ * @returns {StepRunner}
+ */
+const observeSteps = (handler) => async (name, type, op, path) => {
+    /** @type {((end: StepEnd) => void) | undefined} */
+    let finish;
+    try {
+        finish = handler({ name, type, path });
+    } catch {
+        finish = undefined;
+    }
+    const report = (/** @type {StepEnd} */ end) => {
+        try {
+            if (finish) finish(end);
+        } catch {
+            // Observation does not get to decide the outcome, so a broken observer is dropped.
+        }
+    };
+
+    const started = now();
+    try {
+        const result = await op();
+        report({ name, type, path, result, durationMs: now() - started });
+        return result;
+    } catch (error) {
+        report({ name, type, path, error, durationMs: now() - started });
+        throw error;
     }
 };
 
@@ -1911,6 +1938,8 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
     }
     return result;
 };
+
+// #endregion
 
 export {
     Success,
