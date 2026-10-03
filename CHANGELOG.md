@@ -12,6 +12,7 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 ### Fixed
 
 - **An `onStep` hook that calls `op()` without awaiting it can no longer replace a Command's result with `undefined`.** A hook that returned `undefined` in place of the Command's value made the run reject, but the check ran as soon as the hook returned, while a Command that took any time was still running, so a found user still reached `next` as `undefined` and the flow took the branch for a missing one. The interpreter now waits for a Command the hook left running before it judges the step: the run rejects if the Command returned a value, a throw from it is an I/O fault, as it is for a hook that awaited `op`, and nothing is left running unobserved.
+- **`timeTravel` warns about unreached steps after a flow's own error named like a replay error.** It recognized its own replay errors by name, so a flow that ended on an error of its own named `ReplayError` or `TimeParadox` lost the warning about recorded steps it never reached. It now recognizes only the errors the library raises.
 
 ## [0.16.0] - 2026-10-01
 

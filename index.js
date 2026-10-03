@@ -486,7 +486,8 @@ const chain = (effect, fn, initialInput, from) => {
  * Composes a list of functions into a single Effect pipeline.
  * Each function receives the output of the previous one.
  *
- * @param {...(input: any) => Effect} fns - Functions that return Success, Failure, Command, or Ask.
+ * @param {...(input: any) => Effect} fns - Functions that each return an Effect: Success, Failure, Command, Ask,
+ *        Retry, or Parallel.
  * @returns {(start: any) => Effect} A function that accepts an initial input and returns the final Effect tree.
  */
 const effectPipe = (...fns) => {
@@ -582,7 +583,8 @@ const applyLayers = () => {
  * Each call adds one layer on top of those already installed and returns a function that removes that
  * layer, wherever it sits by then. Layers merge the way several configurations passed to one call do:
  * `onStep` and `onRun` are wrappers, so they nest with the earliest layer outermost and the latest
- * closest to the Command; and `onBeforeCommand` interceptors all run, in the order installed. So these
+ * closest to the Command; and `onBeforeCommand` interceptors run in the order installed, the first to throw
+ * vetoing the Command. So these
  * are the same:
  *
  *     configureEffect(telemetryHooks(), recordingHooks({ sink }));
@@ -620,7 +622,8 @@ const configureEffect = (...configs) => {
  *
  * `onStep` and `onRun` are wrappers around an `op`, so they nest: the first config given is the
  * outermost and the last sits closest to the Command, so a thrown Command unwinds from the last back
- * to the first. `onBeforeCommand` is an observer, so every interceptor runs in the order given. A hook
+ * to the first. `onBeforeCommand` interceptors do not nest: they run in the order given, and the first to
+ * throw vetoes the Command, so the ones after it do not run. A hook
  * no config defines is left unset, so the caller keeps its default for that slot.
  *
  * @param {...(EffectConfiguration | undefined)} configs - Configurations to merge, outermost first
@@ -990,10 +993,10 @@ const interpret =
             const pastTheEnd = Number.isInteger(recordedBranch) && recordedBranch >= effects.length;
             if (pastTheEnd) {
                 const count = effects.length === 1 ? '1 branch' : `${effects.length} branches`;
-                throw replayError(
-                    `Time paradox at path '${branchPath}': the recorded run was cancelled by branch ` +
-                        `${recordedBranch}, but this Parallel has ${count}.`,
-                    { name: 'TimeParadox', path: branchPath, branch: recordedBranch }
+                throw timeParadoxAt(
+                    `path '${branchPath}'`,
+                    `the recorded run was cancelled by branch ${recordedBranch}, but this Parallel has ${count}.`,
+                    { path: branchPath, branch: recordedBranch }
                 );
             }
             const forced = asDecision(recorded, effects.length);
@@ -1013,10 +1016,10 @@ const interpret =
                 const recordedTriggerSucceeded =
                     !thrown && forced.branch !== null && results[forced.branch].type === 'Success';
                 if (recordedTriggerSucceeded) {
-                    throw replayError(
-                        `Time paradox at path '${branchPath}': the recorded run was cancelled by ` +
-                            `branch ${forced.branch}, which did not fail in this replay.`,
-                        { name: 'TimeParadox', path: branchPath, branch: forced.branch }
+                    throw timeParadoxAt(
+                        `path '${branchPath}'`,
+                        `the recorded run was cancelled by branch ${forced.branch}, which did not fail in this replay.`,
+                        { path: branchPath, branch: forced.branch }
                     );
                 }
                 return { results, decision: forced, thrown };
@@ -1256,24 +1259,31 @@ const replayError = (message, props = {}) =>
     );
 
 /**
- * Signals that the flow being replayed asked for a different Command than the trace
- * recorded, which means the code has diverged from the recorded run.
+ * Builds a `TimeParadox`: the replay reached a point where the flow no longer matches its recording, which
+ * means the code has diverged from the recorded run.
+ * @param {string} at - Where, as the message names it
+ * @param {string} detail - How the flow and the recording disagree
+ * @param {Object} props - The fields that locate it, such as `path`
+ * @returns {Error}
+ */
+const timeParadoxAt = (at, detail, props) =>
+    replayError(`Time paradox at ${at}: ${detail}`, { name: 'TimeParadox', ...props });
+
+/**
+ * Signals that the flow being replayed asked for a different Command than the trace recorded.
  * @param {ReplayStep} step - The step the flow asked for
  * @param {string} recorded - The command name the trace holds at that position
  * @returns {Error}
  */
 const timeParadox = (step, recorded) =>
-    replayError(
-        `Time paradox at ${step.path !== undefined ? `path '${step.path}'` : `step ${step.index}`}: ` +
-            `flow asked for '${step.name}', trace recorded '${recorded}'`,
-        {
-            name: 'TimeParadox',
-            index: step.index,
-            path: step.path,
-            expected: recorded,
-            actual: step.name
-        }
+    timeParadoxAt(
+        step.path !== undefined ? `path '${step.path}'` : `step ${step.index}`,
+        `flow asked for '${step.name}', trace recorded '${recorded}'`,
+        { index: step.index, path: step.path, expected: recorded, actual: step.name }
     );
+
+/** The keys `serializeError` carries whatever their enumerability, which a native Error sets as hidden. */
+const carriedKeys = ['name', 'message', 'cause'];
 
 /**
  * Converts a thrown value into something JSON can carry. `message` and `stack` are
@@ -1312,9 +1322,6 @@ const serializeError = (e, withStack, ancestors = new Set()) => {
     for (const k of Object.keys(e)) if (!carriedKeys.includes(k)) out[k] = /** @type {any} */ (e)[k];
     return out;
 };
-
-/** The keys `serializeError` carries whatever their enumerability, which a native Error sets as hidden. */
-const carriedKeys = ['name', 'message', 'cause'];
 
 /**
  * Rebuilds an Error from `serializeError` output. Non-Error values pass through, so a
@@ -1474,8 +1481,8 @@ const observeSteps = (handler) => async (name, type, op, path) => {
 };
 
 /**
- * Builds an `onStep` hook that records what every Command returned, plus a packager
- * for the reference trace format. Pass `onStep` to `runEffect` as per-call config. A recorder holds the steps
+ * Builds an `onStep` hook that records every Command's result or error and every Parallel's decision, plus
+ * a packager for the reference trace format. Pass `onStep` to `runEffect` as per-call config. A recorder holds the steps
  * of every run it sees, so installed with `configureEffect` for a whole application it mixes requests into one
  * trace with duplicate paths, which a replay refuses; examples/recording-example.js gives each run its own.
  *
@@ -1928,8 +1935,9 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
     log(`Replay finished with state: ${result.type}`);
     log(result.type === 'Failure' ? `Error: ${format(result.error)}` : `Result: ${format(result.value)}`);
     // After a replay error the flow never got past the divergence, and the error already names where it
-    // split. Only a flow that ended on its own terms with steps left over is worth a warning.
-    const haltedByReplay = result.type === 'Failure' && /^(TimeParadox|ReplayError)$/.test(result.error?.name);
+    // split. Only a flow that ended on its own terms with steps left over is worth a warning. Told by the
+    // mark rather than the name, which a flow's own error can share.
+    const haltedByReplay = result.type === 'Failure' && hasMark(result.error, replayFault);
     if (unreached.length > 0 && !haltedByReplay) {
         // Named, not just counted: the step a fix stopped issuing is usually the one under suspicion.
         const names = unreached.map((e) => (hasPath(e) ? `${e.command} (path '${e.path}')` : e.command));

@@ -1784,6 +1784,27 @@ describe('Recording and replay', function () {
         assert.doesNotMatch(out, /never reached/, 'the paradox is the news; the steps behind it are not');
     });
 
+    it("should warn about unreached steps when the flow's own error only shares a replay error's name", async function () {
+        const read = () =>
+            Command(function cmdRead() {
+                return { row: 1 };
+            });
+        const write = () =>
+            Command(function cmdWrite() {
+                return { written: 1 };
+            });
+        const { trace } = await recordEffect((/** @type {any} */ input) => effectPipe(read, write)(input), { id: 1 });
+        // A domain error that happens to be named like a replay fault, returned where the write used to be.
+        const refuse = () => Failure(Object.assign(new Error('Refused.'), { name: 'ReplayError' }));
+        /** @type {string[]} */
+        const lines = [];
+        const result = await timeTravel((/** @type {any} */ input) => effectPipe(read, refuse)(input), trace, {
+            log: (l) => lines.push(l)
+        });
+        assert.equal(/** @type {any} */ (errorOf(result)).name, 'ReplayError');
+        assert.match(lines.join('\n'), /1 recorded step was never reached: cmdWrite/);
+    });
+
     it('should warn in timeTravel only when the trace was recorded at a different version', async function () {
         const { flow } = makeFlow();
         const { trace } = await recordEffect(flow, { id: 'v' }, { version: 'build-1' });
