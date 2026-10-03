@@ -4726,6 +4726,14 @@ describe('Declaration parity', function () {
     });
 });
 
+describe('Agent guidance', function () {
+    it('should keep CLAUDE.md within the 32 KiB Codex reads of AGENTS.md', function () {
+        // AGENTS.md links to CLAUDE.md, and Codex drops whatever lies past 32 KiB without saying so.
+        const bytes = readFileSync('CLAUDE.md').length;
+        assert.ok(bytes <= 32 * 1024, `CLAUDE.md is ${bytes} bytes; move explanation to DESIGN.md`);
+    });
+});
+
 describe('README examples', function () {
     // The README is code readers copy, and for most of this project's life no test ran it. Two wrong
     // examples shipped that way. A guard whose `next` returned `Success(true)`, so the flow saved

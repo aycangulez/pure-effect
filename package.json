@@ -31,7 +31,7 @@
         "test": "mocha && tsd && tsc -p jsconfig.json",
         "test:ts-minimum": "npx --yes -p typescript@5.1 tsc -p test/tsconfig.minimum.json",
         "generate": "node scripts/effect-pipe-overloads.js",
-        "format": "prettier --write index.js index.d.ts examples/*.js scripts/*.js test/all.js test/types.test-d.ts README.md CLAUDE.md CHANGELOG.md CONTRIBUTING.md"
+        "format": "prettier --write index.js index.d.ts examples/*.js scripts/*.js test/all.js test/types.test-d.ts README.md CLAUDE.md DESIGN.md CHANGELOG.md CONTRIBUTING.md"
     },
     "tsd": {
         "directory": "test"
