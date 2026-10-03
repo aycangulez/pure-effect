@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository. `AGENTS.md` is a symlink to it, so agents that read that name get the same guidance; edit this file, never the link.
 
 ## Commands
 
@@ -40,7 +40,7 @@ There is no build or lint step: the library ships as plain ES modules. Formattin
 
 ## Design
 
-**pure-effect** is a zero-dependency effect system for JavaScript implementing the "Functional Core, Imperative Shell" pattern. Business logic returns plain data instead of executing side effects, so it can be tested without mocks, and because a flow is inert data until the interpreter walks it, a recorded run can be fed back through the interpreter with no I/O at all. Everything is in `index.js`, and `index.d.ts` declares it. `index.js` is divided into five sections, each a `#region` an editor can fold (Types, Building flows, Configuration, Running flows, and Recording and replay), and a contents comment at its top says what each holds. A new definition goes in the section it serves, usually the one that calls it, and the contents comment changes when a section gains or loses something it names.
+**pure-effect** is a zero-dependency effect system for JavaScript implementing the "Functional Core, Imperative Shell" pattern. Business logic returns plain data instead of executing side effects, so it can be tested without mocks, and because a flow is inert data until the interpreter walks it, a recorded run can be fed back through the interpreter with no I/O at all. Everything is in `index.js`, and `index.d.ts` declares it. `index.js` is divided into five sections, each a `#region` an editor can fold (Types, Building flows, Configuration, Running flows, and Recording and replay), and a contents comment at its top says what each holds and defines the terms the comments use (abort, I/O fault, harness error, mark, path, decision, trigger, cut). A new definition goes in the section it serves, usually the one that calls it, and the contents comment changes when a section gains or loses something it names or the comments come to rely on a new term. Where two sections share a private protocol, as replay and the interpreter do with a cut and a recorded decision, the comment at each end names the function at the other.
 
 ### Primitives
 

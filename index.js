@@ -713,7 +713,8 @@ const asDecision = (value, branches) => {
 
 /**
  * Marks a step a replay reached that production never ran, in a branch a recorded decision cancelled.
- * The interpreter stops the branch there, as production did. Only `fromTrace` raises it.
+ * Only `fromTrace` raises it, and `runCommand` and `runParallel` catch it and stop the branch there, as
+ * production did.
  */
 const replayCut = Symbol('pure-effect.replayCut');
 
@@ -940,6 +941,7 @@ const interpret =
                 throw new TypeError(`Parallel 'limit' must be a positive integer, received ${describeValue(limit)}.`);
             // Cast rather than annotated, since only `op` assigns it.
             let run = /** @type {BranchRun | undefined} */ (undefined);
+            // A replay passes the recorded decision, from `replayEffect`'s onStep; a live run passes nothing.
             const op = async (/** @type {any} */ recorded) => {
                 run = await runBranches(parallel.effects, options, signal, branchPath, recorded);
                 return run.decision;
@@ -947,7 +949,7 @@ const interpret =
             try {
                 await localStepRunner('Parallel', 'Parallel', op, branchPath);
             } catch (e) {
-                // A replay found this Parallel inside a branch production had already stopped.
+                // A cut from `fromTrace`: a replay found this Parallel inside a branch production had already stopped.
                 if (hasMark(e, replayCut)) return cancelledBranch(parallel.initialInput);
                 throw e;
             }
@@ -982,7 +984,8 @@ const interpret =
          * @param {ParallelOptions} options
          * @param {AbortSignal | undefined} signal - The enclosing Parallel's cancellation, if any
          * @param {string} branchPath
-         * @param {any} recorded - The recorded decision, when a replay supplies one
+         * @param {any} recorded - The recorded decision, which `replayEffect`'s onStep passes to the Parallel's
+         *        `op`; undefined in a live run
          * @returns {Promise<BranchRun>}
          */
         async function runBranches(effects, options, signal, branchPath, recorded) {
@@ -1147,7 +1150,8 @@ const interpret =
                     await call;
                 }
             } catch (e) {
-                // A step production never ran, in a branch a Parallel cancelled: stop here, as production did.
+                // A cut from `fromTrace`: a step production never ran, in a branch a Parallel cancelled. Stop here,
+                // as production did.
                 if (hasMark(e, replayCut)) return cancelledBranch(initialInput);
                 if (hasMark(e, harnessError)) throw e;
                 // A hook threw after the function returned, which is a bug in the hook. A hook that throws
@@ -1482,9 +1486,10 @@ const observeSteps = (handler) => async (name, type, op, path) => {
 
 /**
  * Builds an `onStep` hook that records every Command's result or error and every Parallel's decision, plus
- * a packager for the reference trace format. Pass `onStep` to `runEffect` as per-call config. A recorder holds the steps
- * of every run it sees, so installed with `configureEffect` for a whole application it mixes requests into one
- * trace with duplicate paths, which a replay refuses; examples/recording-example.js gives each run its own.
+ * a packager for the reference trace format. Pass `onStep` to `runEffect` as per-call config. A recorder holds
+ * the steps of every run it sees, so installed with `configureEffect` for a whole application it mixes requests
+ * into one trace with duplicate paths, which a replay refuses; examples/recording-example.js gives each run its
+ * own.
  *
  * @param {RecorderOptions} [options] - Redaction and size limits
  * @returns {{ onStep: StepRunner, entries: TraceEntry[], toTrace: (meta?: TraceMeta) => TraceLog }}
@@ -1657,7 +1662,8 @@ const fromTrace = (traceLog, options = {}) => {
         /** Recorded Parallel decisions that cancelled branches, by the Parallel's path. */
         const cancellations = entries.filter(isDecisionEntry).filter((e) => e.result?.cancelled === true);
         // A missing step is where production stopped a branch when it lies in a branch a recorded decision
-        // cancelled: any branch but the cancelling one, or every branch of a Parallel cancelled from outside.
+        // cancelled: any branch but the cancelling one, or every branch of a Parallel cancelled from outside. Such a
+        // step throws a cut, which `runCommand` or `runParallel` catches to stop the branch.
         const stoppedInProduction = (/** @type {string | undefined} */ stepPath) =>
             typeof stepPath === 'string' &&
             cancellations.some((e) => {
@@ -1669,7 +1675,8 @@ const fromTrace = (traceLog, options = {}) => {
         const resolve = (step) => {
             const entry = byPath.get(step.path);
             if (step.type === 'Parallel') {
-                // A decision rather than I/O. With none recorded, the Parallel replays under timing.
+                // A decision rather than I/O. `replayEffect` hands a recorded one to the Parallel's `op`, and
+                // `runBranches` reproduces it; with none recorded, the Parallel replays under timing.
                 if (entry && entry.command !== 'Parallel') throw timeParadox(step, entry.command);
                 if (entry) return resolveEntry(entry);
                 if (stoppedInProduction(step.path)) throw replayCutError(/** @type {string} */ (step.path));
@@ -1707,6 +1714,35 @@ const fromTrace = (traceLog, options = {}) => {
     };
     const missing = (/** @type {ReplayStep} */ step) => `Trace exhausted: no entry #${step.index} for '${step.name}'`;
     return { resolve, missing };
+};
+
+/**
+ * The error for a step a replay has no recorded outcome for, which it refuses to run live.
+ * @param {ReplayStep} step
+ * @param {((step: ReplayStep) => string) | undefined} describe - `fromTrace`'s `missing`; a Resolver has none
+ * @param {number} droppedEntries - How many entries the trace dropped under `maxEntries`
+ * @returns {Error}
+ */
+const missingStepError = (step, describe, droppedEntries) => {
+    const what = describe ? describe(step) : `No recorded outcome for '${step.name}' at step ${step.index}`;
+    // Why the step may be missing decides the fix. A capped trace needs a higher cap, since the step may be one
+    // production ran; any other missing step may be one production never ran, and running it live against
+    // production would do I/O production refused.
+    const why =
+        droppedEntries > 0
+            ? `The trace dropped ${droppedEntries} entries under maxEntries, so production may have run ` +
+              'this step and the recorder not kept it; record the flow with a higher maxEntries to ' +
+              'replay past it.'
+            : 'Production may never have run it: a Command an onBeforeCommand hook vetoed leaves no ' +
+              'entry, and neither does a step added since the recording or one the flow reaches now that ' +
+              "it did not then. onMissing: 'execute' runs such a step for real, and after an added step " +
+              'every step that follows it, since they all move to new paths, so pass it only where every ' +
+              'Command the flow can still reach goes to a test double or only reads.';
+    return replayError(`${what}; refusing to run the real Command. ${why}`, {
+        command: step.name,
+        index: step.index,
+        path: step.path
+    });
 };
 
 /**
@@ -1794,7 +1830,7 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     /** @type {StepRunner} */
     const onStep = async (name, type, op, path) => {
         if (type === 'Parallel') {
-            // A Parallel's step carries its recorded decision into `op`, which runs the branches under it.
+            // A Parallel's step carries its recorded decision into `op`, where `runBranches` reproduces it.
             // It is not a Command: `index` still counts Commands, and `onResolved` still sees only them.
             const outcome = resolve({ index, name, type, path });
             return await op(outcome && 'result' in outcome ? outcome.result : undefined);
@@ -1810,26 +1846,7 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
             }
         }
         if (outcome === undefined) {
-            if (onMissing !== 'execute') {
-                const what = missing ? missing(step) : `No recorded outcome for '${name}' at step ${step.index}`;
-                // Why the step may be missing decides the fix. A capped trace needs a higher cap, since the step
-                // may be one production ran; any other missing step may be one production never ran, and
-                // running it live against production would do I/O production refused.
-                const why = capped
-                    ? `The trace dropped ${droppedEntries} entries under maxEntries, so production may have run ` +
-                      'this step and the recorder not kept it; record the flow with a higher maxEntries to ' +
-                      'replay past it.'
-                    : 'Production may never have run it: a Command an onBeforeCommand hook vetoed leaves no ' +
-                      'entry, and neither does a step added since the recording or one the flow reaches now that ' +
-                      "it did not then. onMissing: 'execute' runs such a step for real, and after an added step " +
-                      'every step that follows it, since they all move to new paths, so pass it only where every ' +
-                      'Command the flow can still reach goes to a test double or only reads.';
-                throw replayError(`${what}; refusing to run the real Command. ${why}`, {
-                    command: name,
-                    index: step.index,
-                    path
-                });
-            }
+            if (onMissing !== 'execute') throw missingStepError(step, missing, droppedEntries);
             return await op();
         }
         if ('error' in outcome) throw outcome.error;
