@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository. `AGENTS.md` is a symlink to it, so agents that read that name get the same guidance; edit this file, never the link.
 
-This file holds the rules. `DESIGN.md` holds the reasons: how each part works, what broke before it worked that way, and the full case for every settled decision. Read the matching `DESIGN.md` section before changing how something works, and before proposing anything listed here as settled.
+This file holds the rules. `DESIGN.md` holds the reasons: how each part works, what broke before it worked that way, and the full case for every settled decision. Read the matching `DESIGN.md` section before changing how something works, and to see why each settled decision was made.
 
 ## Commands
 
@@ -21,127 +21,127 @@ npx stryker run --mutate "index.js:120-180"       # the same, limited to the lin
 
 There is no build or lint step: the library ships as plain ES modules. Formatting is Prettier, configured in `.prettierrc`. CI (`.github/workflows/ci.yml`) runs `npm test` on Node 22, 24 and 26, Prettier's check, and `npm run test:ts-minimum`, on pull requests and on pushes to `main`; the TypeScript 5.1 check fetches 5.1 with `npx`, so it needs the network the first time. **Check `npm test` by its exit code**: a `tsd` failure prints neither "passing" nor "failing". After a structural edit to `index.d.ts`, compare the runtime exports against the declared ones rather than trusting the diff. `package.json` has a `files` list, so anything new that must ship is added there; `npm pack --dry-run` shows what would be published.
 
-**Mutation testing** stays out of CI. Run it after changing `index.js` or its tests. Its survivors are not a to-do list: most are equivalent mutants (optional chaining on an `AbortController` that always exists, arrays sized in advance, `performance.now()` against `Date.now()`, `chain` cases that fall through into identical code, a check after a retry backoff that the loop repeats) or message wording, and a few flip between runs because some tests depend on timing. Two gaps are deliberate: whether each nested `Parallel` removes its listener from the enclosing signal, and the wording of `timeTravel`'s narration. Before calling a survivor new, apply the mutant by hand to the old code and the new and run the suite: one that survives both is an old gap, not a regression.
+Mutation testing stays out of CI. Run it after changing `index.js` or its tests. Its survivors are not a to-do list: most are equivalent mutants (optional chaining on an `AbortController` that always exists, arrays sized in advance, `performance.now()` against `Date.now()`, `chain` cases that fall through into identical code, a check after a retry backoff that the loop repeats) or message wording, and a few flip between runs because some tests depend on timing. Two gaps are deliberate: whether each nested `Parallel` removes its listener from the enclosing signal, and the wording of `timeTravel`'s narration. Before calling a survivor new, apply the mutant by hand to the old code and the new and run the suite: one that survives both is an old gap, not a regression.
 
 ## Where things go
 
-- **A rule goes here and in `CONTRIBUTING.md`, and its reason in `DESIGN.md`.** `CONTRIBUTING.md` restates the rules for a human contributor and does not refer to this file, so it reads on its own. When a rule changes, change all three.
-- **A design verdict goes in `DESIGN.md`**, with one line under Settled decisions here when it is settled.
-- **This file stays under 32 KiB, and well under it.** It is loaded into every session, and Codex reads only the first 32 KiB of `AGENTS.md`; a test fails past that. History and explanation go in `DESIGN.md`.
-- **`index.js` is one file in five sections**, each a `#region` (Types, Building flows, Configuration, Running flows, and Recording and replay), listed in a contents comment at its top. A new definition goes in the section it serves, usually the one that calls it, and the contents comment changes when a section gains or loses something it names. Where two sections share a private protocol, as replay and the interpreter do, the comment at each end names the function at the other.
+- A rule goes here and in `CONTRIBUTING.md`, and its reason in `DESIGN.md`. `CONTRIBUTING.md` restates the rules for a human contributor and does not refer to this file, so it reads on its own. When a rule changes, change all three.
+- A design verdict goes in `DESIGN.md`, with one line under Settled decisions here when it is settled.
+- This file stays under 32 KiB, and well under it. It is loaded into every session, and Codex reads only the first 32 KiB of `AGENTS.md`; a test fails past that. History and explanation go in `DESIGN.md`.
+- `index.js` is one file in five sections, each a `#region` (Types, Building flows, Configuration, Running flows, and Recording and replay), listed in a contents comment at its top. A new definition goes in the section it serves, usually the one that calls it, and the contents comment changes when a section gains or loses something it names. Where two sections share a private protocol, as replay and the interpreter do, the comment at each end names the function at the other.
 
 ## House rules
 
-- **The size figure lives in one place**, the README's feature bullet. Re-measure it with the command above after changing `index.js`, and reword it when the number moves. **A commit message and a changelog entry never mention the size.**
-- **A changelog entry and a commit message leave out documentation-only changes.** A docs change that ships with a behaviour change goes unmentioned in both; one that ships alone gets no changelog entry, and its commit message says why the docs changed.
-- **The README's `Load Tests` section is re-measured by nothing.** A change to what it claims (isolation between concurrent runs, replay fidelity, memory held across runs, `Parallel`'s limit and ordering) means rerunning an equivalent experiment and updating the section, or cutting the claim.
-- **Markdown prose has no hard line breaks.** Write each paragraph and list item as one line; code blocks and table rows are untouched.
-- **No jargon in the README.** The names the library exports are not jargon (`Command`, `Retry`, `Parallel`, `Resolver`, `TimeParadox`, `onStep`, `backoff` and the rest); everything else gets the plain word. A flow, not an Effect tree. Part of a flow, not a node or a subtree. The Command's function, or `cmd`, not a thunk. Joining, not fan-in. Stops, not short-circuits. A request, not cooperative. Attached, not stamped. Does the same thing again, not deterministic. No catch, not no catch combinator. Runs at the same time, not concurrently, wherever nothing turns on the distinction. `grep -rniE "thunk|combinator|monad|kleisli|effect tree|fan-in|fan-out|short-circuit|cooperative|imperative shell|arity|stamp" README.md` should print nothing. A precise term may stay if the plain words follow it in the same breath, as `idempotent (safe to run more than once)` does. The precise words are fine everywhere else.
-- **The README's API Reference is a reference.** Each entry gives the signature, what it returns, and one line per option, parameter or rule, and links to the guide section that teaches it rather than teaching it again. A new option gets one line there, and whatever more it needs goes in its guide section.
-- **No em dashes** anywhere in the repository, including JSDoc, comments, test names and assertion messages. Use a colon, parentheses, a semicolon, a comma or a full stop, whichever carries the relationship; a table cell that needs a placeholder uses `n/a`. `grep -rn "—" --include="*.js" --include="*.ts" --include="*.md" .` checks a change before it lands.
-- **Name a condition in `index.js` when it's used more than once**, or when it would otherwise need a comment to say what it means; one function's one-off condition can be a named `const`, as `pastTheEnd` is. Make a predicate a type guard (`@returns {value is T}`) only where a caller needs the narrowing, as the interpreter loop does with `isPending`; `isObject` returns a plain `boolean`, since a guard to `object` on an `any` value stops property reads compiling.
+- The size figure lives in one place, the README's feature bullet. Re-measure it with the command above after changing `index.js`, and reword it when the number moves. **A commit message and a changelog entry never mention the size.**
+- A changelog entry and a commit message leave out documentation-only changes. A docs change that ships with a behaviour change goes unmentioned in both; one that ships alone gets no changelog entry, and its commit message says why the docs changed.
+- The README's `Load Tests` section is re-measured by nothing. A change to what it claims (isolation between concurrent runs, replay fidelity, memory held across runs, `Parallel`'s limit and ordering) means rerunning an equivalent experiment and updating the section, or cutting the claim.
+- Markdown prose has no hard line breaks. Write each paragraph and list item as one line; code blocks and table rows are untouched.
+- No jargon in the README. The names the library exports are not jargon (`Command`, `Retry`, `Parallel`, `Resolver`, `TimeParadox`, `onStep`, `backoff` and the rest); everything else gets the plain word. A flow, not an Effect tree. Part of a flow, not a node or a subtree. The Command's function, or `cmd`, not a thunk. Joining, not fan-in. Stops, not short-circuits. A request, not cooperative. Attached, not stamped. Does the same thing again, not deterministic. No catch, not no catch combinator. Runs at the same time, not concurrently, wherever nothing turns on the distinction. `grep -rniE "thunk|combinator|monad|kleisli|effect tree|fan-in|fan-out|short-circuit|cooperative|imperative shell|arity|stamp" README.md` should print nothing. A precise term may stay if the plain words follow it in the same breath, as `idempotent (safe to run more than once)` does. The precise words are fine everywhere else.
+- The README's API Reference is a reference. Each entry gives the signature, what it returns, and one line per option, parameter or rule, and links to the guide section that teaches it rather than teaching it again. A new option gets one line there, and whatever more it needs goes in its guide section.
+- No em dashes anywhere in the repository, including JSDoc, comments, test names and assertion messages. Use a colon, parentheses, a semicolon, a comma or a full stop, whichever carries the relationship; a table cell that needs a placeholder uses `n/a`. `grep -rn "—" --include="*.js" --include="*.ts" --include="*.md" .` checks a change before it lands.
+- Name a condition in `index.js` when it's used more than once, or when it would otherwise need a comment to say what it means; one function's one-off condition can be a named `const`, as `pastTheEnd` is. Make a predicate a type guard (`@returns {value is T}`) only where a caller needs the narrowing, as the interpreter loop does with `isPending`; `isObject` returns a plain `boolean`, since a guard to `object` on an `any` value stops property reads compiling.
 
 ## Design rules
 
-**pure-effect** is a zero-dependency effect system for JavaScript implementing the "Functional Core, Imperative Shell" pattern: business logic returns plain data instead of executing side effects, so it is tested without mocks, and a recorded run can be fed back through the interpreter with no I/O at all. Everything is in `index.js`, and `index.d.ts` declares it. The exports are the constructors `Success`, `Failure`, `Command`, `Ask`, `Retry` and `Parallel`; `effectPipe`, which composes steps through the internal `chain`; `runEffect`; `configureEffect`; `commandName`; and `recorder`, `recordEffect`, `replayEffect` and `timeTravel`.
+pure-effect is a zero-dependency effect system for JavaScript implementing the "Functional Core, Imperative Shell" pattern: business logic returns plain data instead of executing side effects, so it is tested without mocks, and a recorded run can be fed back through the interpreter with no I/O at all. Everything is in `index.js`, and `index.d.ts` declares it. The exports are the constructors `Success`, `Failure`, `Command`, `Ask`, `Retry` and `Parallel`; `effectPipe`, which composes steps through the internal `chain`; `runEffect`; `configureEffect`; `commandName`; and `recorder`, `recordEffect`, `replayEffect` and `timeTravel`.
 
 ### Failures and throws
 
-- **There are three kinds of failure, and most of the design depends on them.** A `Failure` a step returned is an **abort**: the flow has decided, so it is never retried and `onExhausted` never sees it. A throw from a Command's function is an **I/O fault**, which is what `Retry` retries. An `EffectTypeError`, a replay fault, or a throw from a continuation or a pure step is a **harness error**: `runEffect` rejects with it. An I/O fault is the internal `IoFault` state, which only `execute` and its per-node functions return, and which becomes a plain `Failure` wherever it would reach user code. The loop accepts only the six public types, so a continuation cannot forge a fault. Keep provenance out of anything user code can hold. A domain outcome is returned, never thrown.
-- **A throw means something different in each region of `runCommand`.** From `onBeforeCommand` it is an abort, a veto. From the step runner it is an I/O fault, unless the Command's function had already succeeded, when it is a bug in an `onStep` hook and rejects the run. A hook that called `op` and returned `undefined` where the function returned a value rejects the run with a `TypeError`, and one that returned while `op` was still running is waited for first; only `undefined` is checked, and never for a hook that did not call `op`, since that is how replay answers. A hook that throws without calling `op` is a fault. `next` and the pure steps it reaches run in `execute`, outside both catches, so a throw there rejects the run. Harness errors carry the `harnessError` mark, and both catches rethrow them. `op` is async. The `Where a throw comes from` suite pins each region.
-- **A malformed flow throws, as the flow is built where possible.** `asEffect` and `effectTypeError` name the source and the likely mistake (`describeValue`), and `nextOf` names the node whose `next` returned the value. The constructors check their arguments with `describeArgument`, so a mistake is reported before the I/O it would have run. An `options` argument refuses a name its function does not read (`rejectUnknownOptions`): a new option is added to its function's list there, or the function refuses it. `malformed` builds every `EffectTypeError` and attaches a handler only to a native `Promise`, since calling `then` on a query builder runs the query.
+- There are three kinds of failure, and most of the design depends on them. A `Failure` a step returned is an **abort**: the flow has decided, so it is never retried and `onExhausted` never sees it. A throw from a Command's function is an **I/O fault**, which is what `Retry` retries. An `EffectTypeError`, a replay fault, or a throw from a continuation or a pure step is a **harness error**: `runEffect` rejects with it. An I/O fault is the internal `IoFault` state, which only `execute` and its per-node functions return, and which becomes a plain `Failure` wherever it would reach user code. The loop accepts only the six public types, so a continuation cannot forge a fault. **Keep provenance out of anything user code can hold.** A domain outcome is returned, never thrown.
+- A throw means something different in each region of `runCommand`. From `onBeforeCommand` it is an abort, a veto. From the step runner it is an I/O fault, unless the Command's function had already succeeded, when it is a bug in an `onStep` hook and rejects the run. A hook that called `op` and returned `undefined` where the function returned a value rejects the run with a `TypeError`, and one that returned while `op` was still running is waited for first; only `undefined` is checked, and never for a hook that did not call `op`, since that is how replay answers. A hook that throws without calling `op` is a fault. `next` and the pure steps it reaches run in `execute`, outside both catches, so a throw there rejects the run. Harness errors carry the `harnessError` mark, and both catches rethrow them. `op` is async. The `Where a throw comes from` suite pins each region.
+- A malformed flow throws, as the flow is built where possible. `asEffect` and `effectTypeError` name the source and the likely mistake (`describeValue`), and `nextOf` names the node whose `next` returned the value. The constructors check their arguments with `describeArgument`, so a mistake is reported before the I/O it would have run. An `options` argument refuses a name its function does not read (`rejectUnknownOptions`): a new option is added to its function's list there, or the function refuses it. `malformed` builds every `EffectTypeError` and attaches a handler only to a native `Promise`, since calling `then` on a query builder runs the query.
 
 ### Composition
 
-- **Every `Failure` carries the called flow's `initialInput`, at any depth and untrimmed, and a `Success` never does.** Both mechanisms are needed: `chain` stamps every node but a `Success` with the pipeline's start, and `effectPipe` ends with the identity pass `chain(tree, Success, start)`; and the interpreter restamps the final `Failure` with the root's input. The outcomes a settled `Parallel` hands `next` keep their branch's own input. Only `effectPipe` puts the input on the tree.
-- **A Command's identity is `commandName(eff)`**: a non-empty string `meta.name`, else `cmd.name`, else `'anonymous'`. Traces, replay matching, spans and tests all use it; never restate the rule.
-- **Docs and examples thread minimal values** between steps rather than a growing accumulator object, and log `result.error` rather than a whole `Failure`, since `redact` controls a trace and the shell controls logs.
+- Every `Failure` carries the called flow's `initialInput`, at any depth and untrimmed, and a `Success` never does. Both mechanisms are needed: `chain` stamps every node but a `Success` with the pipeline's start, and `effectPipe` ends with the identity pass `chain(tree, Success, start)`; and the interpreter restamps the final `Failure` with the root's input. The outcomes a settled `Parallel` hands `next` keep their branch's own input. Only `effectPipe` puts the input on the tree.
+- A Command's identity is `commandName(eff)`: a non-empty string `meta.name`, else `cmd.name`, else `'anonymous'`. Traces, replay matching, spans and tests all use it; never restate the rule.
+- Docs and examples thread minimal values between steps rather than a growing accumulator object, and log `result.error` rather than a whole `Failure`, since `redact` controls a trace and the shell controls logs.
 
 ### Retry and Parallel
 
-- **`Retry`** merges per-use options over `attempts: 3`, `delay: 100` and `backoff: 1`; an option set to `undefined` keeps its default, and values are checked when the `Retry` runs. An abort passes through unretried and unwrapped. Exhaustion is `{ retryExhausted, lastError, attempts }`, itself an I/O fault, so an enclosing `Retry` retries it. `onExhausted` runs a fallback under the `f` path prefix and never in a cancelled branch. Each attempt runs the **entire** wrapped tree again, `next` included, so a retried Command keeps its default `next` and branching happens in a later step.
-- **`Parallel`** runs branches through `runBounded`, so results and paths follow array order with or without `limit`; under `limit: 1` it is a sequential loop that stops at the first failure. The first branch to fail or throw cancels the others and its `Failure` is the result. Under `settled` a failure cancels nothing and `next` gets every outcome as a `Success` or `Failure`, while a throw still cancels the others and rejects the run. The whole `Parallel` is one `onStep` step of type `'Parallel'` whose `op` runs the branches and returns the decision, and a hook must call it. A branch's throw is held until every branch has settled. The branch that cancelled the others is tracked apart from those cancelled because of it.
-- **Cancellation is a request.** Each `Parallel` has an `AbortController` linked to the enclosing one by `linkedScope`. A cancelled branch starts no further Commands: that is checked at the top of `execute`'s loop, after `onBeforeCommand` returns, and before a `Retry` fallback; a backoff ends at once, and `delayFor` checks `aborted` first. `cmd` receives the signal only inside a `Parallel`, as its first argument. `Parallel` awaits every branch before returning.
+- `Retry` merges per-use options over `attempts: 3`, `delay: 100` and `backoff: 1`; an option set to `undefined` keeps its default, and values are checked when the `Retry` runs. An abort passes through unretried and unwrapped. Exhaustion is `{ retryExhausted, lastError, attempts }`, itself an I/O fault, so an enclosing `Retry` retries it. `onExhausted` runs a fallback under the `f` path prefix and never in a cancelled branch. Each attempt runs the **entire** wrapped tree again, `next` included, so a retried Command keeps its default `next` and branching happens in a later step.
+- `Parallel` runs branches through `runBounded`, so results and paths follow array order with or without `limit`; under `limit: 1` it is a sequential loop that stops at the first failure, unless `settled`. The first branch to fail or throw cancels the others: a failing branch's `Failure` is the result, and a throw rejects the run. Under `settled` a failure cancels nothing and `next` gets every outcome as a `Success` or `Failure`, while a throw still cancels the others and rejects the run. The whole `Parallel` is one `onStep` step of type `'Parallel'` whose `op` runs the branches and returns the decision, and a hook must call it. A branch's throw is held until every branch has settled. The branch that cancelled the others is tracked apart from those cancelled because of it.
+- Cancellation is a request. Each `Parallel` has an `AbortController` linked to the enclosing one by `linkedScope`. A cancelled branch starts no further Commands: that is checked at the top of `execute`'s loop, after `onBeforeCommand` returns, and before a `Retry` fallback; a backoff ends at once, and `delayFor` checks `aborted` first. `cmd` receives the signal only inside a `Parallel`, as its first argument. `Parallel` awaits every branch before returning.
 
 ### Hooks
 
-- **`onStep(name, type, op, path)`** wraps each Command and each `Parallel`; a hook that only watches must `await op()` and return its result. **`onRun(effect, op, flowName)`** wraps a whole run once. **`onBeforeCommand(command, context)`** runs before each Command, and throwing from it vetoes the Command as an abort.
-- **`configureEffect` is additive.** Each call adds one layer and returns a function that removes it; several configurations passed to one call form one layer; a bare call removes every layer; a call whose arguments are all `undefined` does nothing. `chainHooks` merges layers earliest outermost: `onStep` and `onRun` nest, and `onBeforeCommand` interceptors run in order. Keep those semantics if the hook shapes change. A per-call `callConfig` merges innermost, or over nothing under `inherit: false`, and a non-boolean `inherit` throws. A leftover `retry` key throws; that check comes out at 1.0.
-- **Anything that wraps `onStep` passes `path` on** as the fourth argument. Only the innermost hook can pass `op` an argument, the recorded decision.
-- **`observeSteps` (internal) is the contract for a hook that only watches**: `op` always runs, its result is returned, its error propagates, and anything the observer throws is dropped. Keep it minimal; `recorder` is its only caller.
+- `onStep(name, type, op, path)` wraps each Command and each `Parallel`; a hook that only watches must `await op()` and return its result. `onRun(effect, op, flowName)` wraps a whole run once. `onBeforeCommand(command, context)` runs before each Command, and throwing from it vetoes the Command as an abort.
+- `configureEffect` is additive. Each call adds one layer and returns a function that removes it; several configurations passed to one call form one layer; a bare call removes every layer; a call whose arguments are all `undefined` does nothing. `chainHooks` merges layers earliest outermost: `onStep` and `onRun` nest, and `onBeforeCommand` interceptors run in order. Keep those semantics if the hook shapes change. A per-call `callConfig` merges innermost, or over nothing under `inherit: false`, and a non-boolean `inherit` throws. A leftover `retry` key throws; that check comes out at 1.0.
+- **Anything that wraps `onStep` passes `path` on as the fourth argument.** Only the innermost hook can pass `op` an argument, the recorded decision.
+- `observeSteps` (internal) is the contract for a hook that only watches: `op` always runs, its result is returned, its error propagates, and anything the observer throws is dropped. Keep it minimal; `recorder` is its only caller.
 
 ### Recording and replay
 
-- **Give each run its own recorder**; one installed for the whole process mixes runs into a trace a replay refuses. `fromTrace` (internal) turns a trace into a `Resolver`, and `replayEffect` defaults its `context` to the trace's.
-- **Seven invariants hold replay together**, and breaking one breaks it in ways tests may not catch; `DESIGN.md` explains each.
-    1. **Replay drives the real interpreter and never touches the flow.** It replaces only I/O, with an `onStep` that answers from the trace, and waiting, with `fastRetry`. The only execution point is `await localStepRunner(cmdName, 'Command', op, cmdPath)`, and replay's `onStep` calls `op` only under `onMissing: 'execute'`, so no side effect can occur by default; never execute a Command anywhere else. `hooks` defaults to `false`.
-    2. **Steps match by path**: `0p1/0r2/0` is branch 1, attempt 2, first Command, and a fallback opens `0rf/`. A trace without paths matches in order and refuses a step inside a `Parallel`.
-    3. **A cancelled `Parallel` replays its recorded decision**, its own entry at its path, rather than recomputing it. A step missing from a branch the decision cancelled is a cut (`replayCut`), and a decision that no longer holds is a `TimeParadox`.
-    4. **A replay fault is a harness error**, marked `harnessError` and `replayFault`, which `replayEffect` turns into a `Failure` at its own boundary. A new harness error gets a mark, never a name to match on.
-    5. **The outcome wrapper is load-bearing**: a `Resolver` returns `{ result }`, `{ error }`, or `undefined` for not recorded. A trace whose `dropped` is above 0 refuses `onMissing: 'execute'`, and a step that threw is recorded with `threw: true`.
-    6. **Errors survive JSON** through `serializeError` and `reviveError`, `cause` and an `AggregateError`'s `errors` included, with enumerability as the original had it; a chain that loops back is cut where it returns.
-    7. **Recorded values are copies, both ways**: `snapshot` on the way in, `entryToOutcome` on the way out, and `toTrace` is called before the run.
-- **`redact` sees everything a trace holds**: results, serialized errors, and the trace's `initialInput` and `context`, told apart by `kind`. Keep that coverage complete if the trace format grows a field. A stand-in must get the same verdict from the flow as the value it replaces.
-- **A replay proves the flow asks for the same Commands and handles the same answers, not what it computes.** Test a value change against the pure step that computes it, and rename a Command whose result changes shape. A recording test asserts `unreached` is empty, or names the step a fix removed.
-- **`onResolved` is for observing a replay and a `Resolver` for supplying outcomes.** A throw from `onResolved` rejects the replay with that error.
+- Give each run its own recorder; one installed for the whole process mixes runs into a trace a replay refuses. `fromTrace` (internal) turns a trace into a `Resolver`, and `replayEffect` defaults its `context` to the trace's.
+- Seven invariants hold replay together, and breaking one breaks it in ways tests may not catch; `DESIGN.md` explains each.
+    1. Replay drives the real interpreter and never touches the flow. It replaces only I/O, with an `onStep` that answers from the trace, and waiting, with `fastRetry`. The only execution point is `await localStepRunner(cmdName, 'Command', op, cmdPath)`, and replay's `onStep` calls `op` only under `onMissing: 'execute'`, so no side effect can occur by default; **never execute a Command anywhere else**. `hooks` defaults to `false`.
+    2. Steps match by path: `0p1/0r2/0` is branch 1, attempt 2, first Command, and a fallback opens `0rf/`. A trace without paths matches in order and refuses a step inside a `Parallel`.
+    3. A cancelled `Parallel` replays its recorded decision, its own entry at its path, rather than recomputing it. A step missing from a branch the decision cancelled is a cut (`replayCut`), and a decision that no longer holds is a `TimeParadox`.
+    4. A replay fault is a harness error, marked `harnessError` and `replayFault`, which `replayEffect` turns into a `Failure` at its own boundary. A new harness error gets a mark, never a name to match on.
+    5. The outcome wrapper is load-bearing: a `Resolver` returns `{ result }`, `{ error }`, or `undefined` for not recorded. A trace whose `dropped` is above 0 refuses `onMissing: 'execute'`, and a step that threw is recorded with `threw: true`.
+    6. Errors survive JSON through `serializeError` and `reviveError`, `cause` and an `AggregateError`'s `errors` included, with enumerability as the original had it; a chain that loops back is cut where it returns.
+    7. Recorded values are copies, both ways: `snapshot` on the way in, `entryToOutcome` on the way out, and `toTrace` is called before the run.
+- `redact` sees everything a trace holds: results, serialized errors, and the trace's `initialInput` and `context`, told apart by `kind`. **Keep that coverage complete if the trace format grows a field.** A stand-in must get the same verdict from the flow as the value it replaces.
+- A replay proves the flow asks for the same Commands and handles the same answers, not what it computes. Test a value change against the pure step that computes it, and rename a Command whose result changes shape. A recording test asserts `unreached` is empty, or names the step a fix removed.
+- `onResolved` is for observing a replay and a `Resolver` for supplying outcomes. A throw from `onResolved` rejects the replay with that error.
 
 ### TypeScript
 
-- **`index.d.ts` is written by hand**, apart from `effectPipe`'s overloads, and the `Declaration parity` test, `tsd` and `tsc -p jsconfig.json` keep it matched to `index.js`. Add any checked JavaScript to `jsconfig.json`'s `include` list.
-- **The declarations support TypeScript 5.1 and later**; raising the minimum is a breaking change and goes in the changelog.
-- **A doc comment in `index.d.ts` is a hover**: a sentence or two about what a user needs. Its reasons go in `DESIGN.md`, and a non-obvious type trick gets a one-line `//` note above its doc comment.
-- **Deliberate type errors are `// @ts-expect-error` directives**, never `tsd`'s `expectError`, each on one line, small enough that only the intended mistake can fail it, with a reason.
-- **Change `effectPipe`'s overloads in `scripts/effect-pipe-overloads.js`** and run `npm run generate`, never by hand.
-- **Some declarations exist for a reason, and each is pinned in `test/types.test-d.ts`**: `Retry`'s error and `RetryState`'s `R`, every `next` as a method signature, the `settled?: false` overloads, `Command`'s first and last overloads, `Failure`'s `const`, functions typed from their whole return (`AnyEffect`, `EffectValue`, `EffectError`, `EffectContext`), `commandName`'s parameter, `RunContext`, `CommandInterceptor`, `redact`'s `any`, and `Parallel`'s branch typing. Read `DESIGN.md`'s TypeScript section before changing one, and extend the tsd file when touching the recording, replay or `CallConfiguration` types.
+- `index.d.ts` is written by hand, apart from `effectPipe`'s overloads, and the `Declaration parity` test, `tsd` and `tsc -p jsconfig.json` keep it matched to `index.js`. Add any checked JavaScript to `jsconfig.json`'s `include` list.
+- The declarations support TypeScript 5.1 and later; raising the minimum is a breaking change and goes in the changelog.
+- A doc comment in `index.d.ts` is a hover: a sentence or two about what a user needs. Its reasons go in `DESIGN.md`, and a non-obvious type trick gets a one-line `//` note above its doc comment.
+- Deliberate type errors are `// @ts-expect-error` directives, never `tsd`'s `expectError`, each on one line, small enough that only the intended mistake can fail it, with a reason.
+- Change `effectPipe`'s overloads in `scripts/effect-pipe-overloads.js` and run `npm run generate`, **never by hand**.
+- Some declarations exist for a reason, and each is pinned in `test/types.test-d.ts`: `Retry`'s error and `RetryState`'s `R`, every `next` as a method signature, the `settled?: false` overloads, `Command`'s first and last overloads, `Failure`'s `const`, functions typed from their whole return (`AnyEffect`, `EffectValue`, `EffectError`, `EffectContext`), `commandName`'s parameter, `RunContext`, `CommandInterceptor`, `redact`'s `any`, and `Parallel`'s branch typing. Read `DESIGN.md`'s TypeScript section before changing one, and extend the tsd file when touching the recording, replay or `CallConfiguration` types.
 
 ### Reference integrations
 
-- **`examples/opentelemetry-example.js` and `examples/recording-example.js` are reference code**: they ship under `examples/`, but `exports` offers only `index.js`. Edit them only with `npm test`. Each exports a function that returns a configuration and one that installs it, and nothing happens on import. Both import the library as `'pure-effect'`, so a copy runs as it is. Observing a run never decides it.
-- **Telemetry spans carry names, timings and status, never values**, and nothing ahead of a run may throw. **Recording** keeps one recorder per run in an `AsyncLocalStorage` scope; an error from `keep` or the sink goes to `onSinkError`, and each warning fires once per flow.
+- `examples/opentelemetry-example.js` and `examples/recording-example.js` are reference code: they ship under `examples/`, but `exports` offers only `index.js`. Edit them only with `npm test`. Each exports a function that returns a configuration and one that installs it, and nothing happens on import. Both import the library as `'pure-effect'`, so a copy runs as it is. Observing a run never decides it.
+- Telemetry spans carry names, timings and status, never values, and nothing ahead of a run may throw. Recording keeps one recorder per run in an `AsyncLocalStorage` scope; an error from `keep` or the sink goes to `onSinkError`, and each warning fires once per flow.
 
 ## Settled decisions
 
 Each was weighed and decided. Do not propose them again as improvements or rank them as weaknesses; `DESIGN.md` gives the reasons.
 
-- **No generator syntax**: a flow built from continuations is a reusable value, and a generator is used up as it runs.
-- **No catch**: `Retry`'s per-use `onExhausted` is the only recovery, and only from an I/O fault.
-- **`attempts: 0` throws.**
-- **No global retry options**, and a `retry` key throws.
-- **`settled` hands `next` `Success` and `Failure` nodes**, not `{ status, value }`.
-- **A `Parallel`'s trigger is the first failure to finish**, not the first by array order.
-- **No `AbortSignal` for a whole run**, and none reaches a Command outside a `Parallel`.
-- **No finalizer inside a flow**: cleanup is a try/finally around `runEffect` in the shell.
-- **Recursing through `effectPipe` is quadratic, and that is left alone**: long loops recurse through a Command's `next`.
-- **Nested pipelines for dependent values are a TypeScript cost only.**
-- **No join helper**: `pair(f)` was built and dropped.
-- **No flows written as one function**: `flow(fn)` was built and dropped.
-- **No loop helper**: a loop is a step that gets the list, then `Parallel(list.map(f), { limit: 1 })`.
-- **A `TimeParadox` after a flow changes shape is the design**; an incident test is re-recorded when its flow changes shape.
-- **A trace records results, never Command arguments.**
-- **A trace keeps data, not objects.**
-- **Steps match by path, with no option to choose.**
-- **`fastRetry` is a parameter of the private `interpret`**, not a rewrite of the tree or a public option.
-- **Per-call configuration merges; it never replaces one slot.**
-- **What is internal stays internal**: `fromTrace`, `observeSteps` and `chainHooks`.
-- **A helper ships only when users would otherwise copy a library rule**, as `commandName` does.
-- **The conveniences stay**: `recordEffect` and `timeTravel`.
-- **Recording stays out of the library.**
-- **`effectPipe` stops at 20 steps**, and nesting is the workaround.
-- **`index.js` stays one file**, divided into sections; a `utils.js` and a split into the core and recording and replay were weighed and dropped.
-- **`runBranches` runs both modes through `settleBranches`.**
-- **Thrown errors stay out of the declared error union.**
-- **Sharp edges are documented, not guarded**: `Retry` repeating its whole wrapped tree, a branch whose Command ignores its signal running to completion, and a function passed by name taking the signal for an optional first parameter.
+- No generator syntax: a flow built from continuations is a reusable value, and a generator is used up as it runs.
+- No catch: `Retry`'s per-use `onExhausted` is the only recovery, and only from an I/O fault.
+- `attempts: 0` throws.
+- No global retry options, and a `retry` key throws.
+- `settled` hands `next` `Success` and `Failure` nodes, not `{ status, value }`.
+- A `Parallel`'s trigger is the first failure to finish, not the first by array order.
+- No `AbortSignal` for a whole run, and none reaches a Command outside a `Parallel`.
+- No finalizer inside a flow: cleanup is a try/finally around `runEffect` in the shell.
+- Recursing through `effectPipe` is quadratic, and that is left alone: a loop that recurses does so through a Command's `next`, which stays linear.
+- Nested pipelines for dependent values are a TypeScript cost only.
+- No join helper: `pair(f)` was built and dropped.
+- No flows written as one function: `flow(fn)` was built and dropped.
+- No loop helper: a loop is a step that gets the list, then `Parallel(list.map(f), { limit: 1 })`.
+- A `TimeParadox` after a flow changes shape is the design; an incident test is re-recorded when its flow changes shape.
+- A trace records results, never Command arguments.
+- A trace keeps data, not objects.
+- Steps match by path, with no option to choose.
+- `fastRetry` is a parameter of the private `interpret`, not a rewrite of the tree, and not an option of `runEffect`.
+- Per-call configuration merges; it never replaces one slot.
+- What is internal stays internal: `fromTrace`, `observeSteps` and `chainHooks`.
+- A helper ships only when users would otherwise copy a library rule, as `commandName` does.
+- The conveniences stay: `recordEffect` and `timeTravel`.
+- Recording stays out of the library.
+- `effectPipe` stops at 20 steps, and nesting is the workaround.
+- `index.js` stays one file, divided into sections; a `utils.js` and a split into the core and recording and replay were weighed and dropped.
+- `runBranches` runs both modes through `settleBranches`.
+- Thrown errors stay out of the declared error union.
+- Sharp edges are documented, not guarded: `Retry` repeating its whole wrapped tree, a branch whose Command ignores its signal running to completion, and a function passed by name taking the signal for an optional first parameter.
 
 ## Tests
 
 `test/all.js` holds every runtime test, with a user-registration domain as the running example; `registerUserFlow` has the same shape as the README's Quick Start. `test/types.test-d.ts` holds the type-level tests, run by `tsd`.
 
-- **Assert on the returned data**, such as Commands, Failures and traces, rather than on side effects.
-- **Reset the hooks in every suite** with `beforeEach(() => configureEffect())`, a bare call; `configureEffect({})` adds an empty layer rather than resetting.
-- **Count I/O in replay tests**, and check a replay from memory and from JSON.
-- **Test behaviour through the public surface**, and reach an internal such as `observeSteps` through its public consumer.
-- **Anchor an equation to a value**, as the `Kleisli laws` suite does.
-- **Each example file has a suite**, so a change to the hook contract breaks the examples rather than letting them rot.
-- **Audit the guidance when behaviour changes**: write the flow a careful reader would write after reading each documented sharp edge, and run it.
-- **README examples run.** The `README examples` suite executes every `js` block as one program with its asserts live, so a fenced `js` block is real JavaScript: a value shape goes in a `text` block, a placeholder is written out rather than `...`, and anything new outside the library gets a stub in that suite. A `ts` block is not run, so check `assertCommand` by hand when the types it touches change.
-- **Documented pipelines keep their shape.** Every step accepts and returns the piped value, so a guard's `next` returns `Success(input)`, not `Success(true)`; threading the value is preferred over `() => f(outer)`, without presenting it as a rule; and a Command's function body stays a single call.
+- Assert on the returned data, such as Commands, Failures and traces, rather than on side effects.
+- Reset the hooks in every suite with `beforeEach(() => configureEffect())`, a bare call; `configureEffect({})` adds an empty layer rather than resetting.
+- Count I/O in replay tests, and check a replay from memory and from JSON.
+- Test behaviour through the public surface, and reach an internal such as `observeSteps` through its public consumer.
+- Anchor an equation to a value, as the `Kleisli laws` suite does.
+- Each example file has a suite, so a change to the hook contract breaks the examples rather than letting them rot.
+- Audit the guidance when behaviour changes: write the flow a careful reader would write after reading each documented sharp edge, and run it.
+- README examples run. The `README examples` suite executes every `js` block as one program with its asserts live, so a fenced `js` block is real JavaScript: a value shape goes in a `text` block, a placeholder is written out rather than `...`, and anything new outside the library gets a stub in that suite. A `ts` block is not run, so check `assertCommand` by hand when the types it touches change.
+- Documented pipelines keep their shape. Every step accepts and returns the piped value, so a guard's `next` returns `Success(input)`, not `Success(true)`; threading the value is preferred over `() => f(outer)`, without presenting it as a rule; and a Command's function body stays a single call.
