@@ -3,7 +3,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { configureEffect, recorder, Failure } from 'pure-effect';
 
-/** @import { Effect, EffectConfiguration, RunWrapper, StepRunner, CommandInterceptor, TraceEntry, TraceLog, SuccessState, FailureState } from "pure-effect" */
+/** @import { EffectConfiguration, RunWrapper, StepRunner, CommandInterceptor, TraceEntry, TraceLog, SuccessState, FailureState } from "pure-effect" */
 
 /**
  * Records every run of an application without touching any call site, one trace per run. `recordEffect` covers
@@ -60,10 +60,10 @@ export function recordingHooks(options = {}) {
     const warned = new Set();
 
     /** @type {RunWrapper} */
-    const onRun = async (effect, pipeline, flowName) => {
+    const onRun = async (effect, pipeline, flowName, initialInput) => {
         const rec = recorder({ redact, maxEntries, stack });
         // Packaged before the run, so a Command that changes its input cannot rewrite what the trace says it received.
-        const head = rec.toTrace({ flowName, initialInput: effect.initialInput });
+        const head = rec.toTrace({ flowName, initialInput });
         return scope.run({ rec, head, contextCaptured: false }, async () => {
             /** @type {{ result: SuccessState<any> | FailureState<any> } | { error: unknown }} */
             let outcome;
@@ -78,7 +78,7 @@ export function recordingHooks(options = {}) {
             try {
                 if (keep(result)) {
                     const { dropped = 0, trace } = rec.toTrace();
-                    warnAboutReplay(flowName, effect, dropped, trace);
+                    warnAboutReplay(flowName, initialInput, dropped, trace);
                     await sink({ ...head, dropped, trace });
                 }
             } catch (error) {
@@ -92,17 +92,17 @@ export function recordingHooks(options = {}) {
     /**
      * Warns, once per flow, about a kept trace that will not replay as recorded.
      * @param {string} flowName
-     * @param {Effect<any, any, any>} effect
+     * @param {unknown} initialInput
      * @param {number} dropped
      * @param {TraceEntry[]} trace
      */
-    const warnAboutReplay = (flowName, effect, dropped, trace) => {
+    const warnAboutReplay = (flowName, initialInput, dropped, trace) => {
         const warnOnce = (/** @type {string} */ kind, /** @type {string} */ message) => {
             if (warned.has(`${kind}:${flowName}`)) return;
             warned.add(`${kind}:${flowName}`);
             onWarning(`Recording '${flowName || 'flow'}': ${message}`, flowName);
         };
-        if (effect.initialInput === undefined) {
+        if (initialInput === undefined) {
             warnOnce(
                 'input',
                 'the flow carries no input, so its traces hold none and timeTravel rebuilds it from undefined. ' +

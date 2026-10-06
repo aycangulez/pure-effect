@@ -4,7 +4,7 @@
 //
 // 1. Types: the JSDoc shapes of the nodes a flow is made of.
 // 2. Building flows: the constructors; the checks, error messages and kinds of failure the later sections
-//    share; and `effectPipe`, with the `chain` that joins its steps.
+//    share; and `effectPipe`, with the `chain` that joins its steps and the `flowInputs` it records for `onRun`.
 // 3. Configuration: the hook types and the library's defaults, `configureEffect` and its layers, and
 //    `chainHooks`, which merges them.
 // 4. Running flows: the helpers `Retry` and `Parallel` run on, the interpreter, and `runEffect`.
@@ -15,8 +15,8 @@
 
 // #region Types
 
-/** @typedef {{ type: 'Success', value: any, initialInput?: any }} SuccessState */
-/** @typedef {{ type: 'Failure', error: any, initialInput?: any }} FailureState */
+/** @typedef {{ type: 'Success', value: any }} SuccessState */
+/** @typedef {{ type: 'Failure', error: any }} FailureState */
 /**
  * Metadata attached to a Command. A string `name` is read by the interpreter as the Command's
  * identity; every other key is carried through untouched for `onBeforeCommand`.
@@ -27,15 +27,13 @@
  *   type: 'Command',
  *   cmd: (signal?: AbortSignal) => Promise<any>|any,
  *   next: (result: any) => Effect,
- *   meta?: any,
- *   initialInput?: any
+ *   meta?: any
  * }} CommandState
  */
 /**
  * @typedef {{
  *   type: 'Ask',
- *   next: (context: any) => Effect,
- *   initialInput?: any
+ *   next: (context: any) => Effect
  * }} AskState
  */
 
@@ -44,8 +42,7 @@
  *   type: 'Retry',
  *   effect: Effect,
  *   options: { attempts?: number, delay?: number, backoff?: number, onExhausted?: (error: any) => Effect },
- *   next: (value: any) => Effect,
- *   initialInput?: any
+ *   next: (value: any) => Effect
  * }} RetryState
  */
 
@@ -60,8 +57,7 @@
  *   type: 'Parallel',
  *   effects: Effect[],
  *   next: (values: any[]) => Effect,
- *   options?: ParallelOptions,
- *   initialInput?: any
+ *   options?: ParallelOptions
  * }} ParallelState
  */
 
@@ -83,14 +79,9 @@ const Success = (value) => ({ type: 'Success', value });
 /**
  * Represents a failed computation. Stops the pipeline execution
  * @param {any} error - The error reason (string, Error object, etc).
- * @param {any} [initialInput] - initial input passed to the flow (optional)
  * @returns {FailureState}
  */
-const Failure = (error, initialInput) => ({
-    type: 'Failure',
-    error,
-    initialInput
-});
+const Failure = (error) => ({ type: 'Failure', error });
 
 /**
  * Represents a side effect to be executed later.
@@ -348,21 +339,20 @@ const hasMark = (e, mark) => Boolean(e && /** @type {any} */ (e)[mark]);
  * An I/O fault: a Command's function threw, or a `Retry` ran out of attempts. `Retry` retries this, never a
  * `Failure` a step returned, which is an abort. Internal: only `execute` and its per-node functions return
  * one, and `asOutcome` turns it into a plain `Failure` before it reaches user code.
- * @typedef {{ type: 'IoFault', error: any, initialInput?: any }} IoFaultState
+ * @typedef {{ type: 'IoFault', error: any }} IoFaultState
  */
 
 /**
  * @param {any} error
- * @param {any} [initialInput]
  * @returns {IoFaultState}
  */
-const IoFault = (error, initialInput) => ({ type: 'IoFault', error, initialInput });
+const IoFault = (error) => ({ type: 'IoFault', error });
 
 /**
  * @param {SuccessState | FailureState | IoFaultState} state
  * @returns {SuccessState | FailureState}
  */
-const asOutcome = (state) => (state.type === 'IoFault' ? Failure(state.error, state.initialInput) : state);
+const asOutcome = (state) => (state.type === 'IoFault' ? Failure(state.error) : state);
 
 /**
  * Builds an `EffectTypeError`, for a malformed flow: a step or continuation that returned something other
@@ -442,45 +432,47 @@ const asEffect = (value, source) => {
  *
  * @param {Effect} effect - The current Effect object
  * @param {(value: any) => Effect} fn - The next function to run if the current effect is a Success
- * @param {any} [initialInput] - The pipeline's starting value, stamped on every node but a Success
  * @param {Effect} [from] - The node whose `next` returned `effect`, which an error names
  * @returns {Effect} The composed Effect
  */
-const chain = (effect, fn, initialInput, from) => {
+const chain = (effect, fn, from) => {
     const source = () => (from ? nextOf(from) : 'A continuation');
-    // Overwrites a sub-pipeline's own stamp, so the root and a Failure at any depth carry the input of the
-    // flow that was actually called. A Success stays bare, so `deepEqual(result, Success(v))` always holds.
-    const withII = (/** @type {Effect} */ e) =>
-        initialInput !== undefined && e.type !== 'Success' ? { ...e, initialInput } : e;
 
     // Checked before `effect.type` is read, which would otherwise throw a bare TypeError naming no step.
     if (effect == null) return asEffect(effect, source());
 
     switch (effect.type) {
         case 'Success':
-            return withII(asEffect(fn(effect.value), `Step '${fn.name || 'anonymous'}'`));
+            return asEffect(fn(effect.value), `Step '${fn.name || 'anonymous'}'`);
         case 'Failure':
-            return withII(effect);
+            return effect;
         case 'Command': {
-            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput, effect);
-            return withII(Command(effect.cmd, next, effect.meta));
+            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, effect);
+            return Command(effect.cmd, next, effect.meta);
         }
         case 'Ask': {
-            const next = (/** @type {any} */ ctx) => chain(effect.next(ctx), fn, initialInput, effect);
-            return withII(Ask(next));
+            const next = (/** @type {any} */ ctx) => chain(effect.next(ctx), fn, effect);
+            return Ask(next);
         }
         case 'Retry': {
-            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput, effect);
-            return withII({ ...effect, next });
+            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, effect);
+            return { ...effect, next };
         }
         case 'Parallel': {
-            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, initialInput, effect);
-            return withII({ ...effect, next });
+            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, effect);
+            return { ...effect, next };
         }
         default:
             return asEffect(effect, source());
     }
 };
+
+/**
+ * The input each flow `effectPipe` built was called with, keyed on the flow's root, for `interpret` to hand
+ * `onRun`. Kept off the flow itself, so no node or outcome user code holds carries it.
+ * @type {WeakMap<Effect, any>}
+ */
+const flowInputs = new WeakMap();
 
 /**
  * Composes a list of functions into a single Effect pipeline.
@@ -502,11 +494,12 @@ const effectPipe = (...fns) => {
         }
     });
     return (start) => {
-        const chainWithII = (/** @type {Effect} */ eff, /** @type {(v: any) => Effect} */ fn) => chain(eff, fn, start);
-        const tree = fns.reduce(chainWithII, /** @type {Effect} */ (Success(start)));
-        // An identity pass. `chain` stamps a sub-pipeline's nodes only through the continuations it wraps,
-        // and a sub-pipeline returned by the last step has no later step to wrap them.
-        return chain(tree, Success, start);
+        const tree = fns.reduce((eff, fn) => chain(eff, fn), /** @type {Effect} */ (Success(start)));
+        // A copy, since the last step can return an object other flows share, such as a Failure kept in a
+        // constant, and the input is keyed on it.
+        const root = { ...tree };
+        flowInputs.set(root, start);
+        return root;
     };
 };
 
@@ -523,9 +516,12 @@ const effectPipe = (...fns) => {
 /** @type StepRunner */
 const defaultStepRunner = async (name, type, op) => await op();
 
-/** @typedef {(effect: Effect, op: function, flowName?: string) => Promise<any>} RunWrapper */
+/**
+ * Wraps one run. `initialInput` is what the flow was called with, when `effectPipe` built it.
+ * @typedef {(effect: Effect, op: function, flowName?: string, initialInput?: any) => Promise<any>} RunWrapper
+ */
 /** @type RunWrapper */
-const defaultRunWrapper = async (effect, op, flowName) => await op();
+const defaultRunWrapper = async (effect, op, flowName, initialInput) => await op();
 
 /** @typedef {(command: CommandState, context?: any) => Promise<any>} CommandInterceptor */
 /** @type CommandInterceptor */
@@ -546,10 +542,34 @@ const rejectRetryKey = (config, source) => {
         );
 };
 
+/** The hooks a configuration can set. */
+const hookNames = ['onStep', 'onRun', 'onBeforeCommand'];
+
+/**
+ * Refuses a configuration that would quietly switch a hook off or break every run: a key no hook is named, as a
+ * misspelt `onstep` is, or a hook that is not a function, which made every Command an I/O fault that `Retry`
+ * retried. A hook left `undefined` or `null` is a slot left unset.
+ * @param {any} config
+ * @param {string} source - Where it was passed, as the message names it
+ * @param {string} prefix - What precedes a hook's name in the message, as in `configureEffect's onStep`
+ * @param {string[]} known - The keys it may hold
+ */
+const checkConfiguration = (config, source, prefix, known) => {
+    rejectRetryKey(config, source);
+    rejectUnknownOptions(config, source, known);
+    for (const name of hookNames) {
+        const hook = config[name];
+        if (hook != null && typeof hook !== 'function') {
+            throw new TypeError(`${prefix}${name} must be a function, got ${describeArgument(hook)}.`);
+        }
+    }
+};
+
 /**
  * @typedef {Object} EffectConfiguration
  * @property {StepRunner} [onStep] - Wraps each Command's execution, and each Parallel's branches.
- * @property {RunWrapper} [onRun] - Fires once per runEffect call. It wraps the entire workflow execution.
+ * @property {RunWrapper} [onRun] - Fires once per runEffect call. It wraps the entire workflow execution, and is
+ *           handed the flow's input when `effectPipe` built it.
  * @property {CommandInterceptor} [onBeforeCommand] - Intercepts a Command and any context passed to runEffect before execution.
  */
 
@@ -605,7 +625,12 @@ const configureEffect = (...configs) => {
     }
     const present = configs.filter(Boolean);
     // Before installing anything, so a refused call leaves the wiring untouched.
-    present.forEach((config) => rejectRetryKey(config, 'configureEffect'));
+    present.forEach((config) => {
+        if (!isOptionsObject(config)) {
+            throw new TypeError(`configureEffect expects configuration objects, got ${describeArgument(config)}.`);
+        }
+        checkConfiguration(config, 'configureEffect', "configureEffect's ", hookNames);
+    });
     if (present.length === 0) return () => {};
     const layer = chainHooks(...present);
     layers = [...layers, layer];
@@ -649,7 +674,8 @@ const chainHooks = (...configs) => {
     }
     if (runs.length) {
         merged.onRun = runs.reduceRight(
-            (inner, outer) => (effect, op, flowName) => outer(effect, () => inner(effect, op, flowName), flowName)
+            (inner, outer) => (effect, op, flowName, initialInput) =>
+                outer(effect, () => inner(effect, op, flowName, initialInput), flowName, initialInput)
         );
     }
     if (interceptors.length) {
@@ -666,11 +692,10 @@ const chainHooks = (...configs) => {
 /**
  * The Failure a cancelled `Parallel` branch stops with. Its error is named so it is never mistaken for
  * the failure that triggered the cancellation.
- * @param {any} initialInput
  * @returns {FailureState}
  */
-const cancelledBranch = (initialInput) =>
-    Failure(Object.assign(new Error('Parallel branch cancelled.'), { name: 'ParallelCancelled' }), initialInput);
+const cancelledBranch = () =>
+    Failure(Object.assign(new Error('Parallel branch cancelled.'), { name: 'ParallelCancelled' }));
 
 /**
  * Which branch, if any, cancelled a Parallel. `branch: null` means an enclosing Parallel cancelled it.
@@ -812,7 +837,10 @@ const interpret =
      * @returns {Promise<SuccessState | FailureState>}
      */
     async function interpret(effect, context = {}, callConfig = {}, fastRetry = false) {
-        rejectRetryKey(callConfig, "runEffect's callConfig");
+        if (!isOptionsObject(callConfig)) {
+            throw new TypeError(`runEffect's callConfig must be an object, got ${describeArgument(callConfig)}.`);
+        }
+        checkConfiguration(callConfig, "runEffect's callConfig", 'callConfig.', [...hookNames, 'inherit']);
         const { inherit = true, ...local } = callConfig;
         // Not coerced: `'false'` quietly inheriting everything is the behaviour this option exists to remove.
         if (typeof inherit !== 'boolean') {
@@ -843,7 +871,7 @@ const interpret =
             let from;
             while (isPending(eff)) {
                 // Checked before every node: a Command already in flight cannot be stopped, but the next never starts.
-                if (signal?.aborted) return cancelledBranch(eff.initialInput);
+                if (signal?.aborted) return cancelledBranch();
                 if (eff.type === 'Ask') {
                     from = eff;
                     eff = eff.next(context);
@@ -906,7 +934,7 @@ const interpret =
                     await delayFor(fastRetry ? 0 : opts.delay * Math.pow(opts.backoff, attempt - 1), signal);
                 }
                 // After the wait, so a branch cancelled mid-backoff makes no further attempt.
-                if (signal?.aborted) return cancelledBranch(retry.initialInput);
+                if (signal?.aborted) return cancelledBranch();
                 const result = await execute(retry.effect, signal, `${stepPath}r${attempt}/`);
                 // A Success feeds `next`. An abort is the flow deciding, not the I/O failing: not retried, not
                 // wrapped.
@@ -915,9 +943,9 @@ const interpret =
             }
             const exhausted = { retryExhausted: true, lastError, attempts };
             // An exhaustion is a fault too, which keeps an enclosing Retry retrying this one.
-            if (typeof onExhausted !== 'function') return IoFault(exhausted, retry.initialInput);
+            if (typeof onExhausted !== 'function') return IoFault(exhausted);
             // A cancelled branch starts no fallback, as it starts no further Commands.
-            if (signal?.aborted) return cancelledBranch(retry.initialInput);
+            if (signal?.aborted) return cancelledBranch();
             // A failing fallback propagates as it is, not wrapped as another exhaustion.
             return execute(asEffect(onExhausted(exhausted), "Retry option 'onExhausted'"), signal, `${stepPath}rf/`);
         }
@@ -950,7 +978,7 @@ const interpret =
                 await localStepRunner('Parallel', 'Parallel', op, branchPath);
             } catch (e) {
                 // A cut from `fromTrace`: a replay found this Parallel inside a branch production had already stopped.
-                if (hasMark(e, replayCut)) return cancelledBranch(parallel.initialInput);
+                if (hasMark(e, replayCut)) return cancelledBranch();
                 throw e;
             }
             if (!run) {
@@ -1105,7 +1133,7 @@ const interpret =
          */
         async function runCommand(command, signal, cmdPath) {
             const cmdName = commandName(command);
-            const { initialInput, cmd } = command;
+            const { cmd } = command;
             // Whether the function itself succeeded: a hook throwing after it did is a bug, and retrying would
             // repeat work already done.
             let succeeded = false;
@@ -1138,10 +1166,10 @@ const interpret =
                 await localCommandInterceptor(command, context);
             } catch (e) {
                 if (hasMark(e, harnessError)) throw e;
-                return Failure(e, initialInput);
+                return Failure(e);
             }
             // Again, since an interceptor can wait (a rate limiter, say) while a sibling fails.
-            if (signal?.aborted) return cancelledBranch(initialInput);
+            if (signal?.aborted) return cancelledBranch();
             let returned;
             let unwaited = false;
             try {
@@ -1155,12 +1183,12 @@ const interpret =
             } catch (e) {
                 // A cut from `fromTrace`: a step production never ran, in a branch a Parallel cancelled. Stop here,
                 // as production did.
-                if (hasMark(e, replayCut)) return cancelledBranch(initialInput);
+                if (hasMark(e, replayCut)) return cancelledBranch();
                 if (hasMark(e, harnessError)) throw e;
                 // A hook threw after the function returned, which is a bug in the hook. A hook that throws
                 // without calling `op` is still a fault, since that is how replay reports a recorded error.
                 if (succeeded) throw e;
-                return IoFault(e, initialInput);
+                return IoFault(e);
             }
             // A hook that awaited `op` and forgot to return its result: `next` would take the branch for a Command
             // that returned nothing, while a recorder inside the hook kept the real value. Only `undefined` is
@@ -1175,15 +1203,10 @@ const interpret =
             return Success(returned);
         }
 
-        // Every outcome leaves through here, so this is where a Failure gets the root's input: one from a
-        // Parallel branch or a Retry fallback carries its own subtree's input, which `chain` never reaches.
-        // An I/O fault becomes a plain Failure here too.
-        const rootInput = effect?.initialInput;
-        const run = async () => {
-            const result = asOutcome(await execute(effect));
-            return result.type === 'Failure' && rootInput !== undefined ? Failure(result.error, rootInput) : result;
-        };
-        return localRunWrapper(effect, run, context?.flowName || '');
+        // An I/O fault becomes a plain Failure here, where every outcome leaves.
+        const run = async () => asOutcome(await execute(effect));
+        // Recorded by `effectPipe`, so a hook-based recorder can store what the flow was called with.
+        return localRunWrapper(effect, run, context?.flowName || '', flowInputs.get(effect));
     };
 
 /**
@@ -1525,6 +1548,19 @@ const recorder = (options = {}) => {
     const redactField = (/** @type {any} */ value, /** @type {string} */ kind) =>
         value === undefined ? undefined : safeRedact(snapshot(value), kind, kind);
 
+    /**
+     * Snapshots a thrown value's serialized form and redacts the copy. An Error stays marked as one when redact
+     * returns an object without the mark, as one that builds a fresh object from `name` and `message` does:
+     * otherwise the replay handed the flow a plain object where production had thrown an Error.
+     */
+    const redactError = (/** @type {any} */ thrown, /** @type {string} */ name) => {
+        const serialized = snapshot(serializeError(thrown, stack));
+        // Read before redact runs, since it may change the copy it is handed.
+        const wasError = isObject(serialized) && serialized.__error === true;
+        const redacted = safeRedact(serialized, name, 'error');
+        return wasError && isObject(redacted) && !Array.isArray(redacted) ? { __error: true, ...redacted } : redacted;
+    };
+
     const onStep = observeSteps(({ name, type, path }) => (end) => {
         const durationMs = Math.round(end.durationMs * 1000) / 1000;
         // A Parallel's result is its decision, which holds no user data and must survive intact for a replay
@@ -1537,7 +1573,7 @@ const recorder = (options = {}) => {
                       command: name,
                       path,
                       threw: true,
-                      error: safeRedact(snapshot(serializeError(end.error, stack)), name, 'error'),
+                      error: redactError(end.error, name),
                       durationMs
                   }
                 : { command: name, path, result: recorded(end.result), durationMs }
@@ -1608,6 +1644,30 @@ const hasPath = (step) => typeof step.path === 'string';
  */
 const isInsideParallel = (path) => typeof path === 'string' && /p\d+\//.test(path);
 
+/** @typedef {'Command' | 'Retry' | 'Parallel'} NodeKind */
+
+/**
+ * The positions a path passes through, each with the kind of node there: the Retry or Parallel each prefix
+ * opens, then the Command the path ends at, or the Parallel whose own entry it is. So `0p1/2r0/1` passes a
+ * Parallel at `0` and a Retry at `0p1/2`, and ends at a Command at `0p1/2r0/1`. A path that is not in the
+ * recorder's format gives none, so a hand-built trace is never judged by its shape.
+ * @param {string} path
+ * @returns {[string, NodeKind][]}
+ */
+const nodesAlong = (path) => {
+    /** @type {[string, NodeKind][]} */
+    const nodes = [];
+    let prefix = '';
+    for (const segment of path.split('/')) {
+        const match = /^(\d+)(?:(p)\d*|(r)(?:\d+|f))?$/.exec(segment);
+        if (!match) return [];
+        const [, step, parallel, retry] = match;
+        nodes.push([prefix + step, parallel ? 'Parallel' : retry ? 'Retry' : 'Command']);
+        prefix += `${segment}/`;
+    }
+    return nodes;
+};
+
 /**
  * Turns a recorded entry into the outcome a Resolver must return, snapshotted so a replayed step that
  * mutates its result cannot rewrite the trace.
@@ -1662,6 +1722,38 @@ const fromTrace = (traceLog, options = {}) => {
         if (byPath.size !== entries.length) {
             throw replayError('Trace has duplicate step paths.');
         }
+        /** The kind of node the recorded run had at each position its steps passed through. */
+        const recordedKinds = new Map(entries.flatMap((e) => nodesAlong(/** @type {string} */ (e.path))));
+        // A step the trace lacks is a change of shape, not a missing step, when the trace recorded another kind of
+        // node somewhere along its path: a Command added where a Retry was, or one removed so that a Retry moved
+        // onto a Command's position. Its path is one the trace never had, so it would otherwise be reported as
+        // missing, and run live under `onMissing: 'execute'`.
+        /** Names the first Command the trace recorded inside the Retry or Parallel at `at`, for a message. */
+        const firstStepIn = (/** @type {string} */ at, /** @type {NodeKind} */ kind) => {
+            const opens = `${at}${kind === 'Retry' ? 'r' : 'p'}`;
+            const inside = entries.find((e) => e.path?.startsWith(opens) && !isDecisionEntry(e));
+            return inside ? `, with '${inside.command}' at path '${inside.path}'` : '';
+        };
+        const throwIfReshaped = (/** @type {ReplayStep} */ step) => {
+            const nodes = nodesAlong(/** @type {string} */ (step.path));
+            const diverged = nodes.find(([at, kind]) => (recordedKinds.get(at) ?? kind) !== kind);
+            if (!diverged) return;
+            const [at, kind] = diverged;
+            const recorded = /** @type {NodeKind} */ (recordedKinds.get(at));
+            const actual = kind === 'Command' ? step.name : kind;
+            const expected = recorded === 'Command' ? /** @type {TraceEntry} */ (byPath.get(at)).command : recorded;
+            const flowHad = kind === 'Command' ? `flow asked for '${actual}'` : `flow has a ${kind} there`;
+            const traceHad =
+                recorded === 'Command'
+                    ? `trace recorded '${expected}'`
+                    : `trace recorded a ${recorded} there${firstStepIn(at, recorded)}`;
+            throw timeParadoxAt(`path '${at}'`, `${flowHad}, ${traceHad}`, {
+                index: step.index,
+                path: at,
+                expected,
+                actual
+            });
+        };
         /** Recorded Parallel decisions that cancelled branches, by the Parallel's path. */
         const cancellations = entries.filter(isDecisionEntry).filter((e) => e.result?.cancelled === true);
         // A missing step is where production stopped a branch when it lies in a branch a recorded decision
@@ -1682,10 +1774,12 @@ const fromTrace = (traceLog, options = {}) => {
                 // `runBranches` reproduces it; with none recorded, the Parallel replays under timing.
                 if (entry && entry.command !== 'Parallel') throw timeParadox(step, entry.command);
                 if (entry) return resolveEntry(entry);
+                throwIfReshaped(step);
                 if (stoppedInProduction(step.path)) throw replayCutError(/** @type {string} */ (step.path));
                 return undefined;
             }
             if (!entry) {
+                throwIfReshaped(step);
                 // Production never ran this step, so it is not run live under `onMissing` either.
                 if (stoppedInProduction(step.path)) throw replayCutError(/** @type {string} */ (step.path));
                 return undefined;
@@ -1737,10 +1831,10 @@ const missingStepError = (step, describe, droppedEntries) => {
               'this step and the recorder not kept it; record the flow with a higher maxEntries to ' +
               'replay past it.'
             : 'Production may never have run it: a Command an onBeforeCommand hook vetoed leaves no ' +
-              'entry, and neither does a step added since the recording or one the flow reaches now that ' +
-              "it did not then. onMissing: 'execute' runs such a step for real, and after an added step " +
-              'every step that follows it, since they all move to new paths, so pass it only where every ' +
-              'Command the flow can still reach goes to a test double or only reads.';
+              'entry, and neither does a step the flow reaches now that it did not then, such as one added ' +
+              "past the end of the recording. onMissing: 'execute' runs such a step for real, and every step " +
+              'after it that the trace also lacks, so pass it only where every Command the flow can still ' +
+              'reach goes to a test double or only reads.';
     return replayError(`${what}; refusing to run the real Command. ${why}`, {
         command: step.name,
         index: step.index,
@@ -1869,7 +1963,7 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     } catch (e) {
         if (observerFailure) throw observerFailure.error;
         if (!hasMark(e, replayFault)) throw e;
-        result = Failure(e, effect.initialInput);
+        result = Failure(e);
     }
     if (fromResolver) return { result };
     // `fromTrace` has already validated the shape, so the entries are here in one form or the other.

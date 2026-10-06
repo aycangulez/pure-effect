@@ -1,13 +1,11 @@
 export type SuccessState<T> = {
     type: 'Success';
     value: T;
-    initialInput?: unknown;
 };
 
 export type FailureState<E = unknown> = {
     type: 'Failure';
     error: E;
-    initialInput?: unknown;
 };
 
 /**
@@ -27,13 +25,11 @@ export type CommandState<R, T, E = unknown, Ctx = unknown> = {
     /** Receives `cmd`'s result and returns the next step. */
     next(result: R): Effect<T, E, Ctx>;
     meta?: CommandMeta;
-    initialInput?: unknown;
 };
 
 export type AskState<T, E = unknown, Ctx = unknown> = {
     type: 'Ask';
     next(context: Ctx): Effect<T, E, Ctx>;
-    initialInput?: unknown;
 };
 
 export type RetryOptions = {
@@ -54,7 +50,6 @@ export type RetryState<T, E = unknown, Ctx = unknown, R = T> = {
     effect: Effect<R, any, Ctx>;
     options: RetryOptions & { onExhausted?: (error: RetryExhaustedError) => Effect<R, any, Ctx> };
     next(value: R): Effect<T, E, Ctx>;
-    initialInput?: unknown;
 };
 
 /** The error a `Retry` fails with once every attempt has thrown. `lastError` is what the last attempt threw. */
@@ -85,7 +80,6 @@ export type ParallelState<
     effects: { [K in keyof T]: Effect<T[K], BranchError, Ctx> };
     next(values: [...V]): Effect<R, E, Ctx>;
     options?: ParallelOptions;
-    initialInput?: unknown;
 };
 
 export type Effect<T, E = unknown, Ctx = unknown> =
@@ -161,11 +155,14 @@ export type ParallelContext<B extends readonly unknown[]> = {
     ? Ctx
     : unknown;
 
-/** Wraps a value for the next step. */
+/**
+ * Wraps a value for the next step. A string in an object widens to `string`, as in any object literal; write
+ * `Success<T>(...)` where a later step tells values apart by it.
+ */
 export declare function Success<T>(value: T): SuccessState<T>;
 
 /** Stops the pipeline with `error`. A literal keeps its exact type, and an object or array error is readonly. */
-export declare function Failure<const E = unknown>(error: E, initialInput?: unknown): FailureState<E>;
+export declare function Failure<const E = unknown>(error: E): FailureState<E>;
 
 /**
  * Defers a side effect: `cmd` makes the call and `next` decides what follows; without `next` the result passes through.
@@ -1258,11 +1255,15 @@ export type StepRunner = (
 /** Which branch, if any, cancelled a `Parallel`; `branch: null` means an enclosing one did. */
 export type ParallelDecision = { cancelled: false } | { cancelled: true; branch: number | null };
 
-/** `flowName` is `context.flowName`, or `''` when the context has none; the interpreter always passes it. */
+/**
+ * `flowName` is `context.flowName`, or `''` when the context has none. `initialInput` is what the flow was called with
+ * when `effectPipe` built it, and `undefined` otherwise. A hook that calls another passes both on.
+ */
 export type RunWrapper = (
     effect: Effect<unknown>,
     op: () => Promise<SuccessState<unknown> | FailureState<unknown>>,
-    flowName: string
+    flowName: string,
+    initialInput: unknown
 ) => Promise<SuccessState<unknown> | FailureState<unknown>>;
 
 // A union, so a JSDoc `@type` on an async function fits it too.

@@ -86,7 +86,7 @@ describe('Core', function () {
     it('should return Failure when e-mail is invalid', async function () {
         const badInput = { email: 'bad-email', password: '123' };
         const result = registerUserFlow(badInput);
-        assert.deepEqual(result, Failure('Invalid email format.', badInput));
+        assert.deepEqual(result, Failure('Invalid email format.'));
     });
 
     it('should walk through the call tree', async function () {
@@ -869,6 +869,162 @@ describe('Recording and replay', function () {
         assert.equal(error.actual, 'cmdAudit');
     });
 
+    describe('a flow that changed shape', function () {
+        /** @param {string} name */
+        const step = (name) => Command(() => name, undefined, { name });
+        const retried = (/** @type {string} */ name) => Retry(step(name), { attempts: 1, delay: 0 });
+        /** effectPipe over a list of steps, which its typed overloads cannot take as a spread. */
+        const flowOf = (/** @type {((v: any) => any)[]} */ ...steps) => /** @type {any} */ (effectPipe)(...steps);
+        /** A paradox's location and what each side had there. */
+        const paradox = (/** @type {any} */ result) => {
+            const error = /** @type {any} */ (errorOf(result));
+            return { name: error.name, path: error.path, expected: error.expected, actual: error.actual };
+        };
+
+        it('should raise a TimeParadox for a Command added where the trace recorded a Retry', async function () {
+            // The added step asked for path '1', which the trace never had, so it was reported as missing rather
+            // than as the divergence it is.
+            const { trace } = await recordEffect(
+                flowOf(
+                    () => step('cmdA'),
+                    () => retried('cmdB')
+                ),
+                'in'
+            );
+            const added = flowOf(
+                () => step('cmdA'),
+                () => step('cmdX'),
+                () => retried('cmdB')
+            );
+            const { result } = await replayEffect(added('in'), trace);
+            assert.deepEqual(paradox(result), { name: 'TimeParadox', path: '1', expected: 'Retry', actual: 'cmdX' });
+            assert.match(
+                /** @type {any} */ (errorOf(result)).message,
+                /trace recorded a Retry there, with 'cmdB' at path '1r0\/0'/
+            );
+        });
+
+        it('should raise a TimeParadox for a step removed in front of a Retry', async function () {
+            const { trace } = await recordEffect(
+                flowOf(
+                    () => step('cmdA'),
+                    () => retried('cmdB'),
+                    () => step('cmdC')
+                ),
+                'in'
+            );
+            const removed = flowOf(
+                () => retried('cmdB'),
+                () => step('cmdC')
+            );
+            const { result } = await replayEffect(removed('in'), trace);
+            assert.deepEqual(paradox(result), { name: 'TimeParadox', path: '0', expected: 'cmdA', actual: 'Retry' });
+            assert.match(
+                /** @type {any} */ (errorOf(result)).message,
+                /Time paradox at path '0': flow has a Retry there, trace recorded 'cmdA'$/
+            );
+        });
+
+        it('should raise a TimeParadox for a Command newly wrapped in Retry, even under onMissing: execute', async function () {
+            let calls = 0;
+            const charge = () =>
+                Command(function cmdCharge() {
+                    calls++;
+                    return 'ch_1';
+                });
+            const { trace } = await recordEffect(flowOf(charge), 'in');
+            calls = 0;
+            const wrapped = flowOf(() => Retry(charge(), { attempts: 2, delay: 0 }));
+            const { result } = await replayEffect(wrapped('in'), trace, { onMissing: 'execute' });
+            assert.deepEqual(paradox(result), {
+                name: 'TimeParadox',
+                path: '0',
+                expected: 'cmdCharge',
+                actual: 'Retry'
+            });
+            assert.equal(calls, 0, 'a reshaped flow runs nothing live');
+        });
+
+        it('should raise a TimeParadox for a Parallel where the trace recorded a Command', async function () {
+            const { trace } = await recordEffect(
+                flowOf(
+                    () => step('cmdA'),
+                    () => step('cmdB')
+                ),
+                'in'
+            );
+            const parallel = flowOf(
+                () => step('cmdA'),
+                () => Parallel([step('cmdB'), step('cmdC')])
+            );
+            const { result } = await replayEffect(parallel('in'), trace);
+            assert.deepEqual(paradox(result), {
+                name: 'TimeParadox',
+                path: '1',
+                expected: 'cmdB',
+                actual: 'Parallel'
+            });
+        });
+
+        it('should raise a TimeParadox for a Retry where the trace recorded a Parallel', async function () {
+            const { trace } = await recordEffect(
+                flowOf(() => Parallel([step('cmdA')])),
+                'in'
+            );
+            const { result } = await replayEffect(flowOf(() => retried('cmdA'))('in'), trace);
+            assert.deepEqual(paradox(result), {
+                name: 'TimeParadox',
+                path: '0',
+                expected: 'Parallel',
+                actual: 'Retry'
+            });
+            assert.match(
+                /** @type {any} */ (errorOf(result)).message,
+                /flow has a Retry there, trace recorded a Parallel there, with 'cmdA' at path '0p0\/0'$/
+            );
+        });
+
+        it('should not judge a hand-written trace by the shape of paths it does not write as the recorder does', async function () {
+            const handWritten = { trace: [{ command: 'cmdA', path: 'first', result: 'a' }] };
+            const { result } = await replayEffect(flowOf(() => retried('cmdA'))('in'), handWritten);
+            assert.equal(/** @type {any} */ (errorOf(result)).name, 'ReplayError');
+            assert.equal(/** @type {any} */ (errorOf(result)).path, '0r0/0');
+        });
+
+        it('should still report a step past the end of the recording as missing', async function () {
+            // Nothing was recorded at or around path '2', so this is a step production never reached.
+            const { trace } = await recordEffect(
+                flowOf(
+                    () => step('cmdA'),
+                    () => retried('cmdB')
+                ),
+                'in'
+            );
+            const longer = flowOf(
+                () => step('cmdA'),
+                () => retried('cmdB'),
+                () => retried('cmdC')
+            );
+            const { result } = await replayEffect(longer('in'), trace);
+            assert.equal(/** @type {any} */ (errorOf(result)).name, 'ReplayError');
+            assert.equal(/** @type {any} */ (errorOf(result)).path, '2r0/0');
+        });
+
+        it('should still replay a Retry attempt production did not need when the replay answers it differently', async function () {
+            // A later attempt is the same Retry at the same position, so it is missing, not a change of shape.
+            const { trace } = await recordEffect(
+                flowOf(() => retried('cmdB')),
+                'in'
+            );
+            const { result } = await replayEffect(flowOf(() => retried('cmdB'))('in'), {
+                ...trace,
+                trace: [{ command: 'cmdB', path: '0r0/0', threw: true, error: 'down' }]
+            });
+            assert.equal(/** @type {any} */ (errorOf(result)).name, 'ReplayError');
+            assert.equal(/** @type {any} */ (errorOf(result)).path, '0r1/0');
+        });
+    });
+
     it('should report recorded steps a shortened flow never reached, which no TimeParadox covers', async function () {
         const a = makeFlow();
         const { trace } = await recordEffect(a.flow, { id: 'x1' });
@@ -1108,7 +1264,7 @@ describe('Recording and replay', function () {
                     })
             );
         const { result, trace } = await recordEffect(flow(true), { orderId: 1 });
-        assert.deepEqual(result, Failure(undefined, { orderId: 1 }));
+        assert.deepEqual(result, Failure(undefined));
         shipped = 0;
         for (const stored of [trace, JSON.parse(JSON.stringify(trace))]) {
             const { result: replayed } = await replayEffect(flow(false)(stored.initialInput), stored, {
@@ -1417,10 +1573,11 @@ describe('Recording and replay', function () {
         assert.deepEqual(calls, { read: 0, write: 0 });
     });
 
-    it("should warn that onMissing: 'execute' after an added step runs the steps after it live too", async function () {
+    it("should warn that onMissing: 'execute' runs every later step the trace lacks too", async function () {
         // The message advised 'execute' where the Commands only read, so a replay that met a newly added lookup ran it
-        // with 'execute', and the steps after it, which had all moved to new paths, ran live as well: a receipt
-        // was sent and the event marked processed.
+        // with 'execute', and the steps after it ran live as well: a receipt was sent and the event marked
+        // processed. A step added where the trace recorded another now ends in a TimeParadox; one added past the end
+        // of the recording, as here, still runs live, and so does everything after it.
         const calls = { read: 0, check: 0, write: 0 };
         const read = () =>
             Command(function cmdRead() {
@@ -1443,7 +1600,7 @@ describe('Recording and replay', function () {
                 }),
                 { delay: 0 }
             );
-        const before = effectPipe(read, write);
+        const before = effectPipe(read);
         const after = effectPipe(read, check, write);
         const { trace } = await recordEffect(before, { id: 'x' });
         Object.assign(calls, { read: 0, check: 0, write: 0 });
@@ -1451,7 +1608,7 @@ describe('Recording and replay', function () {
         const { result } = await replayEffect(after({ id: 'x' }), trace);
         const error = /** @type {Error} */ (errorOf(result));
         assert.match(error.message, /no step at path '1' for 'cmdCheck'/);
-        assert.match(error.message, /after an added step every step that follows it, since they all move to new paths/);
+        assert.match(error.message, /and every step after it that the trace also lacks/);
         assert.deepEqual(calls, { read: 0, check: 0, write: 0 });
 
         // What the message warns of: the added lookup runs, and so does the write after it.
@@ -1638,6 +1795,44 @@ describe('Recording and replay', function () {
         const json = JSON.stringify(trace);
         assert.ok(!json.includes('hunter2'), 'no password anywhere in the trace');
         assert.ok(!json.includes('bearer-abc123'), 'no token anywhere in the trace');
+    });
+
+    it('should replay an error redact rebuilt as an Error', async function () {
+        // A redact that built a fresh object for an error dropped the marker that told replay it was an Error, so
+        // production handed the flow an Error and the replay a plain object, and nothing warned.
+        const flow = (/** @type {any} */ input) =>
+            effectPipe(() =>
+                Command(function cmdCharge() {
+                    throw Object.assign(new Error('bad gateway'), { status: 502, token: 'tok_secret' });
+                })
+            )(input);
+        const redact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
+            kind === 'error' ? { name: value.name, message: value.message, status: value.status } : value;
+        const { result, trace } = await recordEffect(flow, 'in', { redact });
+        assert.ok(!JSON.stringify(trace).includes('tok_secret'), 'what redact removed stays out');
+        for (const stored of [trace, JSON.parse(JSON.stringify(trace))]) {
+            const { result: replayed } = await replayEffect(flow('in'), stored);
+            const error = /** @type {any} */ (errorOf(replayed));
+            assert.equal(error instanceof Error, true, 'an Error, as in production');
+            assert.equal(error.message, 'bad gateway');
+            assert.equal(error.status, 502);
+            assert.equal(error.token, undefined);
+        }
+        assert.ok(/** @type {any} */ (result).error instanceof Error);
+    });
+
+    it('should leave an error redact replaced with a value that is not an object as that value', async function () {
+        const flow = (/** @type {any} */ input) =>
+            effectPipe(() =>
+                Command(function cmdCharge() {
+                    throw new Error('card 4242 declined');
+                })
+            )(input);
+        const redact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
+            kind === 'error' ? '[redacted]' : value;
+        const { trace } = await recordEffect(flow, 'in', { redact });
+        const { result: replayed } = await replayEffect(flow('in'), JSON.parse(JSON.stringify(trace)));
+        assert.equal(errorOf(replayed), '[redacted]');
     });
 
     it('should leave an absent initialInput or context undefined rather than redacting nothing into an object', function () {
@@ -1914,7 +2109,7 @@ describe('Recording and replay', function () {
         const { result: asViewer } = await replayEffect(approve(stored.initialInput), stored, {
             context: { role: 'viewer' }
         });
-        assert.deepEqual(asViewer, Failure('forbidden', stored.initialInput), 'a context passed in still wins');
+        assert.deepEqual(asViewer, Failure('forbidden'), 'a context passed in still wins');
     });
 
     it('should reject a replay whose onResolved throws, without asking for the step again', async function () {
@@ -2510,6 +2705,30 @@ describe('examples/recording-example.js', function () {
         assert.equal(written[0].flowName, 'writer');
         assert.deepEqual(written[0].context, { flowName: 'writer', tenant: 'acme' }, 'context captured for Ask replay');
         assert.deepEqual(written[0].initialInput, { id: 1 });
+    });
+
+    it('should store the input of a run that fails before its first Command', async function () {
+        // A failed validation stops at the flow's root, and it is a run `keep` keeps by default. Its trace needs the
+        // input as much as any, or a replay rebuilds the flow from undefined.
+        /** @type {any[]} */
+        const written = [];
+        /** @type {string[]} */
+        const warnings = [];
+        enableRecording({ sink: (t) => void written.push(t), onWarning: (message) => void warnings.push(message) });
+        const register = (/** @type {any} */ input) =>
+            effectPipe(
+                (/** @type {any} */ i) => (i.email.includes('@') ? Success(i) : Failure('Invalid email.')),
+                (/** @type {any} */ i) =>
+                    Command(function cmdSaveUser() {
+                        return i;
+                    })
+            )(input);
+        const result = await runEffect(register({ email: 'bad' }), { flowName: 'register' });
+        assert.deepEqual(result, Failure('Invalid email.'));
+        assert.deepEqual(written[0].initialInput, { email: 'bad' });
+        assert.deepEqual(warnings, [], 'the flow carries its input, so there is nothing to warn about');
+        const { result: replayed } = await replayEffect(register(written[0].initialInput), written[0]);
+        assert.deepEqual(replayed, result);
     });
 
     it('should send the trace of a run whose own code throws, and still reject', async function () {
@@ -3601,7 +3820,7 @@ describe('Recorded values are snapshots', function () {
     });
 });
 
-describe('initialInput stamping', function () {
+describe('The flow input', function () {
     beforeEach(() => configureEffect());
 
     const input = { customerId: 'cu1', password: 'hunter2' };
@@ -3613,58 +3832,123 @@ describe('initialInput stamping', function () {
             { name: 'cmdLookup' }
         );
 
-    /** What a hook-based recorder stores as the trace's input: the root node's stamp. */
-    const rootStampSeenByHook = async (/** @type {any} */ tree) => {
+    /** What a hook-based recorder stores as the trace's input: what `onRun` is handed. */
+    const inputSeenByOnRun = async (/** @type {any} */ tree) => {
         /** @type {any} */
-        let seen;
-        await runEffect(tree, {}, { onRun: async (effect, op) => ((seen = effect.initialInput), await op()) });
+        let seen = 'not called';
+        await runEffect(
+            tree,
+            {},
+            {
+                onRun: async (effect, op, flowName, initialInput) => ((seen = initialInput), await op())
+            }
+        );
         return seen;
     };
 
-    it('should stamp the flow input on a root whose first step returns a Retry-headed sub-pipeline', async function () {
+    it('should hand onRun the input of a flow effectPipe built', async function () {
+        const flow = effectPipe((/** @type {any} */ i) => lookup(i.customerId));
+        assert.deepEqual(await inputSeenByOnRun(flow(input)), input);
+    });
+
+    it('should hand onRun the input of a flow that stops before its first Command', async function () {
+        // A failed validation is the run a recorder keeps by default, so its trace needs the input most.
+        const flow = effectPipe(() => Failure('Invalid email.'), lookup);
+        assert.deepEqual(await inputSeenByOnRun(flow(input)), input);
+    });
+
+    it('should hand onRun no input for a flow whose root is a bare Command', async function () {
+        assert.equal(await inputSeenByOnRun(lookup('cu1')), undefined);
+    });
+
+    it('should hand onRun the flow input through a Retry-headed sub-pipeline', async function () {
         const viaRetry = (/** @type {any} */ i) =>
             effectPipe((/** @type {string} */ id) => Retry(lookup(id), { attempts: 1, delay: 0 }))(i.customerId);
         const tree = effectPipe(viaRetry, (/** @type {any} */ r) => Success(r))(input);
-        assert.deepEqual(tree.initialInput, input, 'the flow input, not the sub-pipeline input');
-        assert.deepEqual(await rootStampSeenByHook(tree), input);
+        assert.deepEqual(await inputSeenByOnRun(tree), input, 'the flow input, not the sub-pipeline input');
     });
 
-    it('should stamp the flow input on a root whose first step returns a Parallel-headed sub-pipeline', async function () {
+    it('should hand onRun the flow input through a Parallel-headed sub-pipeline', async function () {
         const viaParallel = (/** @type {any} */ i) =>
             effectPipe((/** @type {string} */ id) => Parallel([lookup(id)]))(i.customerId);
         const tree = effectPipe(viaParallel, (/** @type {any} */ r) => Success(r))(input);
-        assert.deepEqual(tree.initialInput, input);
-        assert.deepEqual(await rootStampSeenByHook(tree), input);
+        assert.deepEqual(await inputSeenByOnRun(tree), input);
     });
 
-    it('should give a Failure from inside a sub-pipeline the flow input', async function () {
-        const inner = (/** @type {any} */ i) => effectPipe(lookup, () => Failure('bad'))(i.customerId);
-        const result = await runEffect(effectPipe(inner, (/** @type {any} */ r) => Success(r))(input));
-        assert.deepEqual(result, Failure('bad', input));
-    });
-
-    it('should give a synchronous Failure from a nested pure step the flow input', function () {
-        const inner = (/** @type {any} */ i) =>
-            effectPipe((/** @type {string} */ id) => Failure(`no ${id}`))(i.customerId);
-        assert.deepEqual(
-            effectPipe(inner)(input),
-            Failure('no cu1', input),
-            'the README idiom holds through a sub-pipeline'
-        );
-    });
-
-    it('should let the outermost pipeline win through two levels of nesting', async function () {
+    it('should hand onRun the outermost input through two levels of nesting', async function () {
         const innermost = (/** @type {string} */ id) => effectPipe(lookup, () => Failure('deep'))(id);
         const middle = (/** @type {any} */ i) => effectPipe(innermost)(i.customerId);
-        const tree = effectPipe(middle)(input);
-        assert.deepEqual(tree.initialInput, input);
-        const result = await runEffect(tree);
-        assert.deepEqual(result, Failure('deep', input));
+        assert.deepEqual(await inputSeenByOnRun(effectPipe(middle)(input)), input);
     });
 
-    it('should give a Failure escaping a Parallel branch the flow input', async function () {
-        // chain wraps continuations, not the subtrees a Parallel holds, so only the interpreter can
-        // stamp what a branch hands back.
+    it("should hand onRun a sub-pipeline's own input when that pipeline is the flow", async function () {
+        // Nothing outer exists here, so the input is what this pipeline was called with.
+        assert.equal(await inputSeenByOnRun(effectPipe(lookup, () => Failure('bad'))('cu1')), 'cu1');
+    });
+
+    it('should hand each flow its own input when their steps return the same Failure', async function () {
+        // One Failure object shared by every run, as a module constant is, must not carry one run's input into another.
+        const notFound = Failure('not found');
+        const flow = effectPipe(() => notFound);
+        const first = flow({ id: 1 });
+        const second = flow({ id: 2 });
+        assert.deepEqual(await inputSeenByOnRun(first), { id: 1 });
+        assert.deepEqual(await inputSeenByOnRun(second), { id: 2 });
+    });
+
+    it('should hand the input to every onRun layer', async function () {
+        /** @type {any[]} */
+        const seen = [];
+        /** @param {string} name */
+        const layer = (name) => ({
+            /** @type {import('../index.js').RunWrapper} */
+            onRun: async (effect, op, flowName, initialInput) => (seen.push([name, initialInput]), await op())
+        });
+        configureEffect(layer('first'), layer('second'));
+        configureEffect(layer('third'));
+        await runEffect(effectPipe(lookup)('cu1'), {}, layer('call'));
+        assert.deepEqual(seen, [
+            ['first', 'cu1'],
+            ['second', 'cu1'],
+            ['third', 'cu1'],
+            ['call', 'cu1']
+        ]);
+    });
+
+    it('should hand onRun the input under a replay that runs the hooks', async function () {
+        const flow = effectPipe((/** @type {any} */ i) => lookup(i.customerId));
+        const { trace } = await recordEffect(flow, input);
+        /** @type {any} */
+        let seen;
+        configureEffect({
+            onRun: async (effect, op, flowName, initialInput) => ((seen = initialInput), await op())
+        });
+        await replayEffect(flow(trace.initialInput), trace, { hooks: true });
+        assert.deepEqual(seen, input);
+    });
+
+    it('should leave the input off every node of a flow', function () {
+        const tree = effectPipe((/** @type {any} */ i) => lookup(i.customerId))(input);
+        assert.equal('initialInput' in tree, false, 'a Command at the root');
+        assert.equal('initialInput' in effectPipe(() => Failure('bad'))(input), false, 'a Failure at the root');
+        assert.equal('initialInput' in effectPipe(() => Ask(() => Success(1)))(input), false, 'an Ask at the root');
+        assert.equal('initialInput' in effectPipe(() => Retry(lookup('cu1')))(input), false, 'a Retry at the root');
+        assert.equal('initialInput' in effectPipe(() => Parallel([lookup('cu1')]))(input), false, 'a Parallel');
+    });
+
+    it('should leave the input off a Failure a pure step returned', function () {
+        const inner = (/** @type {any} */ i) =>
+            effectPipe((/** @type {string} */ id) => Failure(`no ${id}`))(i.customerId);
+        assert.deepEqual(effectPipe(inner)(input), Failure('no cu1'), 'the same Failure a step test sees');
+    });
+
+    it('should leave the input off a Failure from inside a sub-pipeline', async function () {
+        const inner = (/** @type {any} */ i) => effectPipe(lookup, () => Failure('bad'))(i.customerId);
+        const result = await runEffect(effectPipe(inner, (/** @type {any} */ r) => Success(r))(input));
+        assert.deepEqual(result, Failure('bad'));
+    });
+
+    it('should leave the input off a Failure escaping a Parallel branch', async function () {
         const failingSub = (/** @type {any} */ i) => effectPipe(lookup, () => Failure('bad'))(i.customerId);
         const result = await runEffect(
             effectPipe(
@@ -3672,10 +3956,10 @@ describe('initialInput stamping', function () {
                 (/** @type {any} */ v) => Success(v)
             )(input)
         );
-        assert.deepEqual(result, Failure('bad', input));
+        assert.deepEqual(result, Failure('bad'));
     });
 
-    it('should give a Failure from a Retry fallback the flow input', async function () {
+    it('should leave the input off a Failure from a Retry fallback', async function () {
         const failingSub = (/** @type {any} */ i) => effectPipe(lookup, () => Failure('bad'))(i.customerId);
         const withFallback = (/** @type {any} */ i) =>
             Retry(
@@ -3685,10 +3969,10 @@ describe('initialInput stamping', function () {
                 { attempts: 1, delay: 0, onExhausted: () => failingSub(i) }
             );
         const result = await runEffect(effectPipe(withFallback, (/** @type {any} */ v) => Success(v))(input));
-        assert.deepEqual(result, Failure('bad', input));
+        assert.deepEqual(result, Failure('bad'));
     });
 
-    it('should give a thrown Command inside a Parallel branch the flow input', async function () {
+    it('should leave the input off a Failure from a Command that threw', async function () {
         const boom = new Error('boom');
         const branch = (/** @type {any} */ i) =>
             effectPipe(() =>
@@ -3702,13 +3986,47 @@ describe('initialInput stamping', function () {
                 (/** @type {any} */ v) => Success(v)
             )(input)
         );
-        assert.deepEqual(result, Failure(boom, input));
+        assert.deepEqual(result, Failure(boom));
     });
 
-    it('should leave a bare sub-pipeline stamped with its own input when it is the flow', function () {
-        // Nothing outer exists here, so the value is what this pipeline was called with.
-        const tree = effectPipe(lookup, () => Failure('bad'))('cu1');
-        assert.equal(tree.initialInput, 'cu1');
+    it('should leave the input off a Failure from an exhausted Retry and a vetoed Command', async function () {
+        const down = Command(() => {
+            throw new Error('down');
+        });
+        const exhausted = await runEffect(effectPipe(() => Retry(down, { attempts: 1, delay: 0 }))(input));
+        assert.equal(exhausted.type, 'Failure');
+        assert.equal('initialInput' in exhausted, false, 'an exhausted Retry');
+        const veto = new Error('rate limited');
+        const vetoed = await runEffect(
+            effectPipe((/** @type {any} */ i) => lookup(i.customerId))(input),
+            {},
+            {
+                onBeforeCommand: () => {
+                    throw veto;
+                }
+            }
+        );
+        assert.deepEqual(vetoed, Failure(veto), 'a vetoed Command');
+    });
+
+    it('should leave the input off the outcomes a settled Parallel hands next', async function () {
+        // A registration's input is its credentials, which would otherwise reach any log of the outcomes.
+        const register = (/** @type {any} */ creds) =>
+            effectPipe(() =>
+                Command(function cmdSave() {
+                    throw new Error('duplicate key');
+                })
+            )(creds);
+        const result = await runEffect(
+            Parallel([register({ email: 'a@b.com', password: 'hunter2' })], {
+                settled: true
+            })
+        );
+        assert.equal(result.type, 'Success');
+        const [outcome] = /** @type {any} */ (result).value;
+        assert.equal(outcome.type, 'Failure');
+        assert.equal('initialInput' in outcome, false);
+        assert.equal(outcome.error.message, 'duplicate key');
     });
 });
 
@@ -3963,26 +4281,6 @@ describe('Documented sharp edges', function () {
         assert.equal(thrown.calls(), 4, 'letting it throw is what makes it an I/O fault the Retry acts on');
     });
 
-    it('should hand a settled Parallel branch a Failure that still carries the input', async function () {
-        // `settled` exists so branch outcomes can be reported, and the outcomes are whole `Failure`
-        // nodes: they carry the flow's input like any other, which for a registration is the
-        // credentials. The README says to take the field rather than serialize the node.
-        const register = (/** @type {any} */ creds) =>
-            effectPipe(() =>
-                Command(function cmdSave() {
-                    throw new Error('duplicate key');
-                })
-            )(creds);
-        const result = await runEffect(
-            Parallel([register({ email: 'a@b.com', password: 'hunter2' })], { settled: true })
-        );
-        assert.equal(result.type, 'Success');
-        const [outcome] = /** @type {any} */ (result).value;
-        assert.equal(outcome.type, 'Failure');
-        assert.deepEqual(outcome.initialInput, { email: 'a@b.com', password: 'hunter2' });
-        assert.equal(outcome.error.message, 'duplicate key', 'the field a caller should report instead');
-    });
-
     it('should not stop an in-flight Command whose thunk ignores the signal', async function () {
         // Pinned deliberately: cancellation is cooperative. The sibling's write is already in flight
         // inside the branch's first Command, and a thunk that ignores its signal cannot be interrupted,
@@ -4031,16 +4329,6 @@ describe('Documented sharp edges', function () {
         assert.deepEqual(await runEffect(Command(pageSize)), Success(50));
         assert.deepEqual(await runEffect(Parallel([Command(pageSize)])), Success(['a signal']));
         assert.deepEqual(await runEffect(Parallel([Command(() => pageSize())])), Success([50]), 'wrapped, it works');
-    });
-
-    it('should carry the initial input on every Failure', async function () {
-        // Pinned deliberately: convenient for tests, and a PII surface for anything that logs the
-        // whole Failure rather than its `error`.
-        const input = { email: 'user@test.com', password: 'plaintext' };
-        const failing = (/** @type {any} */ i) => effectPipe(() => Failure('invalid'))(i);
-        const result = await runEffect(failing(input));
-        assert.equal(result.type, 'Failure');
-        assert.deepEqual(/** @type {any} */ (result).initialInput, input);
     });
 });
 
@@ -4135,6 +4423,25 @@ describe('Malformed flows', function () {
         );
         assert.equal(e?.name, 'EffectTypeError');
         assert.match(e.message, /The next of Command 'cmdRead' returned undefined/);
+    });
+
+    it('should reject a Command continuation that returns a plain value in the middle of a pipeline', async function () {
+        const e = await errorFrom(() =>
+            runEffect(
+                effectPipe(
+                    (/** @type {any} */ x) =>
+                        Command(
+                            function cmdRead() {
+                                return x;
+                            },
+                            /** @type {any} */ ((/** @type {number} */ r) => r + 1)
+                        ),
+                    (/** @type {any} */ y) => Success(y)
+                )(5)
+            )
+        );
+        assert.equal(e?.name, 'EffectTypeError');
+        assert.match(e.message, /The next of Command 'cmdRead' returned the number 6/);
     });
 
     it('should reject a Command continuation that returns a plain value', async function () {
@@ -5685,6 +5992,61 @@ describe('Retry attempts and the removed global retry', function () {
         );
     });
 
+    it('should refuse a hook name configureEffect does not read', function () {
+        // A misspelt hook was ignored, so telemetry or recording switched off with nothing to say so.
+        const hook = async (/** @type {any} */ n, /** @type {any} */ t, /** @type {any} */ op) => op();
+        assert.throws(
+            () => configureEffect(/** @type {any} */ ({ onstep: hook })),
+            /configureEffect has no option named 'onstep'; its options are onStep, onRun and onBeforeCommand\./
+        );
+    });
+
+    it('should refuse a hook that is not a function, before the run it would turn into an I/O fault', async function () {
+        // `onStep: 42` made every Command an I/O fault, so a Retry retried a configuration mistake and reported
+        // an exhausted outage for a Command that never ran.
+        let calls = 0;
+        const flow = Retry(
+            Command(function cmdCount() {
+                calls++;
+                return 1;
+            }),
+            { attempts: 2, delay: 0 }
+        );
+        assert.throws(
+            () => configureEffect(/** @type {any} */ ({ onStep: 42 })),
+            /configureEffect's onStep must be a function, got the number 42\./
+        );
+        assert.throws(() => configureEffect(/** @type {any} */ ({ onBeforeCommand: {} })), TypeError);
+        assert.throws(() => configureEffect(/** @type {any} */ ({ onRun: 'audit' })), TypeError);
+        await assert.rejects(
+            () => runEffect(flow, {}, /** @type {any} */ ({ onStep: 42 })),
+            /callConfig\.onStep must be a function/
+        );
+        await assert.rejects(
+            () => runEffect(flow, {}, /** @type {any} */ ({ onstep: () => {} })),
+            /runEffect's callConfig has no option named 'onstep'; its options are onStep, onRun, onBeforeCommand and inherit\./
+        );
+        assert.equal(calls, 0, 'nothing ran under a refused configuration');
+        assert.deepEqual(await runEffect(flow), Success(1), 'and nothing was installed');
+    });
+
+    it('should refuse a configuration that is not an object', async function () {
+        assert.throws(
+            () => configureEffect(/** @type {any} */ ('telemetry')),
+            /configureEffect expects configuration objects, got the string "telemetry"\./
+        );
+        await assert.rejects(
+            () => runEffect(Success(1), {}, /** @type {any} */ (42)),
+            /runEffect's callConfig must be an object, got the number 42\./
+        );
+    });
+
+    it('should accept a hook left undefined or null, as a slot left unset', async function () {
+        const remove = configureEffect({ onStep: undefined, onRun: /** @type {any} */ (null) });
+        assert.deepEqual(await runEffect(Success(1), {}, { onBeforeCommand: undefined }), Success(1));
+        remove();
+    });
+
     it('should leave no installed layer behind when configureEffect refuses', function () {
         let calls = 0;
         assert.throws(() =>
@@ -6031,7 +6393,7 @@ describe('Failure provenance', function () {
 
     it('should hand the caller a plain Failure for an I/O fault', async function () {
         // Provenance lives only inside the interpreter, so a fault and an abort reach the caller as the
-        // same three-key Failure and compare equal to one written by hand.
+        // same two-key Failure and compare equal to one written by hand.
         const thrown = await runEffect(
             effectPipe(() =>
                 Command(function cmdThrows() {
@@ -6039,12 +6401,12 @@ describe('Failure provenance', function () {
                 })
             )('in')
         );
-        assert.deepEqual(Object.keys(thrown), ['type', 'error', 'initialInput']);
+        assert.deepEqual(Object.keys(thrown), ['type', 'error']);
         assert.equal(JSON.parse(JSON.stringify(thrown)).type, 'Failure');
-        assert.deepStrictEqual(thrown, Failure(/** @type {any} */ (thrown).error, 'in'));
+        assert.deepStrictEqual(thrown, Failure(/** @type {any} */ (thrown).error));
 
         const aborted = await runEffect(effectPipe(() => Failure('nope'))('in'));
-        assert.deepStrictEqual(aborted, Failure('nope', 'in'));
+        assert.deepStrictEqual(aborted, Failure('nope'));
     });
 });
 

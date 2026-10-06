@@ -2,6 +2,18 @@
 
 All notable changes to pure-effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
+## [Unreleased]
+
+### Changed
+
+- **A hook configuration is checked.** `configureEffect` and a per-call `callConfig` ignored a key they do not read, so a misspelt `onstep` switched its hook off without a word, and accepted a hook that is not a function, so `onStep: 42` turned every Command into an I/O fault that `Retry` retried and reported as exhausted, without the Command ever running. A key other than `onStep`, `onRun` and `onBeforeCommand` (and `inherit` in a `callConfig`), a hook that is not a function, and a configuration that is not an object now throw a `TypeError`: from `configureEffect` before anything is installed, and from `runEffect` before the run. A hook set to `undefined` or `null` is still a slot left unset.
+- **A replay of a flow that changed shape around a `Retry` or `Parallel` stops at a `TimeParadox`.** A step added in front of a recorded `Retry` or `Parallel`, a step removed in front of one, and a Command newly wrapped in `Retry` all asked for a path the trace never had, so the replay ended in a `ReplayError` for a missing step, and `onMissing: 'execute'` ran the reshaped steps for real. Such a replay now ends in a `TimeParadox` at the position where the trace recorded another kind of node, with `expected` and `actual` naming each side, and runs nothing live. A step past the end of the recording is still a missing step.
+- **A `Failure` carries only its error, and the flow's input goes to `onRun`.** Every `Failure` carried `initialInput`, the input the flow was called with, so a `Failure` from a flow compared unequal to the same one from a step tested alone, and logging a `Failure`, or the outcomes a settled `Parallel` hands `next`, logged the input too, which for a registration is its credentials. A `Failure` is now `{ type: 'Failure', error }` wherever it comes from, `Failure` takes one argument, and no part of a flow carries the input. An `onRun` hook receives it as a fourth argument, `onRun(effect, op, flowName, initialInput)`, for a flow `effectPipe` built, and a hook that calls another passes it on. An `onRun` hook that read `effect.initialInput` reads that argument instead, and code that read `result.initialInput` uses the input it called the flow with. An assertion written as `Failure(error, input)` still passes, since the second argument is ignored, but TypeScript refuses it.
+
+### Fixed
+
+- **An error `redact` rebuilt replays as an `Error`.** A `redact` that returned a fresh object for a thrown error, such as `{ name: value.name, message: value.message }`, dropped the mark that told a replay the value was an `Error`, so production handed the flow an `Error` and the replay a plain object, with nothing to say so. The recorder now keeps any object `redact` returns for a thrown `Error` marked as one. A value that is not an object, such as `'[redacted]'`, is stored and replayed as it is.
+
 ## [0.17.0] - 2026-10-06
 
 ### Changed

@@ -70,6 +70,10 @@ const readonlyStillAssignable: { code: string; sku: string } = objectError.error
 const arrayErrorAsMutable: string[] = Failure(['a', 'b']).error;
 declare const dynamicMessage: string;
 expectType<FailureState<string>>(Failure(dynamicMessage));
+// @ts-expect-error a Failure carries only its error; onRun is handed the flow's input
+Failure('oops', { id: 1 });
+// @ts-expect-error nor does one a flow returns
+f.initialInput;
 const quickStartValidate = (input: User) => {
     if (!input.email.includes('@')) return Failure('invalid_email');
     if (input.password.length < 8) return Failure('weak_password');
@@ -776,9 +780,10 @@ const myStep: StepRunner = async (name, type, op) => {
     return op();
 };
 
-const myRun: RunWrapper = async (effect, op, flowName) => {
+const myRun: RunWrapper = async (effect, op, flowName, initialInput) => {
     expectType<Effect<unknown>>(effect);
     expectType<string>(flowName);
+    expectType<unknown>(initialInput);
     return op();
 };
 
@@ -795,6 +800,8 @@ const syncGuard: CommandInterceptor = (cmd, ctx) => {
 };
 // @ts-expect-error a wrapper has to pass path on, or its trace cannot replay a Parallel
 const forgetsPath: StepRunner = async (name, type, op) => myStep(name, type, op);
+// @ts-expect-error a wrapper has to pass the input on, or a recorder inside it stores none
+const forgetsInput: RunWrapper = async (effect, op, flowName) => myRun(effect, op, flowName);
 
 // EffectConfiguration is a usable type
 const config: EffectConfiguration = { onStep: myStep, onRun: myRun, onBeforeCommand: myInterceptor };
