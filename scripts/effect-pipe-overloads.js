@@ -18,7 +18,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as prettier from 'prettier';
 
-/** The longest pipeline typed without nesting. Past it a call is a compile error; see CLAUDE.md. */
+/** The longest pipeline typed without nesting. Past it a call is a compile error; see DESIGN.md. */
 export const MAX_STEPS = 20;
 
 export const BEGIN =

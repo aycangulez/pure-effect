@@ -9,7 +9,7 @@
 - Inject context without touching function signatures
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks
-- Zero dependencies, about 7 KB minified and gzipped
+- Zero dependencies, under 8 KB minified and gzipped
 - Works in JavaScript, and in TypeScript 5.1 or later (full generics, bundled `.d.ts`)
 
 ## Table of Contents
@@ -171,6 +171,8 @@ A flow does what `async`/`await` code does, as data. Instead of making a call an
 | a value from the request, such as the tenant | `Ask`; see [Passing Runtime Context](#passing-runtime-context) |
 | `Date.now()` or a random ID | a Command, so a replay gets the recorded value |
 
+One rule is behind every row. In `async` code, an `if` or a loop can have an `await` inside it. In a flow it can't: an `if` goes in a step or a Command's `next`, where the answer has already arrived, and a loop that makes calls becomes a `Parallel` or a `Retry`. So each decision lives in a small function of its own, which a test can call directly.
+
 The Quick Start's `registerUserFlow` is this function, translated row by row: each `await` became a Command, the code after it became that Command's `next`, and each `throw` became a `Failure`.
 
 ```js
@@ -204,6 +206,20 @@ assert.deepEqual(ensureEmailAvailable(input).next({ id: 1 }), Failure('Email alr
 ```
 
 This is what the small functions are for. Each step is a place a test can start, so a branch is tested by calling the step it lives in. An `async` function has one way in, so a test of any branch runs everything before it, with every call on the way replaced. The mocks can check one thing these tests cannot: the arguments each call received, which [Testing Without Mocks](#testing-without-mocks) leaves to an integration test.
+
+You can switch one function at a time. The function keeps its name and parameters, and its body runs the flow and turns a `Failure` back into a throw, so the code that calls it does not change. The mocked test above passes against this version too, so it checks the switch before the flow's own tests replace it:
+
+```js
+// Callers still await registerUserAsync and catch what it throws.
+async function registerUserAsync(input) {
+    const result = await runEffect(registerUserFlow(input));
+    // A step's Failure holds the error as written, here a string; a Command's function threw an Error.
+    if (result.type === 'Failure') throw result.error instanceof Error ? result.error : new Error(result.error);
+    return result.value;
+}
+
+await assert.rejects(registerUserAsync({ email: 'bad-email', password: '123' }), { message: 'Invalid email.' });
+```
 
 A loop is written in two parts: a step that gets the list, and a `Parallel` over it. `Parallel` runs a list of flows, at the same time unless told otherwise, and `limit: 1` makes it run them one after another, like a `for` loop. The `async` version is usually split the same way. Paying a customer's unpaid invoices in order, and stopping at the first that fails:
 
@@ -570,7 +586,7 @@ Bugs in the flow are not collected. An `EffectTypeError`, thrown for a malformed
 
 `limit` caps how many branches run at once; the rest start as others finish. Results and recorded paths stay in array order, so a limit changes only the pacing, and a trace recorded with a limit replays the same without one. A `limit` that is not a positive integer throws a `TypeError`.
 
-**Cancelling is a request, not a guarantee.** A cancelled branch starts no new Commands: a three-step branch whose first step is running when a sibling fails finishes that step and stops. To stop the running step itself, its function has to accept the `AbortSignal` it is given and pass it on to the I/O:
+**Cancelling is a request, not a guarantee.** A cancelled branch starts no new Commands: a three-step branch whose first step is running when a sibling fails finishes that step and stops. To stop the running step itself, its function has to take the `AbortSignal` as a parameter, written without a default value, and pass it on to the I/O:
 
 ```js
 // Cancellable: the request is aborted the moment a sibling branch fails.
@@ -737,8 +753,6 @@ Retry(
 | a step returned `Failure(...)`, or an `onBeforeCommand` hook threw | an abort | nothing; it propagates at once, unwrapped | nothing |
 | a Command's function threw | an I/O fault | retries it | the exhaustion, once the attempts are gone |
 | a `next` function or a pure step threw, or the flow is malformed | a bug | nothing; it is thrown, not returned | nothing |
-| an `onStep` hook threw after the Command's function succeeded | a bug | nothing; it is thrown, not returned | nothing |
-| an `onStep` hook returned `undefined` after the Command's function returned a value | a bug | nothing; it is thrown, not returned | nothing |
 
 In short, **you can recover from an error your I/O produced, but you cannot catch a `Failure` a step returned.** Only the code that called `runEffect` acts on it. For the same reason, do not throw business errors from a Command's function: a throw there tells `Retry` that the I/O broke, and `Retry` will try again. A throw anywhere else in the flow is treated as a bug: `runEffect` rejects with the thrown error instead of returning a `Failure`.
 
@@ -817,6 +831,8 @@ Timings are from Node 22 on a MacBook Pro with M4 Pro CPU:
 
 ## API Reference
 
+Every `options` argument below throws for a name it does not read, so a misspelt option fails instead of running with its default.
+
 ### Building blocks
 
 #### `Success(value)`
@@ -831,7 +847,7 @@ Returns `{ type: 'Failure', error, initialInput }`. Stops the pipeline immediate
 
 Returns `{ type: 'Command', cmd, next, meta }`.
 
-- `cmd`: the function, sync or async, that does the I/O. Inside a `Parallel` branch it gets an `AbortSignal` that fires when a sibling fails, and elsewhere no argument, so wrap a function that takes an optional first argument (see [Limitations](#limitations)).
+- `cmd`: the function, sync or async, that does the I/O. Inside a `Parallel` branch, a function that takes a parameter gets an `AbortSignal` in it that fires when a sibling fails; one with no parameters, or only parameters with default values, gets none, and so does every function outside a `Parallel` (see [Limitations](#limitations)).
 - `next`: receives `cmd`'s result and returns the next Effect; by default `(result) => Success(result)`.
 - `meta`: metadata passed to `onBeforeCommand`. A string `meta.name` names the Command.
 
@@ -931,7 +947,7 @@ remove();
 - `onRun(effect, pipeline, flowName)`: wraps the whole run. It must `await pipeline()` and return its result.
 - `onStep(name, type, op, path)`: wraps each Command, and each `Parallel` with `name` and `type` both `'Parallel'`. It must `await op()` and return its result, and pass `path` on to any hook it calls, since a replay matches steps on it.
     - For a Command, `op()` returns a promise, even for a synchronous function. Returning a value without calling `op()` answers for the Command, which is how replay works, and throwing without calling it counts as the Command failing.
-    - A throw after `op()` succeeded, or `undefined` returned in place of its value, as a hook that forgot its `return` does, is a bug in the hook: the run rejects, and `Retry` does not run the Command again.
+    - A throw after `op()` succeeded, or `undefined` returned in place of its value, as a hook that forgot its `return` or its `await` does, is a bug in the hook: the run rejects, and `Retry` does not run the Command again.
     - For a `Parallel`, `op()` runs the branches, so a hook must call it or the run rejects with a `TypeError`. It returns which branch, if any, cancelled the others, as in `{ cancelled: true, branch: 0 }`, even when a branch threw.
 - `onBeforeCommand(command, context)`: runs before each Command. A throw vetoes the Command: the run returns a `Failure` carrying the thrown error, and `Retry` does not retry it.
 
@@ -1033,8 +1049,8 @@ Replays a trace and narrates each step with its recorded duration, naming any re
 ## Limitations
 
 - **`Retry` repeats everything it wraps, including a Command's `next`.** When a Command's function throws, every Command inside the `Retry` runs again, including the ones that already succeeded. If a retried Command's `next` continues the flow, everything after it is retried too. Give a retried Command the default `next` and continue in a later pipeline step, or make sure every Command it reaches is safe to run more than once. A `Failure` a step returned is not retried at all, so a function that catches its own error and returns it as a value is never retried: see [Which Errors Are Data](#which-errors-are-data).
-- **Cancelling a `Parallel` branch cannot stop everything.** A cancelled branch starts no new Commands, and a function that uses the `AbortSignal` it is given can be stopped while running. A function that ignores the signal runs to completion, so a branch whose _first_ Command is a write can still write after another branch has failed. `Parallel` waits for every branch to finish before returning, so no cancelled work is still running after the `Failure` is returned.
-- **Inside a `Parallel`, a Command's function gets the `AbortSignal` as its first argument.** A function passed by name that has an optional first argument takes the signal for it, so the same Command behaves differently inside a `Parallel` than outside one: `Command(nanoid)` returns an empty ID, since `nanoid(size = 21)` reads the signal as the size, and a repository helper with a default page size gets the signal as its page size. Wrap such a function, as in `Command(() => nanoid())`. In TypeScript, a function whose first parameter cannot be an `AbortSignal` does not compile as a Command.
+- **Cancelling a `Parallel` branch cannot stop everything.** A cancelled branch starts no new Commands, and a function that uses the `AbortSignal` it is given can be stopped while running. A function that ignores the signal runs to completion, so a branch whose _first_ Command is a write can still write after another branch has failed. So does a function that is never given the signal: one written as `(...args)` or `({ signal } = {})`, or wrapped by a helper that hides its parameters. `Parallel` waits for every branch to finish before returning, so no cancelled work is still running after the `Failure` is returned.
+- **Inside a `Parallel`, a Command's function that takes a parameter gets the `AbortSignal` in it.** A function passed by name whose first parameter is optional but written without a default value takes the signal for it, so the same Command behaves differently inside a `Parallel` than outside one: `function listUsers(page) { page ??= 1; return db.users(page); }` gets the signal as its page. A parameter with a default value does not count, so `Command(nanoid)`, whose size is written `size = 21`, works everywhere. Wrap such a function, as in `Command(() => listUsers())`. In TypeScript, a function whose first parameter cannot be an `AbortSignal` does not compile as a Command.
 - **A `Failure` carries everything.** It holds the full error and the `initialInput` that `effectPipe` attached, and neither is trimmed, because tests and debugging need both. `redact` keeps sensitive data out of a **trace**. Keeping it out of your **logs** is up to you: log `result.error` rather than the whole `Failure`. The same goes for the outcomes a settled `Parallel` passes to `next`, which can carry their branch's input; for a login or registration flow, that input holds credentials.
 - **Replay checks the path, not the values.** Replaying an old trace cannot check a fix that changes what a flow computes, because every Command's result comes from the recording: the replay hands the step the value from before the fix, reports `Success`, and flags nothing. It can check a fix that changes which Commands run. A removed step shows up in `unreached` only if it was the last step the flow reached; removed from the middle, it shifts the later paths and the replay stops at a `TimeParadox`.
 - **A trace keeps data, not objects.** Recorded results come back without their classes: a money object or a database entity as a plain object, a `Buffer` as a plain byte array, and an error inside a result without properties such as `code`. Through JSON, a `Date` also comes back as a string and a `Map` as `{}`. A flow whose `next` calls a method on a result, or branches on one of those properties, replays differently from production. Return plain data from Commands; see [Recording in Production](#recording-in-production).

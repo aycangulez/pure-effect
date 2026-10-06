@@ -48,4 +48,4 @@ jobs:
                   cache: npm
             - run: npm ci
             - name: Prettier
-              run: npx prettier --check index.js index.d.ts examples/*.js scripts/*.js test/all.js test/types.test-d.ts README.md CLAUDE.md CHANGELOG.md CONTRIBUTING.md
+              run: npx prettier --check index.js index.d.ts examples/*.js scripts/*.js test/all.js test/types.test-d.ts README.md CLAUDE.md DESIGN.md CHANGELOG.md CONTRIBUTING.md
