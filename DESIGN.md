@@ -26,6 +26,8 @@ pure-effect is a zero-dependency effect system for JavaScript implementing the "
 
 A flow is inert data until the interpreter walks it. That is what lets a recorded run be fed back through the interpreter with no I/O at all.
 
+Control structures stay in pipeline functions, and have since the first version: an `if` or a loop never wraps a Command. Each decision sits in a function that receives one value, and control that spans I/O is a node, a `Parallel` or a `Retry`. Languages that let control span an effect, as Haskell's do-notation does, rely on a compiler that keeps the code between steps pure; JavaScript cannot, so each decision is kept where that boundary is visible, and every decision is a place a test can start.
+
 Everything is in `index.js`, and `index.d.ts` declares it.
 
 ## Primitives
@@ -202,7 +204,7 @@ Undoing work: a fail-fast `Parallel` drops the values of the branches that succe
 - A cancelled branch starts no further Commands, checked in three places: at the top of `execute`'s loop; again once `onBeforeCommand` returns, since an interceptor such as a rate limiter can wait while a sibling fails (a charge once started 40ms after its branch was cancelled); and again before a `Retry` fallback.
 - A retry backoff ends at once when its branch is cancelled, including one that starts on a signal that has already fired. That is the usual case, since a Command that honours the signal rejects the moment a sibling fails. `delayFor` checks `aborted` first, because a listener added to an aborted signal never runs.
 - Stopping the Command already in flight needs its function to pass on the `AbortSignal` it is handed. That is why `cmd` receives the signal inside a `Parallel`, and no argument anywhere else.
-- The signal is the first argument, so a function passed by name with an optional first parameter, such as `nanoid(size = 21)`, takes the signal for it. That is a documented sharp edge, which TypeScript refuses to compile.
+- The signal goes only to a function that declares a parameter, `cmd.length > 0`. A parameter with a default value does not count toward `length`, so a function passed by name such as `nanoid(size = 21)` keeps its default inside a `Parallel`. Until October 2026 every function got the signal, so `Command(nanoid)` returned an empty ID inside a `Parallel` and a full one outside, a silent difference that depended on where the Command was composed. A plain first parameter the function treats as optional still takes the signal: that is the sharp edge that remains, documented, and TypeScript refuses it.
 - A function that ignores the signal runs to completion, so a branch's first Command can still write after a sibling has failed, and a pinning test covers that. `Parallel` still awaits every branch before returning.
 - The trigger is the first failure to finish, which is completion order. A synchronous throw beats a promise that rejects a microtask later, whatever their positions, and branches that fail without I/O finish in array order, which is pinned.
 
@@ -585,13 +587,22 @@ Each of these was weighed and decided. Do not propose them again as improvements
 
 ### No generator syntax
 
-A generator-based flow would yield the same Command objects, but a generator is used up as it runs. A flow built from Commands and `next` continuations is a reusable value:
+Control structures stay in their own functions. In a flow built from Commands and `next` continuations, every `if` and loop sits inside a function that receives one answer, between two Commands. Control that spans I/O is a node: a loop is a `Parallel`, a retry is a `Retry`, and a branch is a different Effect returned. So it is data a test can see, as `flow.next(invoices).effects.length` counts a loop's passes, and a trace gives each pass its own path.
 
-- A test calls `step.next(null)` and `step.next({ id: 1 })` on the same node to explore both branches.
-- `chain` wraps a sub-pipeline it did not build.
-- The `Kleisli laws` suite holds because continuations compose.
+A generator lets an `if` or a loop wrap a `yield*`, so control moves into syntax that spans a Command, and the tree and the trace see a flat run of steps. Most of what a generator flow costs follows from that:
 
-Neither form lets a reader see past the next Command without supplying an answer, so inspection is not the difference; reusability is. The nesting that dependent values cost is the price, and the `Composing Larger Flows` patterns keep it low.
+- A decision written inline is reachable only by walking the flow from the top. One in its own step is tested by handing it an answer, which is the README's case against `async`/`await`.
+- The code before a step runs again whenever a test or a `Retry` re-enters it, so a change to anything outside the generator happens twice. Re-entering a continuation runs only that continuation.
+- The rule that a decision comes out the same on every run sits in code that reads as running once.
+- A `try`/`catch` around `yield*` reads as handling a failure, and never runs.
+
+Reusability is not the obstacle, though it was once given as the reason. A spike in October 2026 built generator syntax over the existing nodes. Each node advanced the running generator the first time its `next` was called, and when called again started a fresh one fed the earlier answers, refusing if it yielded a different step on the way. Flows stayed reusable, so a test walked both branches of one node, and they recorded, replayed from JSON, retried, ran a `Parallel` with cancellation, read the context through `Ask` and fell back through `onExhausted` as continuation flows do. Values and the error union were typed through `yield*` on TypeScript 5.1. Making nodes iterable, so `yield* node` needed no wrapper, passed the whole suite, and Jest and Vitest judged equality as before. The `Kleisli laws` were not checked against generator flows. It also cost:
+
+- Speed: generator flows ran at about 1.6 times the cost of continuations, and the iterator added about 0.1 µs to every node, generator or not.
+- A node copied with object spread lost its hidden iterator, so `yield*` on the copy threw.
+- A flow's context type had to be intersected across the yielded steps, or a step that reads none erased the requirement.
+
+The nesting that dependent values cost is the price of keeping control in functions, and the `Composing Larger Flows` patterns keep it low.
 
 ### No catch
 
@@ -610,6 +621,20 @@ The ceiling stands: no general catch, only an I/O fault is recoverable (from any
 A `Retry` that does not retry is not a `Retry`, and `0` was the one spelling that made `onExhausted` a catch at no cost. `attempts: 1` still recovers from any I/O fault, but at the visible cost of running the tree twice.
 
 A companion option was dropped for the same reason, since `settled` already isolates a batch branch.
+
+### No settled Command
+
+A settled Command, whose `next` receives the call's outcome (`Success(result)`, or `Failure(error)` with what its function threw), was built as a spike in October 2026 and dropped.
+
+It worked, and cheaply: about 70 bytes and one branch in the interpreter's loop. A recorded throw replayed from JSON with its `code` and `cause`, so `next` took the same branch. It removed the `.then`/`.catch` mapping inside the Command's function, and the rule to copy an error's fields into the result. A first version flagged it with `meta.settled`, which mixed behaviour into metadata and gave a TypeScript error pointing at the flag; its own constructor, `Command.settled`, fixed both.
+
+It was dropped for what it does to the design:
+
+- It is the catch at no cost that `attempts: 0` throws to prevent, for a single Command.
+- What `next` receives would depend on how its Command was built, so a reader would have to look elsewhere to know whether it gets a result or an outcome.
+- Catching inside the Command's function is still needed to retry some errors and handle others as data, so it would be a second way to handle an I/O error, not a replacement.
+
+An I/O error the flow handles is caught inside the Command's function and returned as data, as the README's `Which Errors Are Data` shows.
 
 ### No global retry options
 
@@ -783,11 +808,15 @@ Three sharp edges are pinned by the `Documented sharp edges` suite, and each has
 
 - `Retry` repeating its whole wrapped tree.
 - A `Parallel` branch whose Command ignores its signal running to completion.
-- A function passed by name taking the signal for an optional first parameter.
+- A function passed by name taking the signal for a plain first parameter it treats as optional.
 
 A guard would have to ban legitimate trees, since the hazard is not visible in the data. Replay's refusal of `onMissing: 'execute'` on a capped trace is consistent with this: the trace records its own cap, so that guard bans nothing legitimate.
 
+Primitives stay generic. In September 2026 a guard that limited `Retry` to one Command per attempt was built, and rejected before it was committed. It made `Retry` a narrower primitive than `Command` and `Parallel`, which trust the caller, and it banned trees that are safe to repeat: an idempotent read, transform and write, a re-read before a write, a `Parallel` of idempotent reads. Whether a Command is safe to run twice is the caller's responsibility, so the hazard gets a JSDoc note, a Limitations entry and a pinning test instead.
+
 If `Retry` is ever changed to resume rather than repeat, that suite is the one to read first.
+
+The signal edge was narrowed, not guarded, in October 2026. It used to cover any optional first parameter, and the signal now goes only to a function whose `length` is above 0, which leaves out parameters with default values, the commoner way to write an optional one. That rejects no flow and keeps every call that worked. For a function that reads the signal through a default value, `...args` or a wrapper that hides its parameters, the worst case moves from wrong data to running to completion, which is already how a function that ignores the signal behaves. Two alternatives were rejected. Making the signal opt-in would leave cancellation depending on users remembering to ask for it. Passing a signal outside a `Parallel` as well would make the mistake show up in every test, but breaks `Command(nanoid)` where it works today, and reopens the decision that no signal reaches a Command outside a `Parallel`. Reading `length` is the kind of hidden rule Express is criticised for, which is why the README states it.
 
 ## Tests
 
@@ -834,6 +863,8 @@ Two shape rules keep documented pipelines honest, and the Quick Start follows bo
 `CLAUDE.md` holds the rules and this file the reasons, because `CLAUDE.md` is loaded into every agent session and `AGENTS.md` links to it. When both lived in `CLAUDE.md`, it reached 85 KB, about 28,000 tokens spent before any work began, longer than `index.js` itself. Codex, which reads only the first 32 KiB of `AGENTS.md` and drops the rest without saying so, lost everything from the recording and replay invariants on, the settled decisions included. A test holds `CLAUDE.md` under 32 KiB.
 
 `CONTRIBUTING.md` restates the rules for a human contributor and does not refer to `CLAUDE.md`, so it reads on its own. A new rule goes in both, and its reason here.
+
+Nothing about the library lives in an agent's private memory. An agent once kept design verdicts and preferences about working on the repository in notes only it could read; in October 2026 they were moved here and into `CLAUDE.md`, since a note nobody else can read cannot be reviewed or followed by anyone else.
 
 ### The gate
 
@@ -907,6 +938,12 @@ Each entry gives the signature, what it returns, and one line per option, parame
 
 The entries had grown into prose that re-taught the guides, a quarter of the README, which a cold DX evaluation called accurate throughout but dense. Rewritten this way, they lost a sixth of their words, and a rule such as one of `onStep`'s became a line a reader can find. A new option gets one line in its entry, and whatever more it needs goes in the section that teaches it.
 
+### The README's orientation sections stay short
+
+How It Works and the other orientation sections are a few plain sentences. In September 2026 a rewrite of How It Works added a stated mental model, a walk-through diagram and a three-bullet list. It removed some repetition and was more complete, and it was dropped as too dense. In an orientation section readability wins over completeness: repeating an idea stated elsewhere is fine there, and density is not.
+
+So a gap gets a sentence or two, shown as exact wording before anything is rewritten, and moving something is proposed apart from changing it.
+
 ### No em dashes
 
 The `—` character appears nowhere in the repository: not in the README, this file, JSDoc, comments, test names or assertion messages.
@@ -922,3 +959,9 @@ Or when you'd otherwise need a comment to say what it means. This applies to `in
 A concept written inline drifts into spellings that each have to be checked against the others: "a non-null object" was spelled three ways across six places before `isObject` replaced them. A condition one function uses once can be a named `const`, as `pastTheEnd` and `haltedByReplay` are.
 
 Make a predicate a type guard (`@returns {value is T}`) only where a caller needs the narrowing, as the interpreter loop does with `isPending`. A guard to `object` on a value typed `any` narrows it to `object`, and reading a property off it stops compiling, which is why `isObject` returns a plain `boolean`.
+
+### Proposals come before builds
+
+Two incidents set the order. The `Retry` guard in `Sharp edges are documented, not guarded` was built before anyone asked for it, and dropped. And a review in October 2026 called the rule that control structures stay in pipeline functions an afterthought of the continuation design, because nothing had written it down; the rule had held since the first version, and continuations were chosen to enforce it.
+
+So a design critique is raised as an opinion, and the maintainer chooses before anything is built. A rule the docs do not state is asked about, or traced through the history, before it is judged; an undocumented rule is not a missing one.

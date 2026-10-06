@@ -27,6 +27,7 @@ Mutation testing stays out of CI. Run it after changing `index.js` or its tests.
 
 - A rule goes here and in `CONTRIBUTING.md`, and its reason in `DESIGN.md`. `CONTRIBUTING.md` restates the rules for a human contributor and does not refer to this file, so it reads on its own. When a rule changes, change all three.
 - A design verdict goes in `DESIGN.md`, with one line under Settled decisions here when it is settled.
+- Nothing about this library lives in an agent's private memory. A design verdict, a critique accepted or rejected, or a preference about how to work here goes in this file or `DESIGN.md`, where every contributor can read it.
 - This file stays under 32 KiB, and well under it. It is loaded into every session, and Codex reads only the first 32 KiB of `AGENTS.md`; a test fails past that. History and explanation go in `DESIGN.md`.
 - `index.js` is one file in five sections, each a `#region` (Types, Building flows, Configuration, Running flows, and Recording and replay), listed in a contents comment at its top. A new definition goes in the section it serves, usually the one that calls it, and the contents comment changes when a section gains or loses something it names. Where two sections share a private protocol, as replay and the interpreter do, the comment at each end names the function at the other.
 
@@ -38,6 +39,7 @@ Mutation testing stays out of CI. Run it after changing `index.js` or its tests.
 - Markdown prose has no hard line breaks. Write each paragraph and list item as one line; code blocks and table rows are untouched.
 - No jargon in the README. The names the library exports are not jargon (`Command`, `Retry`, `Parallel`, `Resolver`, `TimeParadox`, `onStep`, `backoff` and the rest); everything else gets the plain word. A flow, not an Effect tree. Part of a flow, not a node or a subtree. The Command's function, or `cmd`, not a thunk. Joining, not fan-in. Stops, not short-circuits. A request, not cooperative. Attached, not stamped. Does the same thing again, not deterministic. No catch, not no catch combinator. Runs at the same time, not concurrently, wherever nothing turns on the distinction. `grep -rniE "thunk|combinator|monad|kleisli|effect tree|fan-in|fan-out|short-circuit|cooperative|imperative shell|arity|stamp" README.md` should print nothing. A precise term may stay if the plain words follow it in the same breath, as `idempotent (safe to run more than once)` does. The precise words are fine everywhere else.
 - The README's API Reference is a reference. Each entry gives the signature, what it returns, and one line per option, parameter or rule, and links to the guide section that teaches it rather than teaching it again. A new option gets one line there, and whatever more it needs goes in its guide section.
+- The README's orientation sections, such as How It Works, stay a few plain sentences. To fill a gap, propose a sentence or two and show the exact wording rather than restructuring the section, and propose moving something apart from changing it.
 - No em dashes anywhere in the repository, including JSDoc, comments, test names and assertion messages. Use a colon, parentheses, a semicolon, a comma or a full stop, whichever carries the relationship; a table cell that needs a placeholder uses `n/a`. `grep -rn "—" --include="*.js" --include="*.ts" --include="*.md" .` checks a change before it lands.
 - Name a condition in `index.js` when it's used more than once, or when it would otherwise need a comment to say what it means; one function's one-off condition can be a named `const`, as `pastTheEnd` is. Make a predicate a type guard (`@returns {value is T}`) only where a caller needs the narrowing, as the interpreter loop does with `isPending`; `isObject` returns a plain `boolean`, since a guard to `object` on an `any` value stops property reads compiling.
 
@@ -53,6 +55,7 @@ pure-effect is a zero-dependency effect system for JavaScript implementing the "
 
 ### Composition
 
+- Control structures stay in pipeline functions: an `if` or a loop never wraps a Command. A decision sits in a function that receives one value, and control that spans I/O is a node. No API may let control span a Command; `DESIGN.md`'s Overview says why.
 - Every `Failure` carries the called flow's `initialInput`, at any depth and untrimmed, and a `Success` never does. Both mechanisms are needed: `chain` stamps every node but a `Success` with the pipeline's start, and `effectPipe` ends with the identity pass `chain(tree, Success, start)`; and the interpreter restamps the final `Failure` with the root's input. The outcomes a settled `Parallel` hands `next` keep their branch's own input. Only `effectPipe` puts the input on the tree.
 - A Command's identity is `commandName(eff)`: a non-empty string `meta.name`, else `cmd.name`, else `'anonymous'`. Traces, replay matching, spans and tests all use it; never restate the rule.
 - Docs and examples thread minimal values between steps rather than a growing accumulator object, and log `result.error` rather than a whole `Failure`, since `redact` controls a trace and the shell controls logs.
@@ -60,8 +63,9 @@ pure-effect is a zero-dependency effect system for JavaScript implementing the "
 ### Retry and Parallel
 
 - `Retry` merges per-use options over `attempts: 3`, `delay: 100` and `backoff: 1`; an option set to `undefined` keeps its default, and values are checked when the `Retry` runs. An abort passes through unretried and unwrapped. Exhaustion is `{ retryExhausted, lastError, attempts }`, itself an I/O fault, so an enclosing `Retry` retries it. `onExhausted` runs a fallback under the `f` path prefix and never in a cancelled branch. Each attempt runs the **entire** wrapped tree again, `next` included, so a retried Command keeps its default `next` and branching happens in a later step.
+- Primitives stay generic. A hazard the data cannot show, such as a Command under `Retry` that is not safe to run twice, gets a JSDoc note, a README Limitations entry and a test in `Documented sharp edges`, never a check that refuses a shape. `Retry` repeats rather than resumes unless the maintainer asks otherwise.
 - `Parallel` runs branches through `runBounded`, so results and paths follow array order with or without `limit`; under `limit: 1` it is a sequential loop that stops at the first failure, unless `settled`. The first branch to fail or throw cancels the others: a failing branch's `Failure` is the result, and a throw rejects the run. Under `settled` a failure cancels nothing and `next` gets every outcome as a `Success` or `Failure`, while a throw still cancels the others and rejects the run. The whole `Parallel` is one `onStep` step of type `'Parallel'` whose `op` runs the branches and returns the decision, and a hook must call it. A branch's throw is held until every branch has settled. The branch that cancelled the others is tracked apart from those cancelled because of it.
-- Cancellation is a request. Each `Parallel` has an `AbortController` linked to the enclosing one by `linkedScope`. A cancelled branch starts no further Commands: that is checked at the top of `execute`'s loop, after `onBeforeCommand` returns, and before a `Retry` fallback; a backoff ends at once, and `delayFor` checks `aborted` first. `cmd` receives the signal only inside a `Parallel`, as its first argument. `Parallel` awaits every branch before returning.
+- Cancellation is a request. Each `Parallel` has an `AbortController` linked to the enclosing one by `linkedScope`. A cancelled branch starts no further Commands: that is checked at the top of `execute`'s loop, after `onBeforeCommand` returns, and before a `Retry` fallback; a backoff ends at once, and `delayFor` checks `aborted` first. `cmd` receives the signal only inside a `Parallel`, and only when it declares a parameter (`cmd.length > 0`, which leaves out parameters with default values). `Parallel` awaits every branch before returning.
 
 ### Hooks
 
@@ -99,13 +103,19 @@ pure-effect is a zero-dependency effect system for JavaScript implementing the "
 - `examples/opentelemetry-example.js` and `examples/recording-example.js` are reference code: they ship under `examples/`, but `exports` offers only `index.js`. Edit them only with `npm test`. Each exports a function that returns a configuration and one that installs it, and nothing happens on import. Both import the library as `'pure-effect'`, so a copy runs as it is. Observing a run never decides it.
 - Telemetry spans carry names, timings and status, never values, and nothing ahead of a run may throw. Recording keeps one recorder per run in an `AsyncLocalStorage` scope; an error from `keep` or the sink goes to `onSinkError`, and each warning fires once per flow.
 
+## Proposing changes
+
+- Raise a design critique as an opinion, and let the maintainer choose before building it.
+- A rule the docs do not state may still be deliberate: control structures stayed in pipeline functions from the first version, long before it was written down. Ask, or read the history, before calling a choice an afterthought.
+
 ## Settled decisions
 
 Each was weighed and decided. Do not propose them again as improvements or rank them as weaknesses; `DESIGN.md` gives the reasons.
 
-- No generator syntax: a flow built from continuations is a reusable value, and a generator is used up as it runs.
+- No generator syntax: control structures stay in their own functions, and a generator lets an `if` or a loop span a Command.
 - No catch: `Retry`'s per-use `onExhausted` is the only recovery, and only from an I/O fault.
 - `attempts: 0` throws.
+- No settled Command: a Command's `next` always receives its result, and an I/O error the flow handles is caught inside the Command's function.
 - No global retry options, and a `retry` key throws.
 - `settled` hands `next` `Success` and `Failure` nodes, not `{ status, value }`.
 - A `Parallel`'s trigger is the first failure to finish, not the first by array order.
@@ -130,7 +140,7 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 - `index.js` stays one file, divided into sections; a `utils.js` and a split into the core and recording and replay were weighed and dropped.
 - `runBranches` runs both modes through `settleBranches`.
 - Thrown errors stay out of the declared error union.
-- Sharp edges are documented, not guarded: `Retry` repeating its whole wrapped tree, a branch whose Command ignores its signal running to completion, and a function passed by name taking the signal for an optional first parameter.
+- Sharp edges are documented, not guarded: `Retry` repeating its whole wrapped tree, a branch whose Command ignores its signal running to completion, and a function passed by name taking the signal for a plain first parameter it treats as optional.
 
 ## Tests
 

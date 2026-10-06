@@ -96,9 +96,9 @@ const Failure = (error, initialInput) => ({
  * Represents a side effect to be executed later.
  *
  * @param {(signal?: AbortSignal) => Promise<any>|any} cmd - The side-effect function to execute. Inside a
- *        `Parallel` branch it receives an `AbortSignal` that fires when a sibling branch fails, so I/O that
- *        accepts one can be cancelled in flight. Outside a `Parallel` no argument is passed. The signal is the
- *        first argument, so wrap a function that takes an optional one, as in `() => nanoid()`.
+ *        `Parallel` branch, a function that declares a parameter receives an `AbortSignal` in it that fires when a
+ *        sibling branch fails, so I/O that accepts one can be cancelled in flight. A parameter with a default value
+ *        does not count, so `nanoid(size = 21)` keeps its default. Outside a `Parallel` no argument is passed.
  * @param {(result: any) => Effect} [next] - Receives the result of `cmd` and returns the next Effect.
  *        Defaults to `(result) => Success(result)`, which is what most Commands want; `null` counts as omitted.
  * @param {CommandMeta} [meta] - Optional metadata, passed to `onBeforeCommand`. A string `meta.name`
@@ -1112,10 +1112,13 @@ const interpret =
             // What it returned, so a hook that loses it is caught.
             /** @type {unknown} */
             let value;
-            // The signal is passed only inside a Parallel. There it is still the first argument, so a function
-            // passed by name with an optional first parameter, `nanoid(size = 21)` say, takes the signal for it:
-            // a documented sharp edge. Async, so a hook always gets a promise, even from a synchronous function.
-            // The latest call is kept, with whether it is still running, so a hook that does not wait for it is caught.
+            // The signal goes only to a function that declares a parameter for it, and only inside a Parallel. A
+            // parameter with a default value does not count toward `length`, so `nanoid(size = 21)` passed by name
+            // keeps its default rather than reading the signal as its size. A plain first parameter the function
+            // treats as optional still takes the signal: a documented sharp edge.
+            const takesSignal = signal !== undefined && cmd.length > 0;
+            // Async, so a hook always gets a promise, even from a synchronous function. The latest call is kept,
+            // with whether it is still running, so a hook that does not wait for it is caught.
             /** @type {Promise<unknown> | undefined} */
             let call;
             let running = false;
@@ -1123,7 +1126,7 @@ const interpret =
                 succeeded = false;
                 running = true;
                 try {
-                    value = await (signal ? cmd(signal) : cmd());
+                    value = await (takesSignal ? cmd(signal) : cmd());
                     succeeded = true;
                     return value;
                 } finally {

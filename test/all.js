@@ -4019,11 +4019,15 @@ describe('Documented sharp edges', function () {
         assert.deepEqual(written, ['wrote'], 'an uninterruptible in-flight write still performed');
     });
 
-    it('should hand a Command function passed by name the signal as its first argument inside a Parallel', async function () {
-        // Pinned deliberately: inside a Parallel the function is called with its branch's AbortSignal, so one with
-        // an optional first parameter, as `nanoid(size = 21)` has, takes the signal for it. The README's
-        // Limitations entry says to wrap such a function.
-        const pageSize = /** @type {any} */ ((limit = 50) => (typeof limit === 'number' ? limit : 'a signal'));
+    it('should hand the signal to a plain first parameter that a function passed by name treats as optional', async function () {
+        // Pinned deliberately: inside a Parallel a function that declares a parameter is called with its branch's
+        // AbortSignal, so one that treats a plain first parameter as optional, defaulting it in its body, takes the
+        // signal for it. A parameter with a default value is safe, since it does not count toward `length`. The
+        // README's Limitations entry says to wrap such a function.
+        const pageSize = /** @type {any} */ (
+            (/** @type {unknown} */ limit) =>
+                limit === undefined ? 50 : typeof limit === 'number' ? limit : 'a signal'
+        );
         assert.deepEqual(await runEffect(Command(pageSize)), Success(50));
         assert.deepEqual(await runEffect(Parallel([Command(pageSize)])), Success(['a signal']));
         assert.deepEqual(await runEffect(Parallel([Command(() => pageSize())])), Success([50]), 'wrapped, it works');
@@ -4489,6 +4493,21 @@ describe('Parallel cancellation', function () {
         assert.ok(Date.now() - started < 200, 'the run did not wait out the cancelled branch');
     });
 
+    it('should hand the signal only to a function that declares a parameter', async function () {
+        // A parameter with a default value does not count toward a function's `length`, so a function passed by
+        // name like `nanoid(size = 21)` keeps its default inside a Parallel instead of reading the signal as its size.
+        const makeId = /** @type {any} */ ((size = 21) => 'x'.repeat(size | 0));
+        /** @type {unknown[]} */
+        const seen = [];
+        const takesSignal = (/** @type {AbortSignal | undefined} */ signal) => {
+            seen.push(signal);
+            return 'ok';
+        };
+        const result = await runEffect(Parallel([Command(makeId), Command(takesSignal)]));
+        assert.deepEqual(result, Success(['x'.repeat(21), 'ok']));
+        assert.ok(seen[0] instanceof AbortSignal, 'a declared parameter still receives the signal');
+    });
+
     it('should not start a later Command in a cancelled branch', async function () {
         /** @type {string[]} */
         const ran = [];
@@ -4684,14 +4703,16 @@ describe('Parallel cancellation', function () {
     it('should pass no argument to a Command outside a Parallel', async function () {
         /** @type {any[]} */
         const args = [];
+        // It declares a parameter, so it is a function that takes the signal inside a Parallel; one without would
+        // be called with nothing anywhere, and could not tell this rule apart from that one.
         const result = await runEffect(
-            Command(function cmdRecordArgs() {
+            Command(function cmdRecordArgs(/** @type {AbortSignal | undefined} */ signal) {
                 args.push([...arguments]);
                 return 'done';
             })
         );
         assert.equal(result.type, 'Success');
-        assert.deepEqual(args, [[]], 'a thunk outside a Parallel is called with no arguments at all');
+        assert.deepEqual(args, [[]], 'a function outside a Parallel is called with no arguments at all');
     });
 });
 

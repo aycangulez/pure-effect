@@ -4,8 +4,11 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-06
+
 ### Changed
 
+- **Inside a `Parallel`, a Command's function gets the `AbortSignal` only if it takes a parameter.** Every function was handed the signal, so one passed by name whose first parameter has a default value read the signal in its place: `Command(nanoid)` returned an empty ID inside a `Parallel` and a full one outside, and a helper with a default page size got the signal as its page size. The signal now goes only to a function that declares a parameter, counted as `Function.length` counts them, which leaves out parameters with default values, so such a function keeps its default everywhere. A function that reads the signal through a parameter with a default value or through `...args`, or that a wrapper hides behind a `length` of 0, is no longer given it, and runs to completion when its branch is cancelled, as a function that ignores the signal does; write it as `(signal) => ...`. A plain first parameter that a function treats as optional still takes the signal, as before.
 - **An `options` argument refuses a name it does not read.** `Retry`, `Parallel`, `recorder`, `recordEffect`, `replayEffect` and `timeTravel` ignored any other name, so a misspelt or borrowed one ran with the default and nothing said so: `Parallel(batch, { concurrency: 4 })`, the name p-limit uses, ran with no limit, `{ settle: true }` ran fail-fast so one bad record cancelled the batch, and `{ attemps: 5 }` got 3 attempts. Such a name now throws, naming it and the options the function reads; `Retry` and `Parallel` throw an `EffectTypeError` as the flow is built, the others a `TypeError`. TypeScript already refused most of them in an object literal written in the call. An option set to `undefined` is still accepted.
 - **The message for a step a trace lacks says what `onMissing: 'execute'` would run.** It advised `'execute'` where the Commands only read, so a replay that met a newly added lookup could run it that way, and every step after it, which had moved to a new path, ran live too. The message now says so, and advises `'execute'` only where every Command the flow can still reach goes to a test double or only reads.
 
@@ -235,7 +238,8 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 
 - Initial release: `Success`, `Failure`, `Command`, `effectPipe`, and `runEffect`.
 
-[Unreleased]: https://github.com/aycangulez/pure-effect/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/aycangulez/pure-effect/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/aycangulez/pure-effect/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/aycangulez/pure-effect/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/aycangulez/pure-effect/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/aycangulez/pure-effect/compare/v0.13.0...v0.14.0
