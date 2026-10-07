@@ -76,6 +76,7 @@ A Command's identity is `commandName(eff)`: a non-empty string `meta.name`, else
 - `Command`, `Ask`, `Retry` and `Parallel` wrap their continuations, carrying `Retry`'s `effect` and `Parallel`'s `effects` over untouched.
 - It checks what each step returns. That is the only place the step's name (`fn.name`) is known, so it is where the useful error message comes from.
 - It checks `effect == null` before reading `.type`, so a missing return is named rather than thrown as a bare `TypeError`.
+- A loop that recurses through `effectPipe`, as `poll = (n) => effectPipe(fetch, (s) => (s.done ? Success(s) : poll(n - 1)))(n)` does, takes time in proportion to its length, as one through a Command's `next` does: 200,000 levels took about 100 ms, twice the loop through `next`. It was quadratic, and overflowed the stack at 20,000 levels, while `effectPipe` ended in the identity pass that stamped the flow's input, since that pass wrapped each level's tree once more. That was left alone as rare, until removing the pass ([A `Failure` carries only its error](#a-failure-carries-only-its-error)) fixed it. A test in `Core` runs 50,000 levels with a `Retry` around each fetch, the shape a paged loop needs, since a `Retry` around a Command whose `next` continues the loop would repeat every later page.
 
 ### The flow's input reaches `onRun`, not the outcome
 
@@ -468,7 +469,7 @@ Every state's `next` is a method signature rather than a function-typed property
 
 #### `Parallel`'s non-settled overloads accept only `settled?: false`
 
-A `settled` known only as a `boolean` matched the overload that types `next` as values, while the runtime handed it outcomes. An options variable used only for its `limit` is typed `{ limit: number }`.
+A `settled` known only as a `boolean` matched the overload that types `next` as values, while the runtime handed it outcomes. An options variable used only for its `limit` is typed `{ limit: number }`. They take `settled: undefined` too, which the runtime reads as not settled, and a `settled` typed `boolean | undefined` still matches neither kind of overload.
 
 #### `Command`'s first overload
 
@@ -536,7 +537,8 @@ It takes a `CommandState`, not an `Effect`, since the runtime throws for anythin
 - `CommandInterceptor` is a union of an async and a plain function type, since in JavaScript a JSDoc `@type` on an async function must declare a `Promise` return.
 - `StepRunner`'s `path` and `onRun`'s `flowName` and `initialInput` are declared present, since the runtime always passes them. So a wrapper that calls another hook without passing one on does not compile.
 - `redact`'s value is `any`, since every redact spreads or reads it.
-- `version` accepts `undefined` explicitly for `exactOptionalPropertyTypes`, which `tsd` does not run with, so that one was checked by hand and is not pinned.
+- Every optional option and hook field, and a context's `flowName`, is declared `T | undefined`, since the runtime treats `undefined` as left out (`checkOptions`, and the rule that only `undefined` leaves a hook out). Under `exactOptionalPropertyTypes` a field declared `T` refuses a value typed `T | undefined`, which is how a value read from configuration is typed, so `Retry(cmd, { attempts: config.attempts })` did not compile, and neither did a project that copied the recording example, which passes `redact` and `stack` on as it gets them. Only `version` took `undefined`, and it was checked by hand. `tsd` now runs with the flag (`package.json`), so each field is pinned, while `test:ts-minimum` and `tsc -p jsconfig.json` compile the same type tests without it. A test compiles each example under the flag as well, since users copy the examples into their own projects; the telemetry example set a span status `message` to `undefined`, which OpenTelemetry's `SpanStatus` refuses there.
+- Left as they were: `onExhausted`, whose presence changes the error type, as `settled`'s changes what `next` receives; and the trace's data types and `CommandMeta`, which are data rather than options.
 - `recordEffect` types the trace's input from the input passed in, so a `redact` that changes its shape makes that type wrong, and so does an input the trace marks `unrecorded`, which it holds none of. Typing it `I | undefined` would put a `!` in every `replayEffect(flow(trace.initialInput), trace)`, which the typed input exists to avoid; `timeTravel` refuses such a trace instead.
 
 #### `Parallel` reads its types from the branches
@@ -669,12 +671,6 @@ A signal read that way makes the function throw, which is an I/O fault. So a `Re
 ### No finalizer inside a flow
 
 Cleanup for a run, a transaction included, is a try/finally around `runEffect` in the shell.
-
-### Recursing through `effectPipe` is quadratic, and that is left alone
-
-`poll = (n) => effectPipe(fetch, (s) => (s.done ? Success(s) : poll(n - 1)))(n)` wraps one more continuation per level, and overflowed the stack at 20,000 levels. The same loop recursing through a Command's `next` stays linear.
-
-Loops that long are rare, so a docs note that loops go through `next` is the most it warrants.
 
 ### Nested pipelines for dependent values are a TypeScript cost only
 
@@ -821,7 +817,7 @@ It bought little:
 - Its one debugging use, logging a whole `Failure`, was what the README warned against, since a registration's input is its credentials, and the outcomes of a settled `Parallel` copied them once per branch.
 - A step tested alone returned a `Failure` without the input, and the same step inside a flow returned one with it, an asymmetry the README had to explain. `Success` had already lost the field so that `assert.deepEqual(result, Success(v))` holds; the same argument applied to `Failure`.
 
-What did depend on it was the hook-based recorder, which read the input off the root of the flow. The root is a `Failure` whenever a flow stops before its first Command, as a failed validation does, and that is a run the recorder keeps by default. Dropping the field outright would have left those traces with no input, so the input moved to `onRun` instead.
+What did depend on it was the hook-based recorder, which read the input off the root of the flow. The root is a `Failure` whenever a flow stops before its first Command, as a failed validation does, and that is a run the recorder keeps by default. Dropping the field outright would have left those traces with no input, so the input moved to `onRun` instead. Removing the identity pass also made a loop that recurses through `effectPipe` linear; see [`chain`](#chain).
 
 Two alternatives were weighed. Dropping the input only from a settled `Parallel`'s outcomes removed the worst of the PII exposure but kept both mechanisms and the test asymmetry. A non-enumerable property on the root would stay out of `deepEqual`, but it is still something user code holds, and a hidden field on an Effect is how I/O fault provenance once went wrong, kept or dropped by composition depending on the pipeline's shape. A `WeakMap` puts nothing on the flow at all.
 

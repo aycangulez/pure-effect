@@ -944,3 +944,32 @@ expectType<Promise<SuccessState<SavedUser> | FailureState<ValidationError | DbEr
 );
 // @ts-expect-error a bare entries array is replayEffect's shape, not timeTravel's
 timeTravel(typedFlow, traceLog.trace);
+
+// --- an option or hook set to undefined keeps its default ---
+
+// tsd runs with exactOptionalPropertyTypes (package.json), which refuses a value typed `T | undefined`, as one read
+// from configuration is, where the declaration says only `T`. The runtime treats undefined as left out everywhere.
+declare const fromConfig: { count?: number; flag?: boolean; name?: string; hook?: StepRunner };
+const configured = Command(() => 1);
+Retry(configured, { attempts: fromConfig.count, delay: fromConfig.count, backoff: fromConfig.count });
+expectType<ParallelState<[number], [number], never>>(
+    Parallel([Success(42)], { limit: fromConfig.count, settled: undefined })
+);
+expectType<ParallelState<[number], number, never>>(
+    Parallel([Success(42)], ([n]) => Success(n), { limit: fromConfig.count, settled: undefined })
+);
+// @ts-expect-error a settled flag that may be true still matches no overload
+Parallel([Success(42)], { settled: fromConfig.flag });
+configureEffect({ onStep: fromConfig.hook, onRun: undefined, onBeforeCommand: undefined });
+runEffect(configured, { flowName: fromConfig.name }, { onStep: fromConfig.hook, inherit: fromConfig.flag });
+const configuredRecorder = recorder({ redact: undefined, maxEntries: fromConfig.count, stack: fromConfig.flag });
+configuredRecorder.toTrace({ flowName: fromConfig.name, version: fromConfig.name });
+recordEffect((n: number) => Success(n), 1, { context: undefined, version: fromConfig.name, stack: fromConfig.flag });
+replayEffect(configured, traceLog, {
+    context: undefined,
+    fastRetry: fromConfig.flag,
+    hooks: fromConfig.flag,
+    onMissing: undefined,
+    onResolved: undefined
+});
+timeTravel(typedFlow, traceLog, { log: undefined, context: undefined, version: fromConfig.name });

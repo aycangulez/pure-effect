@@ -321,6 +321,24 @@ describe('Core', function () {
         const result = await registerUser(input);
         assert.equal(result.type, 'Success');
     });
+
+    it('should run a loop that recurses through effectPipe in linear time', async function () {
+        // effectPipe ended in an identity pass that wrapped every pipeline once more, so each level of such a loop
+        // added a wrapper: 5,000 levels took seconds and 20,000 overflowed the stack. A paged loop whose fetch is
+        // retried recurses this way, since a Retry around a Command's next would repeat every later page.
+        const fetchPage = (/** @type {number} */ left) =>
+            Command(function cmdFetchPage() {
+                return left;
+            });
+        /** @type {(left: number) => import('../index.js').Effect<string>} */
+        const poll = (left) =>
+            effectPipe(
+                (/** @type {number} */ n) => Retry(fetchPage(n), { attempts: 1, delay: 0 }),
+                (/** @type {number} */ n) => (n === 0 ? Success('done') : poll(n - 1))
+            )(left);
+        const job = effectPipe(poll, (status) => Success(`${status} after 50,000 pages`));
+        assert.deepEqual(await runEffect(job(50_000)), Success('done after 50,000 pages'));
+    });
 });
 
 describe('Retry onExhausted', function () {
@@ -3089,6 +3107,31 @@ const importCopiedExample = async (file) => {
     }
 };
 
+/**
+ * The type errors an example raises in a strict TypeScript project that copied it, with `exactOptionalPropertyTypes`
+ * on, which `jsconfig.json` leaves off.
+ * @param {string} file - The example's file name in examples/
+ * @returns {string[]}
+ */
+const exampleTypeErrors = (file) => {
+    const program = ts.createProgram([join('examples', file)], {
+        allowJs: true,
+        checkJs: true,
+        strict: true,
+        exactOptionalPropertyTypes: true,
+        skipLibCheck: true,
+        noEmit: true,
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.NodeNext,
+        moduleResolution: ts.ModuleResolutionKind.NodeNext
+    });
+    return ts.getPreEmitDiagnostics(program).map((d) => {
+        const where = d.file && d.start !== undefined ? d.file.getLineAndCharacterOfPosition(d.start) : undefined;
+        const at = where ? `${d.file?.fileName}:${where.line + 1}: ` : '';
+        return at + ts.flattenDiagnosticMessageText(d.messageText, ' ');
+    });
+};
+
 describe('examples/recording-example.js', function () {
     beforeEach(() => configureEffect());
     afterEach(() => configureEffect());
@@ -3098,6 +3141,13 @@ describe('examples/recording-example.js', function () {
         // `Cannot find module` until its import was edited. It imports the library by its package name instead.
         const copied = await importCopiedExample('recording-example.js');
         assert.equal(typeof copied.recordingHooks, 'function');
+    });
+
+    it('should type-check in a project with exactOptionalPropertyTypes', function () {
+        // It passes `redact` and `stack` on as it got them, possibly undefined, which RecorderOptions refused under
+        // that flag, so a TypeScript project that copied the example failed to compile until the types took it.
+        this.timeout(20000);
+        assert.deepEqual(exampleTypeErrors('recording-example.js'), []);
     });
 
     const failing = (/** @type {any} */ input) =>
@@ -3614,6 +3664,13 @@ describe('examples/opentelemetry-example.js', function () {
         // `Cannot find module` until its import was edited. It imports the library by its package name instead.
         const copied = await importCopiedExample('opentelemetry-example.js');
         assert.equal(typeof copied.telemetryHooks, 'function');
+    });
+
+    it('should type-check in a project with exactOptionalPropertyTypes', function () {
+        // A failed run's status set `message: undefined` for an error it keeps off the span, which SpanStatus refuses
+        // under that flag.
+        this.timeout(20000);
+        assert.deepEqual(exampleTypeErrors('opentelemetry-example.js'), []);
     });
 
     /** A tracer stub, so the example is testable without standing up an SDK. */

@@ -32,13 +32,14 @@ export type AskState<T, E = unknown, Ctx = unknown> = {
     next(context: Ctx): Effect<T, E, Ctx>;
 };
 
+// Every optional option and hook takes `undefined`, which keeps its default, under `exactOptionalPropertyTypes` too.
 export type RetryOptions = {
     /** Tries after the first, so `2` makes at most 3 calls. A positive integer, 3 by default. */
-    attempts?: number;
+    attempts?: number | undefined;
     /** Milliseconds before the first retry, 100 by default. */
-    delay?: number;
+    delay?: number | undefined;
     /** Multiplies the wait before each later retry, so `2` doubles it. 1 by default, the same wait each time. */
-    backoff?: number;
+    backoff?: number | undefined;
 };
 
 /**
@@ -62,9 +63,9 @@ export type RetryExhaustedError<Thrown = unknown> = {
 
 export type ParallelOptions = {
     /** Most branches in flight at once. Results and paths stay in array order regardless. */
-    limit?: number;
+    limit?: number | undefined;
     /** Hand every branch's outcome to `next` instead of failing on the first one. */
-    settled?: boolean;
+    settled?: boolean | undefined;
 };
 
 /** `V` is what `next` receives: the branch values, or their outcomes under `settled`. `BranchError` types `effects`. */
@@ -214,7 +215,7 @@ export declare function Retry<T, E = never, Ctx = unknown>(
     options?: RetryOptions
 ): RetryState<T, E | RetryExhaustedError, Ctx>;
 
-// `settled?: false` keeps a `settled` known only as boolean from matching; `| []` infers tuples on TypeScript 5.1.
+// `settled?: false | undefined` keeps a `settled` typed boolean from matching; `| []` infers tuples on TypeScript 5.1.
 /**
  * Runs the branches at the same time and hands `next` their values in order. The first to fail cancels the rest, unless
  * `settled`, which hands `next` every outcome.
@@ -246,13 +247,13 @@ export declare function Parallel<B extends readonly unknown[] | [], N extends An
 
 export declare function Parallel<B extends readonly unknown[] | []>(
     effects: ParallelBranches<B>,
-    options?: ParallelOptions & { settled?: false }
+    options?: ParallelOptions & { settled?: false | undefined }
 ): ParallelState<ParallelValues<B>, ParallelValues<B>, EffectError<B[number]>, ParallelContext<B>>;
 
 export declare function Parallel<B extends readonly unknown[] | [], N extends AnyEffect = never>(
     effects: ParallelBranches<B>,
     next: (values: ParallelValues<B>) => N,
-    options?: ParallelOptions & { settled?: false }
+    options?: ParallelOptions & { settled?: false | undefined }
 ): ParallelState<
     ParallelValues<B>,
     EffectValue<N>,
@@ -1273,19 +1274,23 @@ export type CommandInterceptor =
     | ((command: CommandState<unknown, unknown>, context?: any) => void);
 
 export interface EffectConfiguration {
-    onStep?: StepRunner;
-    onRun?: RunWrapper;
-    onBeforeCommand?: CommandInterceptor;
+    onStep?: StepRunner | undefined;
+    onRun?: RunWrapper | undefined;
+    onBeforeCommand?: CommandInterceptor | undefined;
 }
 
 /** Adds a layer of hooks and returns a function that removes it. With no arguments, removes every layer. */
 export declare function configureEffect(...configs: (EffectConfiguration | undefined)[]): () => void;
 
 /** Hooks for one `runEffect` call, inside the installed ones; `inherit: false` leaves those out. */
-export type CallConfiguration = EffectConfiguration & { inherit?: boolean };
+export type CallConfiguration = EffectConfiguration & { inherit?: boolean | undefined };
 
 /** The context a run is given: what the flow reads, and a `flowName` naming the run in traces and spans. */
-export type RunContext<Ctx> = unknown extends Ctx ? Ctx : Ctx extends object ? Ctx & { flowName?: string } : Ctx;
+export type RunContext<Ctx> = unknown extends Ctx
+    ? Ctx
+    : Ctx extends object
+      ? Ctx & { flowName?: string | undefined }
+      : Ctx;
 
 /** Runs a flow and returns its `Success` or `Failure`. A flow that reads a context requires one. */
 export declare function runEffect<T, E = unknown, Ctx = unknown>(
@@ -1346,17 +1351,17 @@ export interface RecorderOptions {
     /**
      * Scrubs each value before it enters a trace; `kind` says which. It gets a copy, so editing it in place is safe.
      */
-    redact?: (value: any, name: string, kind: 'result' | 'error' | 'initialInput' | 'context') => unknown;
+    redact?: ((value: any, name: string, kind: 'result' | 'error' | 'initialInput' | 'context') => unknown) | undefined;
     /** Cap trace length; further steps are counted in `dropped`, not stored. */
-    maxEntries?: number;
+    maxEntries?: number | undefined;
     /** Record stack traces for thrown errors. Off by default. */
-    stack?: boolean;
+    stack?: boolean | undefined;
 }
 
 /** The trace's own fields, as `toTrace` takes them; the returned trace keeps the input's and context's types. */
 export interface TraceMeta<I = unknown, C = unknown> {
     initialInput?: I;
-    flowName?: string;
+    flowName?: string | undefined;
     context?: C;
     /** Accepts `undefined`, so `process.env.BUILD_ID` passes under `exactOptionalPropertyTypes`. */
     version?: string | undefined;
@@ -1371,7 +1376,7 @@ export declare function recorder(options?: RecorderOptions): {
 
 /** `recordEffect`'s options: recorder options, plus the context the run gets and a build id. */
 export type RecordOptions<Ctx = unknown> = RecorderOptions & {
-    context?: RunContext<Ctx>;
+    context?: RunContext<Ctx> | undefined;
     version?: string | undefined;
 };
 
@@ -1389,17 +1394,17 @@ export declare function recordEffect<I, T, E = unknown, Ctx = unknown>(
 
 export interface ReplayOptions<Ctx = unknown> {
     /** Context for `Ask`; defaults to the one the trace recorded. */
-    context?: RunContext<Ctx>;
+    context?: RunContext<Ctx> | undefined;
     /** Strip `Retry` delays so a replay does not wait out production backoff (default `true`). */
-    fastRetry?: boolean;
+    fastRetry?: boolean | undefined;
     /** Runs the replay inside the installed hooks, so they see it. Off by default. */
-    hooks?: boolean;
+    hooks?: boolean | undefined;
     /**
      * `'throw'` (default) fails on a step the trace lacks. `'execute'` runs it for real: use it only against test
      * doubles.
      */
-    onMissing?: 'throw' | 'execute';
-    onResolved?: (step: ReplayStep, outcome: ReplayOutcome | undefined) => void;
+    onMissing?: 'throw' | 'execute' | undefined;
+    onResolved?: ((step: ReplayStep, outcome: ReplayOutcome | undefined) => void) | undefined;
 }
 
 /** The replay's outcome and, for a trace, the recorded steps the flow never asked for. */
@@ -1429,5 +1434,9 @@ export declare function replayEffect<T, E = unknown, Ctx = unknown>(
 export declare function timeTravel<T, E = unknown, Ctx = unknown>(
     flowFn: (input: any) => Effect<T, E, Ctx>,
     traceLog: TraceLog,
-    options?: { log?: (...args: any[]) => void; context?: RunContext<Ctx>; version?: string | undefined }
+    options?: {
+        log?: ((...args: any[]) => void) | undefined;
+        context?: RunContext<Ctx> | undefined;
+        version?: string | undefined;
+    }
 ): Promise<SuccessState<T> | FailureState<E>>;

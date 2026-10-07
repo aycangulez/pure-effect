@@ -94,6 +94,7 @@ pure-effect is a zero-dependency effect system for JavaScript implementing the "
 
 - `index.d.ts` is written by hand, apart from `effectPipe`'s overloads, and the `Declaration parity` test, `tsd` and `tsc -p jsconfig.json` keep it matched to `index.js`. Add any checked JavaScript to `jsconfig.json`'s `include` list.
 - The declarations support TypeScript 5.1 and later; raising the minimum is a breaking change and goes in the changelog.
+- An optional option or hook field is declared `T | undefined`, since `undefined` keeps its default, and under `exactOptionalPropertyTypes` a field declared `T` refuses a value read from configuration. `tsd` runs with that flag, and a test compiles each example under it.
 - A doc comment in `index.d.ts` is a hover: a sentence or two about what a user needs. Its reasons go in `DESIGN.md`, and a non-obvious type trick gets a one-line `//` note above its doc comment.
 - Deliberate type errors are `// @ts-expect-error` directives, never `tsd`'s `expectError`, each on one line, small enough that only the intended mistake can fail it, with a reason.
 - Change `effectPipe`'s overloads in `scripts/effect-pipe-overloads.js` and run `npm run generate`, **never by hand**.
@@ -122,7 +123,6 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 - A `Parallel`'s trigger is the first failure to finish, not the first by array order.
 - No `AbortSignal` for a whole run, and none reaches a Command outside a `Parallel`.
 - No finalizer inside a flow: cleanup is a try/finally around `runEffect` in the shell.
-- Recursing through `effectPipe` is quadratic, and that is left alone: a loop that recurses does so through a Command's `next`, which stays linear.
 - Nested pipelines for dependent values are a TypeScript cost only.
 - No join helper: `pair(f)` was built and dropped.
 - No flows written as one function: `flow(fn)` was built and dropped.
