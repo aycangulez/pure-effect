@@ -871,6 +871,14 @@ declare const importedFixture: {
 };
 expectAssignable<TraceLog>(importedFixture);
 replayEffect(typedFlow(importedFixture.initialInput), importedFixture);
+// A value the recorder could not record is marked rather than stored, and declared as JSON imports widen it, as `threw` is
+expectType<boolean | undefined>(rec.entries[0].unrecorded);
+expectType<string[] | undefined>(rec.toTrace().unrecorded);
+declare const unrecordedFixture: {
+    unrecorded: string[];
+    trace: { command: string; path: string; unrecorded: boolean; durationMs: number }[];
+};
+expectAssignable<TraceLog>(unrecordedFixture);
 
 // redact sees every kind of value a trace holds, and only those kinds
 const redactor: RecorderOptions['redact'] = (value, name, kind) => {

@@ -108,7 +108,7 @@ This distinction answers a family of bugs, and most of what follows depends on i
 | --- | --- | --- |
 | **Abort** | A `Failure` a step returned | The flow has decided, and the shell acts on it |
 | **I/O fault** | A throw from a Command's function | `Retry` exists for this |
-| **Harness error** | An `EffectTypeError`, a replay fault, or a throw from a continuation or a pure step | Not an outcome: `runEffect` rejects with it |
+| **Harness error** | An `EffectTypeError`, a replay fault, or a throw from a continuation or a pure step | Not an outcome: `runEffect` rejects with it, or the call that builds the flow throws it, for a step before the first Command |
 
 Without the distinction, `Retry` re-ran a lookup whose answer could not change, wrapped a domain error in an exhaustion it had nothing to do with, and let `onExhausted` answer a deliberate abort.
 
@@ -150,7 +150,8 @@ A malformed flow is a bug and throws. A Command that rejects is a domain outcome
 - A bad return names the node whose `next` returned it. `nextOf` names a Command by `commandName` and any other node by its type, which `chain` and `execute` both know. The message used to say only "A continuation" or "The flow", and both DX rounds found that it left the reader to search every `next`.
 - The constructors check their own arguments as the flow is built, with `describeArgument`, so a mistake is reported before the I/O it would have run. `describeArgument` calls a missing argument `undefined` rather than a missing return, and names an Effect in the wrong place by its type. Before, `Command(db.findUser(email))` ran the query while the flow was built and was then retried as an I/O fault, and `Command(fn, { name })` charged the card before rejecting with `effect.next is not a function`.
 - A `null` next counts as omitted in `Command`, as in `Parallel`.
-- An `options` argument refuses a name its function does not read (`rejectUnknownOptions`), and a constructor refuses it as the flow is built. An unread name used to run with the default, and nothing said so. In the DX experiments, a JavaScript batch given `{ concurrency: 4 }`, p-limit's name, ran with no limit, and `{ settle: true }` ran fail-fast. Agents borrow a name from a neighbouring API more often than they misspell one, so a check on values alone missed the commoner mistake. A new option is added to its function's list there, or the function refuses it.
+- An `options` argument refuses a name its function does not read, and a value it cannot use (`checkOptions`), and a constructor refuses both as the flow is built. An unread name used to run with the default, and nothing said so. In the DX experiments, a JavaScript batch given `{ concurrency: 4 }`, p-limit's name, ran with no limit, and `{ settle: true }` ran fail-fast. Agents borrow a name from a neighbouring API more often than they misspell one, so a check on values alone missed the commoner mistake.
+- Values were checked only for `Retry`, only when it ran, and as a plain `TypeError`, and most other values not at all: `settled: 'false'` ran a batch settled, `maxEntries: null` compared as 0 and recorded nothing, `stack: 'no'` recorded stacks, and `replayEffect`'s `hooks: 'false'` was refused as `callConfig.inherit`, a name the caller never wrote. Each function now lists a rule for every option it reads, a test and the words for what passes, or `null` for one that takes anything. A new option gets a rule there, or the function refuses it. A constructor's refusal is an `EffectTypeError`, and the others' a `TypeError`.
 - `malformed` builds every `EffectTypeError`. It attaches a handler to a native `Promise` it reports, so a throwing async step does not crash the process after the caller has caught the error. Only a native `Promise`, because calling `then` on a Knex or Mongoose query builder runs the query.
 
 ### Retry
@@ -158,7 +159,9 @@ A malformed flow is a bug and throws. A Command that rejects is a domain outcome
 Options:
 
 - Per-use, merged over `attempts: 3`, `delay: 100` and `backoff: 1`. An option set to `undefined` keeps its default, since that is how an absent config key arrives.
-- Checked when the `Retry` runs: `attempts` must be a positive integer, and `delay` and `backoff` finite numbers of 0 or more. An undefined `backoff` once made every wait after the first `NaN` milliseconds, which is no wait at all.
+- Checked as the `Retry` is built, with the names: `attempts` must be a positive integer, `delay` and `backoff` finite numbers of 0 or more, and `onExhausted` a function. An undefined `backoff` once made every wait after the first `NaN` milliseconds, which is no wait at all, and an `onExhausted` given the fallback Effect rather than a function returning it meant no fallback.
+- They were checked only when the `Retry` ran, a leftover of global retry options, which merged in at run time. A bad value was then reported after the Commands ahead of it, as a `TypeError`, where a misspelt name was an `EffectTypeError` as the flow was built. A `Retry` built inside a `next` is still checked only when that `next` runs, as its names are, since that is when it exists.
+- They are checked again when the `Retry` runs, since a node's options are a plain object a caller can change after building it, and a changed `attempts: 0` would make `onExhausted` a free catch. `Parallel`'s `limit` and `settled` are checked the same two ways.
 
 Outcomes:
 
@@ -299,7 +302,7 @@ A replay reproduces a cancellation rather than recomputing it:
 Edge cases:
 
 - A branch whose own code threw is a trigger like a failing one. In a replay it throws again on its own, since its code runs again on the recorded results. Once the throw is fixed, the crash trace replays as a `TimeParadox`.
-- A negative branch, a trace without decisions, and a `Resolver` answering a `'Parallel'` step with anything but a decision all replay by timing.
+- A negative branch, a trace without decisions, and a `Resolver` answering a `'Parallel'` step with `undefined` or an outcome that holds no decision all replay by timing.
 - A `'Parallel'` step neither advances `index` nor reaches `onResolved`, and `redact` never sees a decision.
 - A hook marks a cancelled `Parallel` from its decision, since `op` returns even when a branch threw.
 
@@ -315,6 +318,7 @@ Edge cases:
 
 A `Resolver` returns `{ result }`, `{ error }`, or `undefined` for "not recorded". So a Command that returned `undefined` is distinct from a step with no recording, which is what makes `onMissing` trustworthy.
 
+- Any other answer, `null` included, or a throw from a `Resolver`, rejects the replay with a `TypeError` or with what it threw, as a throw from `onResolved` does. It counted as the Command failing: `null` made the interpreter throw reading it, so a `Retry` asked again for attempts production never made, ran its fallback, and the replay reported a `Success` production never had, and `{}` replayed as a Command that returned `undefined`. A `fromTrace` replay fault, which carries the mark, passes as it is.
 - A step a trace does not hold resolves to `undefined`, just as it would from a `Resolver`, so `onMissing` applies to both. Two things win over `'execute'`: a step recorded under another name, or on a path where the trace recorded another kind of node, which is a `TimeParadox`, and a step a recorded cancellation explains, which production never ran.
 - A trace whose `dropped` is above 0 refuses `'execute'` outright, before the replay starts, since the steps a cap drops are steps production ran. The README and the missing-step message once advised `'execute'` for exactly such a trace, and replaying a capped billing batch that way charged and invoiced it again. A bare entries array and a `Resolver` carry no `dropped`, so only the docs cover them.
 - The message for a missing step names the case it may be, a step the cap dropped or one production never ran, because the fix differs.
@@ -337,7 +341,7 @@ What `reviveError` restores:
 - A subclass revives as a plain `Error`, since the trace carries a name rather than a prototype, so that check holds for plain errors.
 - A thrown value that is not an `Error` passes through unchanged.
 
-Loops: a `cause` or `errors` chain that loops back is cut where it returns, carrying that error's name and message only. Following it overflowed the stack, and `observeSteps` dropped the step with the recorder's other failures, so the trace silently lacked it. Only an error's ancestors cut the chain, so one that appears twice without a loop is carried in full both times.
+Loops: a `cause` or `errors` chain that loops back is cut where it returns, carrying that error's name and message only. Following it overflowed the stack, and `observeSteps` dropped the step with the recorder's other failures, so the trace silently lacked it. A failure like that now marks the step `unrecorded` rather than losing it. Only an error's ancestors cut the chain, so one that appears twice without a loop is carried in full both times.
 
 #### 7. Recorded values are copies, both ways
 
@@ -355,6 +359,8 @@ Without a copy, a later step that mutates a returned object rewrites what the tr
 
 - An absent `initialInput` or `context` stays `undefined`, so a redact that spreads its argument cannot invent an empty object.
 - A thrown `Error` stays one through `redact` (`redactError`). The recorder puts the `__error` mark back on an object `redact` returns for it without one, since a redact that built a fresh `{ name, message }` once dropped it, and the replay handed the flow a plain object where production had thrown an `Error`, with nothing to say so. A value that is not an object, such as `'[redacted]'`, is stored as it is. A field such an object leaves `undefined`, as `{ status: value.status }` does for an error without one, is dropped as JSON drops it, so a replay from memory matches one from storage; it once left the error replayed from memory with a field production's never had.
+- A value the recorder cannot record gets no stand-in: one `redact` throws on, or one whose copy throws, as a thrown error's `cause` getter can. The step's entry holds nothing and says `unrecorded: true`, and an `initialInput` or `context` is left out and named in the trace's own `unrecorded`. A replay stops at such a step with a `ReplayError`, even under `onMissing: 'execute'`, since production ran it; `timeTravel` refuses a trace without its input, and `replayEffect` one without its context unless `options.context` is passed. The recorder stored `'[redaction failed]'` for a `redact` throw, so the run stayed safe and the replay did not: a `redact` that read a field of a lookup that found nothing replayed it as one that found a user. Any other throw reached `observeSteps`, which dropped it with the entry: a trace lacked two attempts that charged a card, `dropped` stayed 0, and a replay under `'execute'` charged it twice more. One marker covers both, since a replay does the same for either. The new fields hold no user data, so `redact` needs no new `kind` for them.
+- So `toTrace` never throws, and the recorder no longer relies on `observeSteps` to drop its own failures, which it did silently.
 - A stand-in for a field a step checks must get the same verdict, since a replay rebuilds the flow from the redacted input. The README's recording example replaced any password with `'[redacted]'`, which passes the Quick Start's length rule, so the failed signups its `keep` stores replayed as valid ones.
 
 ### What replay proves
@@ -378,7 +384,7 @@ And since a trace matches a Command by name, a Command whose result changes shap
 
 `onResolved` is the seam for observing a replay (logging, counting, step assertions), and a `Resolver` is the seam for supplying outcomes. Narration that reaches for a `Resolver` is using the wrong one.
 
-A throw from `onResolved` stops the replay, and `replayEffect` rejects with the observer's own error, carried through a harness-marked stand-in so nothing in the flow absorbs it. It is not dropped the way `observeSteps` drops a recorder's error, because step assertions are one of the things the seam is for, and a swallowed assertion is a test that cannot fail.
+A throw from `onResolved` stops the replay, and `replayEffect` rejects with the observer's own error, carried through a harness-marked stand-in so nothing in the flow absorbs it. A `Resolver`'s throw goes the same way, for the same reason. It is not dropped the way `observeSteps` drops a recorder's error, because step assertions are one of the things the seam is for, and a swallowed assertion is a test that cannot fail.
 
 `timeTravel` narrates through `onResolved` and returns the bare outcome, since narration is its job.
 
@@ -570,14 +576,15 @@ It opens a span per run in `onRun`, a child span per Command in `onStep`, and on
 ### Recording
 
 - It keeps one recorder per run in an `AsyncLocalStorage` scope. `onRun` packages the input it is handed before the run, the first `onBeforeCommand` copies the context, and `onStep` passes `path` on.
-- An error from `keep` or the sink goes to `onSinkError`, by default `console.error`, rather than replacing the run's outcome. So does a copy of the input or context that fails, which leaves that field out of the trace: the input is copied in `onRun` ahead of the run and the context in `onBeforeCommand`, where a throw would stop the run or veto the Command.
+- An error from `keep` or the sink goes to `onSinkError`, by default `console.error`, rather than replacing the run's outcome. The wiring copies the input in `onRun` ahead of the run and the context in `onBeforeCommand`, where a throw would stop the run or veto the Command, so it relies on `toTrace` never throwing. A field it cannot copy is marked `unrecorded` on the trace and warned about, rather than left out and reported to `onSinkError` with nothing on the trace to say so.
 - A run that rejects because its own code threw is offered to `keep` as a `Failure`, and sent to the sink before the rejection is rethrown, since those are the runs most worth replaying. `recordEffect` rejects without its trace, since in a test or a script the error is already in front of the caller.
 
-Three kinds of kept trace produce a warning through `onWarning`, by default `console.warn`, once per flow:
+Four kinds of kept trace produce a warning through `onWarning`, by default `console.warn`, once per flow:
 
 - A trace of a flow that carries no input, since it cannot rebuild its flow, and the time to find out is before an incident.
 - A trace with steps named `'anonymous'`, since a replay tells steps apart by name. In the experiments, a refactor that swapped two inline arrow Commands replayed as a `Success`, with each handed the other's recorded result.
 - A trace that `maxEntries` cut short, since it replays only up to the first step it lacks, and the default cap of 500 cuts a long batch run short without anyone having chosen to.
+- A trace holding values the recorder could not record, since it replays only up to the first of them, and nothing else says so until someone replays an incident.
 
 ## Settled decisions
 

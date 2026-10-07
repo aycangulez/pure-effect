@@ -1312,6 +1312,7 @@ export type ReplayStep = {
  */
 export type ReplayOutcome = { result: unknown } | { error: unknown };
 
+/** Answers a step from a recording. Any other answer than an outcome or `undefined`, or a throw, rejects the replay. */
 export type Resolver = (step: ReplayStep) => ReplayOutcome | undefined;
 
 /** One recorded step: a Command's result or error, or a `Parallel`'s decision. */
@@ -1323,6 +1324,8 @@ export type TraceEntry = {
     /** Marks a step that threw; `false` is the same as leaving it out. */
     threw?: boolean;
     error?: unknown;
+    /** Marks a step whose value the recorder could not record, which the entry holds nothing for; a replay stops there. */
+    unrecorded?: boolean;
     /** How long the Command took in production, rounded to microseconds. */
     durationMs?: number;
 };
@@ -1333,6 +1336,8 @@ export type TraceLog<I = unknown, C = unknown> = {
     version?: string;
     initialInput?: I;
     context?: C;
+    /** The fields above, `'initialInput'` or `'context'`, that the recorder could not record and holds nothing for. */
+    unrecorded?: string[];
     dropped?: number;
     trace: TraceEntry[];
 };

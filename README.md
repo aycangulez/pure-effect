@@ -9,7 +9,7 @@
 - Inject context without touching function signatures
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks
-- Zero dependencies, about 8 KB minified and gzipped
+- Zero dependencies, about 9 KB minified and gzipped
 - Works in JavaScript, and in TypeScript 5.1 or later (full generics, bundled `.d.ts`)
 
 ## Table of Contents
@@ -422,7 +422,7 @@ configureEffect(
 );
 ```
 
-By default, successful runs are held in memory and then discarded. A run that rejects because your own code threw, such as a `TypeError` after an API changed the shape of its response, is offered to `keep` as a `Failure` carrying the thrown error, so by default its trace is kept, and the run still rejects. Replaying that trace reproduces the throw. If `keep` or the sink throws, for example because `JSON.stringify` meets a value it cannot serialize, the run keeps its own outcome and the error goes to `onSinkError`, which defaults to `console.error`. So does an input or context the example cannot copy, which it leaves out of the trace. `redact` runs before anything enters the trace, including the stored `initialInput` and `context`. `maxEntries` caps the length of a trace and reports the overflow as `dropped`; a capped trace replays only up to the first step it lacks, so the example warns through `onWarning` the first time it keeps one for a flow. It warns the same way about a flow whose steps include any named `'anonymous'`. The sink can write a trace to S3 or a database column as JSON, as long as your Commands return plain data.
+By default, successful runs are held in memory and then discarded. A run that rejects because your own code threw, such as a `TypeError` after an API changed the shape of its response, is offered to `keep` as a `Failure` carrying the thrown error, so by default its trace is kept, and the run still rejects. Replaying that trace reproduces the throw. A step before the flow's first Command runs when the flow is built, outside `runEffect`, so its throw reaches no hook and is not recorded; that run did no I/O, so its input reproduces it. If `keep` or the sink throws, for example because `JSON.stringify` meets a value it cannot serialize, the run keeps its own outcome and the error goes to `onSinkError`, which defaults to `console.error`. `redact` runs before anything enters the trace, including the stored `initialInput` and `context`. A value it throws on, or one the recorder cannot copy, is left out of the trace, which marks where with `unrecorded`. `maxEntries` caps the length of a trace and reports the overflow as `dropped`; a capped trace replays only up to the first step it lacks, so the example warns through `onWarning` the first time it keeps one for a flow. It warns the same way about a trace holding values it could not record, which replays only up to the first of them, and about a flow whose steps include any named `'anonymous'`. The sink can write a trace to S3 or a database column as JSON, as long as your Commands return plain data.
 
 The example takes the input from `onRun`, which is handed it only for a flow `effectPipe` built, so build the outermost flow with `effectPipe`. A flow that starts with a bare `Command`, `Ask`, `Retry`, or `Parallel` records no input, and `timeTravel` would rebuild it from `undefined`. A one-step pipeline is enough, as in `runEffect(effectPipe(loadProfile)(userId))`. The example warns through `onWarning`, which defaults to `console.warn`, the first time it keeps a trace of such a flow, and `timeTravel` warns when it replays one. The example also takes the context from the run's first Command, so a run that stops before any Command, for example at an `Ask` check, records no context. Such a run did no I/O, so running the flow again with its input and the context from your logs reproduces it.
 
@@ -602,7 +602,7 @@ The halt is then one of the branch's declared errors, typed like a declined card
 
 Bugs in the flow are not collected. An `EffectTypeError`, thrown for a malformed flow, and an error thrown by a `next` function or a pure step both still escape a settled `Parallel`, after the other branches are cancelled.
 
-`limit` caps how many branches run at once; the rest start as others finish. Results and recorded paths stay in array order, so a limit changes only the pacing, and a trace recorded with a limit replays the same without one. A `limit` that is not a positive integer throws a `TypeError`.
+`limit` caps how many branches run at once; the rest start as others finish. Results and recorded paths stay in array order, so a limit changes only the pacing, and a trace recorded with a limit replays the same without one. A `limit` that is not a positive integer throws an `EffectTypeError` where the `Parallel` is built.
 
 **Cancelling is a request, not a guarantee.** A cancelled branch starts no new Commands: a three-step branch whose first step is running when a sibling fails finishes that step and stops. To stop the running step itself, its function has to take the `AbortSignal` as a parameter, written without a default value, and pass it on to the I/O:
 
@@ -772,7 +772,7 @@ Retry(
 | a Command's function threw | an I/O fault | retries it | the exhaustion, once the attempts are gone |
 | a `next` function or a pure step threw, or the flow is malformed | a bug | nothing; it is thrown, not returned | nothing |
 
-In short, **you can recover from an error your I/O produced, but you cannot catch a `Failure` a step returned.** Only the code that called `runEffect` acts on it. For the same reason, do not throw business errors from a Command's function: a throw there tells `Retry` that the I/O broke, and `Retry` will try again. A throw anywhere else in the flow is treated as a bug: `runEffect` rejects with the thrown error instead of returning a `Failure`.
+In short, **you can recover from an error your I/O produced, but you cannot catch a `Failure` a step returned.** Only the code that called `runEffect` acts on it. For the same reason, do not throw business errors from a Command's function: a throw there tells `Retry` that the I/O broke, and `Retry` will try again. A throw anywhere else in the flow is treated as a bug and thrown as it is instead of returned as a `Failure`: `runEffect` rejects with it, or, from a step before the first Command, the call that builds the flow throws it.
 
 ## TypeScript: Typed Errors and Context
 
@@ -851,7 +851,7 @@ Timings are from Node 22 on a MacBook Pro with M4 Pro CPU:
 
 ## API Reference
 
-Every `options` argument and hook configuration below throws for a name it does not read, so a misspelt option fails instead of running with its default.
+Every `options` argument and hook configuration below throws for a name it does not read or a value it cannot use, so a misspelt option fails instead of running with its default. `Retry` and `Parallel` throw an `EffectTypeError` where they are built.
 
 ### Building blocks
 
@@ -895,9 +895,9 @@ Returns `{ type: 'Ask', next }`. Passes the `context` from `runEffect` into `nex
 
 Returns `{ type: 'Retry', effect, options, next }`.
 
-- `options.attempts`: Max retries, not counting the first try (default: `3`). Must be a positive integer; anything else, including `0`, throws a `TypeError`. To handle an outcome without retrying, branch on it in the Command's `next`, or isolate a failing branch with `Parallel`'s `settled`.
-- `options.delay`: Ms before the first retry (default: `100`). Must be a finite number of 0 or more, or it throws a `TypeError`.
-- `options.backoff`: Multiplier applied to the delay on each attempt (default: `1`, flat). Must be a finite number of 0 or more, or it throws a `TypeError`.
+- `options.attempts`: Max retries, not counting the first try (default: `3`). Must be a positive integer; anything else, including `0`, throws. To handle an outcome without retrying, branch on it in the Command's `next`, or isolate a failing branch with `Parallel`'s `settled`.
+- `options.delay`: Ms before the first retry (default: `100`). Must be a finite number of 0 or more.
+- `options.backoff`: Multiplier applied to the delay on each attempt (default: `1`, flat). Must be a finite number of 0 or more.
 
 An option set to `undefined` keeps its default.
 
@@ -945,14 +945,14 @@ Runs a flow and resolves with its `Success` or `Failure`.
 - `context`: what `Ask` reads, also passed to `onBeforeCommand`. `context.flowName` names the run in traces and telemetry.
 - `callConfig`: `onStep`, `onRun` and `onBeforeCommand` for this call only, added to the `configureEffect` wiring, or used alone with `inherit: false`; see [`configureEffect`](#configureeffectconfigs). `onRun` wraps the run once, retries included. A key it does not read or a hook that is not a function throws a `TypeError`, as in `configureEffect`, and so does a `retry` key, since retry options belong to each `Retry`.
 
-A flow that is not made of Effects is a bug, so `runEffect` rejects with an `EffectTypeError` that says where, rather than returning a `Failure`:
+A flow that is not made of Effects is a bug, so it throws an `EffectTypeError` that says where, rather than returning a `Failure`. The steps before a flow's first Command run as it is built, so a mistake in one of them, as in this first step, is thrown by the call that builds the flow, `registerUserFlow(input)`; a mistake after the first Command makes `runEffect` reject:
 
 ```
 Step 'validateRegistration' returned a plain object. Return Success, Failure, Command, Ask,
 Retry, or Parallel: a plain value has to be wrapped, as in Success(value).
 ```
 
-That covers a missing `return`, a `next` that returns a plain value, a step or `next` written as `async` (do the awaited work in a Command instead), and `runEffect(flow)` where `runEffect(flow(input))` was meant. The building blocks check their arguments as the flow is built, before any of its I/O runs, so `Command(db.findUser(email))`, which makes the call while the flow is built, `Command(fn, { name })`, with the metadata in `next`'s place, and a `Parallel` or `effectPipe` given the wrong thing each throw an `EffectTypeError` there. A throw from a Command's function, or from an `onBeforeCommand` veto, is a `Failure`; a throw from a `next` or a pure step is a bug too, and `runEffect` rejects with it as thrown.
+That covers a missing `return`, a `next` that returns a plain value, a step or `next` written as `async` (do the awaited work in a Command instead), and `runEffect(flow)` where `runEffect(flow(input))` was meant. The building blocks check their arguments where they are built, before their own I/O runs, so `Command(db.findUser(email))`, which makes the call while the flow is built, `Command(fn, { name })`, with the metadata in `next`'s place, and a `Parallel` or `effectPipe` given the wrong thing each throw an `EffectTypeError` there; one built inside a `next` is checked when that `next` runs. A throw from a Command's function, or from an `onBeforeCommand` veto, is a `Failure`; a throw from a `next` or a pure step is a bug too, and is thrown as it is, in the same two places.
 
 #### `configureEffect(...configs)`
 
@@ -1010,16 +1010,17 @@ onStep            C.onStep( K.onStep( cmd ) )    K.onStep
 
 Returns `{ onStep, entries, toTrace }`, a hook that records every step of a run, passed as `runEffect(flow, context, { onStep })`. Give each run its own recorder: one shared by a whole application mixes requests into one trace, which a replay refuses. `recordEffect` and the [recording example](https://github.com/aycangulez/pure-effect/blob/main/examples/recording-example.js) both do this for you.
 
-- `onStep`: the hook. Recording never changes a run's outcome; a value `redact` fails on is recorded as `'[redaction failed]'`.
+- `onStep`: the hook. Recording never changes a run's outcome. A value `redact` throws on, or one the recorder cannot copy, is left out and its entry marked, so a replay stops there with a `ReplayError` rather than hand the flow a stand-in.
 - `entries`: the steps recorded so far, one per Command and one per `Parallel`. `path` is the step's position in the flow, which a replay matches on; an older entry with `error` and no `threw` still counts as a throw.
 
 ```text
 { command, path, result, durationMs }                          a Command that returned
 { command, path, threw: true, error, durationMs }              a Command that threw
 { command: 'Parallel', path, result: { cancelled, branch } }   which branch, if any, cancelled the others
+{ command, path, unrecorded: true, durationMs }                a Command whose result or error could not be recorded
 ```
 
-- `toTrace(meta)`: the entries as a trace, with `meta`'s `initialInput`, `context`, `flowName` and `version`, copied when it is called (a part that cannot be copied, such as a function or a getter that throws, is kept as it is). If a Command can change the input or the context, as an ORM save that adds an id does, call it before the run for those and again afterwards for the entries, as `recordEffect` does.
+- `toTrace(meta)`: the entries as a trace, with `meta`'s `initialInput`, `context`, `flowName` and `version`, copied when it is called (a part that cannot be copied, such as a function or a getter that throws, is kept as it is). An `initialInput` or `context` that `redact` throws on, or whose copy fails outright, is left out and named in the trace's `unrecorded`. If a Command can change the input or the context, as an ORM save that adds an id does, call it before the run for those and again afterwards for the entries, as `recordEffect` does.
 - `options.redact(value, name, kind)`: returns what the trace stores in place of `value`. `kind` is `'result'`, `'error'`, `'initialInput'` or `'context'`, and `name` is the Command's name, or the kind. It gets a copy, so changing it in place is safe. A thrown `Error` arrives as a plain object holding its `name`, `message` and own fields, and any object returned for it replays as an `Error`.
 - `options.maxEntries`: the most entries a trace keeps; the rest are counted in `dropped`, and a replay stops at the first step the trace lacks.
 - `options.stack`: record stack traces for thrown errors (off by default).
@@ -1053,18 +1054,18 @@ Runs a flow for real while recording, returning `{ result, trace }`. Accepts `re
 
 Runs a flow with each Command answered from a trace instead of run, and returns `{ result, unreached }`: the flow's outcome, and the recorded steps it never asked for, which is where a flow that stops early shows up. A flow that no longer matches the trace ends in a `Failure` whose `error` is a `TimeParadox`, or a `ReplayError` for a step the trace lacks. Neither is thrown, so a test checks `error.name`, which tells them apart, and not only `result.type`. A malformed trace rejects with a `ReplayError`.
 
-- `traceOrResolver`: a trace, its bare entries, or a resolver, a function that answers each step with `{ result }`, `{ error }`, or `undefined` for a step it has no record of, so a trace stored in any shape can be replayed. With a resolver, `unreached` is absent, since a resolver cannot list what it holds. A resolver is also asked about each `Parallel`, with `step.type` set to `'Parallel'`: answering with the recorded cancellation as `{ result }` replays it as production decided, and anything else replays it by timing.
-- `options.context`: the context for `Ask`, by default the one the trace recorded. A resolver has none, so pass one if the flow reads `Ask`.
+- `traceOrResolver`: a trace, its bare entries, or a resolver, a function that answers each step with `{ result }`, `{ error }`, or `undefined` for a step it has no record of, so a trace stored in any shape can be replayed. Any other answer, `null` included, or a throw from the resolver, rejects the replay. With a resolver, `unreached` is absent, since a resolver cannot list what it holds. A resolver is also asked about each `Parallel`, with `step.type` set to `'Parallel'`: answering with the recorded cancellation as `{ result }` replays it as production decided, and `undefined` or any other outcome replays it by timing.
+- `options.context`: the context for `Ask`, by default the one the trace recorded. A resolver has none, so pass one if the flow reads `Ask`, and a trace whose context could not be recorded refuses to replay without one.
 - `options.onMissing`: `'throw'` (default) stops at a step the trace lacks. `'execute'` runs its Command for real, so use it only where Commands reach test doubles or only read. A trace can lack a step because a hook vetoed it in production, because it was added past the end of the recording, or because the recorder dropped it under `maxEntries`; a trace that dropped entries refuses `'execute'`, so record the flow again with a higher `maxEntries`. A flow that changed shape, as when a Command is newly wrapped in `Retry`, stops at a `TimeParadox` instead, even under `'execute'`, so record it again.
 - `options.fastRetry` (default `true`): strip `Retry` delays.
 - `options.hooks` (default `false`): run the replay inside the configured hooks, a configured recorder included, so they see the replayed steps. Off, a replay cannot reach a telemetry backend or a trace sink.
 - `options.onResolved(step, outcome)`: observes each replayed step. A throw stops the replay, and `replayEffect` rejects with it; it never changes an outcome.
 
-A trace whose entries have no `path`, written by hand or recorded before paths existed, is matched by position. That works for a sequential flow, and a `Parallel` step in such a trace is refused with a `ReplayError`, since the order branches finish in cannot tell them apart.
+A trace whose entries have no `path`, written by hand or recorded before paths existed, is matched by position. That works for a sequential flow; a Command inside a `Parallel` is refused with a `ReplayError`, since the order branches finish in cannot tell them apart.
 
 #### `timeTravel(flowFn, traceLog, options?)`
 
-Replays a trace and narrates each step with its recorded duration, naming any recorded steps that were never reached, and warning when the trace's `version` differs from `options.version` or when steps are named `'anonymous'`. Returns the flow's outcome; for the unreached entries as data, use `replayEffect`. Takes `options.context` to override the trace's, and `options.log` in place of `console.log`.
+Replays a trace and narrates each step with its recorded duration, naming any recorded steps that were never reached, and warning when the trace's `version` differs from `options.version` or when steps are named `'anonymous'`. Returns the flow's outcome; for the unreached entries as data, use `replayEffect`. A trace whose input could not be recorded is refused, since the flow is rebuilt from it. Takes `options.context` to override the trace's, and `options.log` in place of `console.log`.
 
 ## Limitations
 

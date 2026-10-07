@@ -1645,6 +1645,54 @@ describe('Recording and replay', function () {
         });
     });
 
+    it('should refuse an option value recording or replay cannot use', async function () {
+        // A name was checked and its value was not: `maxEntries: null` recorded nothing, `stack: 'no'` recorded
+        // stacks, `fastRetry: 'false'` waited no time, and `hooks: 'false'` was refused as `callConfig.inherit`, a
+        // name the caller never wrote.
+        const { flow, calls } = makeFlow();
+        for (const [options, refusal] of /** @type {const} */ ([
+            [{ maxEntries: null }, `'maxEntries' must be a positive integer or Infinity, received null.`],
+            [{ maxEntries: 0 }, `'maxEntries' must be a positive integer or Infinity, received the number 0.`],
+            [{ maxEntries: '500' }, `'maxEntries' must be a positive integer or Infinity, received the string "500".`],
+            [{ stack: 'no' }, `'stack' must be true or false, received the string "no".`],
+            [{ redact: 'email' }, `'redact' must be a function, received the string "email".`]
+        ])) {
+            // Each names the function the caller called.
+            assert.throws(() => recorder(/** @type {any} */ (options)), {
+                name: 'TypeError',
+                message: `recorder ${refusal}`
+            });
+            await assert.rejects(recordEffect(flow, { id: 'x' }, /** @type {any} */ (options)), {
+                name: 'TypeError',
+                message: `recordEffect ${refusal}`
+            });
+        }
+        assert.doesNotThrow(() => recorder({ maxEntries: Infinity, stack: undefined }));
+        assert.deepEqual(calls, { read: 0, write: 0 }, 'refused before the flow runs');
+
+        const { trace } = await recordEffect(flow, { id: 'x' });
+        Object.assign(calls, { read: 0, write: 0 });
+        for (const [options, message] of /** @type {const} */ ([
+            [{ hooks: 'false' }, /replayEffect 'hooks' must be true or false, received the string "false"/],
+            [{ fastRetry: 0 }, /replayEffect 'fastRetry' must be true or false/],
+            [
+                { onMissing: 'Execute' },
+                /replayEffect 'onMissing' must be 'throw' or 'execute', received the string "Execute"/
+            ],
+            [{ onResolved: true }, /replayEffect 'onResolved' must be a function/]
+        ])) {
+            await assert.rejects(replayEffect(flow({ id: 'x' }), trace, /** @type {any} */ (options)), {
+                name: 'TypeError',
+                message
+            });
+        }
+        await assert.rejects(timeTravel(flow, trace, /** @type {any} */ ({ log: 'console' })), {
+            name: 'TypeError',
+            message: /timeTravel 'log' must be a function/
+        });
+        assert.deepEqual(calls, { read: 0, write: 0 });
+    });
+
     it('should give a trace without paths a live tail under onMissing: execute', async function () {
         const { flow, calls } = makeFlow();
         const legacy = { trace: [{ command: 'cmdRead', result: { row: 'FROM_TRACE' } }] };
@@ -1721,10 +1769,204 @@ describe('Recording and replay', function () {
         );
         assert.equal(result.type, 'Success', "a redaction bug is not the flow's problem");
         assert.equal(valueOf(result), 'ok');
+        // Nothing is stored for the value, and the entry says why.
+        const [{ durationMs, ...entry }] = rec.entries;
+        assert.deepEqual(entry, { command: 'cmdWork', path: '0', unrecorded: true });
+    });
+
+    it('should stop a replay at a step redact threw on, rather than hand the flow a stand-in', async function () {
+        // The recorder stored '[redaction failed]' as the step's result, and a replay handed that string to the flow
+        // as what the Command returned: a lookup that found nothing replayed as one that found a user.
+        let lookups = 0;
+        const signup = (/** @type {string} */ email) =>
+            effectPipe(() =>
+                Command(
+                    function cmdFindUser() {
+                        lookups++;
+                        return null;
+                    },
+                    (found) => (found ? Failure('taken') : Success('created'))
+                )
+            )(email);
+        // The README's warning: reading a field of a lookup that found nothing.
+        const redact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
+            kind === 'result' ? { ...value, email: value.email.toLowerCase() } : value;
+        const { result, trace } = await recordEffect(signup, 'a@b.c', { redact });
+        assert.deepEqual(result, Success('created'));
+        assert.equal(lookups, 1);
+        const [{ durationMs, ...entry }] = trace.trace;
+        assert.deepEqual(entry, { command: 'cmdFindUser', path: '0', unrecorded: true });
+
+        for (const stored of [trace, JSON.parse(JSON.stringify(trace))]) {
+            for (const onMissing of /** @type {const} */ (['throw', 'execute'])) {
+                const { result: replayed, unreached } = await replayEffect(signup('a@b.c'), stored, { onMissing });
+                const error = /** @type {any} */ (errorOf(replayed));
+                assert.equal(error.name, 'ReplayError');
+                assert.match(error.message, /no outcome for 'cmdFindUser' at path '0'/);
+                assert.match(
+                    error.message,
+                    /the recorder left it out, because redact threw on it or it could not be copied/
+                );
+                assert.equal(error.path, '0');
+                assert.deepEqual(unreached, []);
+            }
+        }
+        assert.equal(lookups, 1, 'the step production ran is not run again, even under execute');
+
+        // A trace without paths, matched by position, stops there too.
+        const legacy = { trace: [{ command: 'cmdFindUser', unrecorded: true }] };
+        const { result: positional } = await replayEffect(signup('a@b.c'), legacy);
+        assert.match(/** @type {any} */ (errorOf(positional)).message, /no outcome for 'cmdFindUser' at path '0':/);
+    });
+
+    it('should mark a thrown error redact threw on as a throw that holds no error', async function () {
+        const flow = () =>
+            Command(function cmdCharge() {
+                throw Object.assign(new Error('declined'), { card: '4111111111111111' });
+            });
+        const redact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
+            if (kind === 'error') throw new Error('redact bug');
+            return value;
+        };
+        const { trace } = await recordEffect(flow, null, { redact });
+        const [{ durationMs, ...entry }] = trace.trace;
+        assert.deepEqual(entry, { command: 'cmdCharge', path: '0', threw: true, unrecorded: true });
+        assert.ok(!JSON.stringify(trace).includes('4111'));
+        const { result } = await replayEffect(flow(), trace);
+        assert.match(/** @type {any} */ (errorOf(result)).message, /no outcome for 'cmdCharge'/);
+    });
+
+    it('should mark a step whose value the recorder cannot copy, rather than drop it', async function () {
+        // A thrown error whose `cause` getter throws made the recorder's own copy throw, and the observer swallowed that
+        // along with the entry: the trace held nothing for two attempts that charged a card, `dropped` stayed 0, and a
+        // replay under onMissing: 'execute' charged the card twice more.
+        const unreadable = () =>
+            Object.defineProperty(new Error('declined'), 'cause', {
+                get() {
+                    throw new Error('getter');
+                }
+            });
+        let charges = 0;
+        const flow = () =>
+            Retry(
+                Command(function cmdCharge() {
+                    charges++;
+                    throw unreadable();
+                }),
+                { attempts: 1, delay: 0 }
+            );
+        const { result, trace } = await recordEffect(flow, null);
+        assert.equal(result.type, 'Failure', 'the run keeps its own outcome');
+        assert.equal(charges, 2);
         assert.deepEqual(
-            rec.entries.map(({ command, result }) => ({ command, result })),
-            [{ command: 'cmdWork', result: '[redaction failed]' }]
+            trace.trace.map(({ durationMs, ...entry }) => entry),
+            [
+                { command: 'cmdCharge', path: '0r0/0', threw: true, unrecorded: true },
+                { command: 'cmdCharge', path: '0r1/0', threw: true, unrecorded: true }
+            ]
         );
+        const { result: replayed } = await replayEffect(flow(), trace, { onMissing: 'execute' });
+        assert.match(/** @type {any} */ (errorOf(replayed)).message, /no outcome for 'cmdCharge' at path '0r0\/0'/);
+        assert.equal(charges, 2, 'the replay charged nothing');
+
+        // A result it cannot copy is marked the same way.
+        const unlisted = new Proxy(
+            { id: 1 },
+            {
+                ownKeys() {
+                    throw new Error('cannot list keys');
+                }
+            }
+        );
+        const { result: loaded, trace: loadedTrace } = await recordEffect(
+            () =>
+                Command(function cmdLoad() {
+                    return unlisted;
+                }),
+            null
+        );
+        assert.equal(loaded.type, 'Success');
+        const [{ durationMs, ...entry }] = loadedTrace.trace;
+        assert.deepEqual(entry, { command: 'cmdLoad', path: '0', unrecorded: true });
+    });
+
+    it('should mark an input or context the recorder cannot copy, and still run the flow', async function () {
+        // `toTrace` threw, so `recordEffect` rejected before the flow ran.
+        const unlisted = new Proxy(
+            { id: 1 },
+            {
+                ownKeys() {
+                    throw new Error('cannot list keys');
+                }
+            }
+        );
+        let calls = 0;
+        const flow = (/** @type {any} */ input) =>
+            effectPipe((/** @type {any} */ i) =>
+                Command(function cmdLoad() {
+                    calls++;
+                    return i.id;
+                })
+            )(input);
+        const { result, trace } = await recordEffect(flow, unlisted, { context: unlisted });
+        assert.deepEqual(result, Success(1));
+        assert.equal(calls, 1);
+        assert.equal(trace.initialInput, undefined);
+        assert.equal(trace.context, undefined);
+        assert.deepEqual(trace.unrecorded, ['initialInput', 'context']);
+    });
+
+    it('should leave out an input or context redact threw on, and refuse a replay that needs it', async function () {
+        // Both were stored as '[redaction failed]', so timeTravel rebuilt the flow from that string, and an Ask read
+        // it as the context.
+        const flow = (/** @type {any} */ input) =>
+            effectPipe((/** @type {any} */ i) =>
+                Ask((/** @type {any} */ ctx) =>
+                    Command(
+                        function cmdLoad() {
+                            return { id: i.id };
+                        },
+                        (/** @type {any} */ row) => Success({ ...row, tenant: ctx.tenant })
+                    )
+                )
+            )(input);
+        const throwsOn =
+            (/** @type {string[]} */ kinds) =>
+            (/** @type {any} */ value, /** @type {any} */ name, /** @type {string} */ kind) => {
+                if (kinds.includes(kind)) throw new Error('redact bug');
+                return value;
+            };
+        const context = { tenant: 'acme' };
+        const { result, trace } = await recordEffect(
+            flow,
+            { id: 1 },
+            { context, redact: throwsOn(['initialInput', 'context']) }
+        );
+        assert.deepEqual(result, Success({ id: 1, tenant: 'acme' }));
+        assert.equal(trace.initialInput, undefined);
+        assert.equal(trace.context, undefined);
+        assert.deepEqual(trace.unrecorded, ['initialInput', 'context']);
+        const stored = JSON.parse(JSON.stringify(trace));
+
+        await assert.rejects(timeTravel(flow, stored, { log: () => {} }), (/** @type {any} */ e) => {
+            assert.equal(e.name, 'ReplayError');
+            assert.match(e.message, /holds no initialInput: the recorder left it out/);
+            assert.equal(e.field, 'initialInput');
+            return true;
+        });
+        await assert.rejects(replayEffect(flow({ id: 1 }), stored), (/** @type {any} */ e) => {
+            assert.equal(e.name, 'ReplayError');
+            assert.match(e.message, /holds no context: the recorder left it out/);
+            assert.match(e.message, /Pass options\.context/);
+            assert.equal(e.field, 'context');
+            return true;
+        });
+        const { result: replayed } = await replayEffect(flow({ id: 1 }), stored, { context });
+        assert.deepEqual(replayed, result, 'a context passed in replays it');
+
+        // A trace whose redact succeeded carries no such field.
+        const { trace: clean } = await recordEffect(flow, { id: 1 }, { context });
+        assert.equal('unrecorded' in clean, false);
     });
 
     it('should keep redacted values out of the trace', async function () {
@@ -2199,6 +2441,70 @@ describe('Recording and replay', function () {
             /logger down/
         );
         assert.deepEqual(asked, ['0r0/0'], 'the recorded step was replayed once');
+    });
+
+    it('should reject a replay whose Resolver throws, without retrying the step or running its fallback', async function () {
+        // A throw from a Resolver counted as the Command failing, so the Retry asked again for attempts production
+        // never made, ran the fallback, and the replay reported a Success production never had.
+        let fallbacks = 0;
+        const flow = () =>
+            Retry(
+                Command(function cmdFindOrder() {
+                    return { total: 100 };
+                }),
+                {
+                    attempts: 2,
+                    delay: 0,
+                    onExhausted: () => {
+                        fallbacks++;
+                        return Success({ total: 0 });
+                    }
+                }
+            );
+        /** @type {string[]} */
+        const asked = [];
+        const resolve = (/** @type {any} */ step) => {
+            asked.push(step.path);
+            throw new Error('lookup bug');
+        };
+        await assert.rejects(replayEffect(flow(), resolve), /lookup bug/);
+        assert.deepEqual(asked, ['0r0/0'], 'the step was asked for once');
+        assert.equal(fallbacks, 0);
+        // The same holds for a Parallel's step, which always rejected.
+        await assert.rejects(replayEffect(Parallel([Success(1)]), resolve), /lookup bug/);
+    });
+
+    it('should reject a replay whose Resolver answers with anything but an outcome or undefined', async function () {
+        // `null` made the interpreter throw a TypeError that counted as the Command failing, so a Retry asked again
+        // and fell back; `{}` replayed as a Command that returned undefined. Only undefined means not recorded.
+        const flow = () =>
+            Retry(
+                Command(function cmdFindOrder() {
+                    return { total: 100 };
+                }),
+                { attempts: 2, delay: 0, onExhausted: () => Success({ total: 0 }) }
+            );
+        for (const answer of [null, {}, [], 'not recorded', 0]) {
+            let asked = 0;
+            const resolve = () => {
+                asked++;
+                return /** @type {any} */ (answer);
+            };
+            await assert.rejects(replayEffect(flow(), resolve), (/** @type {any} */ e) => {
+                assert.equal(e.name, 'TypeError');
+                assert.match(e.message, /A Resolver answers with \{ result \}, \{ error \}, or undefined/);
+                assert.match(e.message, /'cmdFindOrder' at path '0r0\/0'/);
+                return true;
+            });
+            assert.equal(asked, 1, `asked once when it answered ${JSON.stringify(answer)}`);
+        }
+        // A Parallel's step is held to the same rule, and an outcome that holds no decision still replays by timing.
+        await assert.rejects(
+            replayEffect(Parallel([Success(1)]), () => /** @type {any} */ (null)),
+            /'Parallel' at path '0p'/
+        );
+        const { result } = await replayEffect(Parallel([Success(1)]), () => ({ result: 'no decision' }));
+        assert.deepEqual(result, Success([1]));
     });
 
     it('should narrate a result JSON cannot print without changing the replay', async function () {
@@ -2794,10 +3100,12 @@ describe('examples/recording-example.js', function () {
         assert.deepEqual(replayed, result);
     });
 
-    it('should not let an input or a context it cannot copy decide the run', async function () {
+    it('should not let an input or a context it cannot copy decide the run, and mark it on the trace', async function () {
         // The wiring copied the context in `onBeforeCommand`, where a throw vetoes the Command, so a context that
         // could not be copied stopped the charge and failed the run, and `onSinkError` never heard of it. The input
-        // was copied in `onRun` ahead of the run, where a throw rejected the run before it started.
+        // was copied in `onRun` ahead of the run, where a throw rejected the run before it started. Caught and reported,
+        // such a field was then left out with nothing on the trace to say so, and a replay ran with an empty context.
+        // The recorder now marks it, as it marks a value redact throws on.
         const uncopyable = (/** @type {object} */ target) =>
             new Proxy(target, {
                 ownKeys() {
@@ -2806,12 +3114,15 @@ describe('examples/recording-example.js', function () {
             });
         /** @type {unknown[]} */
         const errors = [];
+        /** @type {string[]} */
+        const warnings = [];
         /** @type {any[]} */
         const written = [];
         enableRecording({
             keep: () => true,
             sink: (/** @type {any} */ t) => void written.push(t),
-            onSinkError: (error) => void errors.push(error)
+            onSinkError: (error) => void errors.push(error),
+            onWarning: (message) => void warnings.push(message)
         });
         let calls = 0;
         const charge = (/** @type {any} */ input) =>
@@ -2827,15 +3138,17 @@ describe('examples/recording-example.js', function () {
         assert.equal(calls, 1, 'the Command ran');
         assert.equal(written.length, 1, 'the trace was still kept');
         assert.equal(written[0].context, undefined);
-        assert.equal(errors.length, 1);
-        assert.match(String(/** @type {any} */ (errors[0]).message), /cannot list keys/);
+        assert.deepEqual(written[0].unrecorded, ['context']);
 
         const withInput = await runEffect(charge(uncopyable({ amount: 7 })), { tenant: 'acme' });
         assert.deepEqual(withInput, Success(7));
         assert.equal(calls, 2, 'the run started');
         assert.equal(written.length, 2);
         assert.equal(written[1].initialInput, undefined);
-        assert.equal(errors.length, 2);
+        assert.deepEqual(written[1].unrecorded, ['initialInput']);
+        assert.deepEqual(errors, [], 'nothing failed: the trace says what it lacks');
+        assert.equal(warnings.length, 1, 'the flow is warned about once');
+        assert.match(warnings[0], /could not be recorded/);
     });
 
     it('should send the trace of a run whose own code throws, and still reject', async function () {
@@ -2926,6 +3239,26 @@ describe('examples/recording-example.js', function () {
         assert.deepEqual(seen, [['secret123', 'tok_live']], 'the Command saw what the caller passed');
         assert.deepEqual(written[0].initialInput, { email: 'new@x.io' });
         assert.deepEqual(written[0].context, {});
+    });
+
+    it('should leave out an input or context redact throws on, and name both on the trace', async function () {
+        // The context is packaged at the first Command, apart from the input, so its failure has to reach the trace
+        // the run started with.
+        /** @type {any[]} */
+        const written = [];
+        enableRecording({
+            keep: () => true,
+            sink: (/** @type {any} */ t) => void written.push(t),
+            redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
+                if (kind === 'initialInput' || kind === 'context') throw new Error('redact bug');
+                return value;
+            }
+        });
+        const result = await runEffect(failing({ id: 5 }), { flowName: 'writer', tenant: 'acme' });
+        assert.equal(result.type, 'Failure', 'the run keeps its own outcome');
+        assert.equal(written[0].initialInput, undefined);
+        assert.equal(written[0].context, undefined);
+        assert.deepEqual(written[0].unrecorded, ['initialInput', 'context']);
     });
 
     it('should not let a failing sink change the outcome, and report the failure', async function () {
@@ -3048,6 +3381,38 @@ describe('examples/recording-example.js', function () {
         assert.equal(warnings.length, 1);
         assert.equal(warnings[0][1], 'long');
         assert.match(warnings[0][0], /dropped 1 entries under maxEntries \(2\)/);
+    });
+
+    it('should warn once per flow when it keeps a trace redact left values out of', async function () {
+        // A value redact throws on is left out of the trace, which replays only up to it. Nothing else says so until
+        // someone replays an incident.
+        /** @type {[string, string | undefined][]} */
+        const warnings = [];
+        enableRecording({
+            keep: () => true,
+            sink: () => {},
+            redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
+                if (kind === 'context' || name === 'cmdRead') throw new Error('redact bug');
+                return value;
+            },
+            onWarning: (message, flowName) => void warnings.push([message, flowName])
+        });
+        const flow = effectPipe(
+            () =>
+                Command(function cmdRead() {
+                    return 1;
+                }),
+            () =>
+                Command(function cmdWrite() {
+                    return 2;
+                })
+        );
+        await runEffect(flow({ id: 1 }), { flowName: 'writer' });
+        await runEffect(flow({ id: 2 }), { flowName: 'writer' });
+        assert.equal(warnings.length, 1);
+        assert.equal(warnings[0][1], 'writer');
+        assert.match(warnings[0][0], /2 of the values a kept trace holds could not be recorded/);
+        assert.match(warnings[0][0], /replays only up to the first of them/);
     });
 
     it('should warn once per flow when it keeps a trace with anonymous steps', async function () {
@@ -5378,10 +5743,23 @@ describe('Parallel limit and settled', function () {
         assert.equal(started, 1, 'the branches behind the failure should never have started');
     });
 
-    it('should reject a limit that is not a positive integer', async function () {
-        await assert.rejects(() => runEffect(Parallel([Success(1)], { limit: 0 })), TypeError);
-        await assert.rejects(() => runEffect(Parallel([Success(1)], { limit: -1 })), TypeError);
-        await assert.rejects(() => runEffect(Parallel([Success(1)], { limit: /** @type {any} */ ('3') })), TypeError);
+    it('should refuse a limit that is not a positive integer as the Parallel is built', function () {
+        for (const limit of [0, -1, 1.5, '3', null]) {
+            assert.throws(() => Parallel([Success(1)], { limit: /** @type {any} */ (limit) }), {
+                name: 'EffectTypeError',
+                message: /Parallel 'limit' must be a positive integer, received/
+            });
+        }
+    });
+
+    it('should refuse a settled that is not true or false as the Parallel is built', function () {
+        // `settled: 'false'` was truthy, so it ran the batch settled.
+        for (const settled of ['false', 1, null]) {
+            assert.throws(() => Parallel([Success(1)], { settled: /** @type {any} */ (settled) }), {
+                name: 'EffectTypeError',
+                message: /Parallel 'settled' must be true or false, received/
+            });
+        }
     });
 
     it('should hand settled branches to next as their own outcomes, in order', async function () {
@@ -6023,17 +6401,42 @@ describe('Retry attempts and the removed global retry', function () {
             return Promise.reject(new Error('down'));
         });
 
-    it('should reject attempts that are not a positive integer', async function () {
+    it('should refuse attempts that are not a positive integer as the Retry is built', function () {
         // A Retry that does not retry is not a Retry. `attempts: 0` was also the one spelling that
         // turned `onExhausted` into a plain catch at no cost, which is not what the option is for.
-        await assert.rejects(() => runEffect(Retry(failing(), { attempts: 0 })), TypeError);
-        await assert.rejects(() => runEffect(Retry(failing(), { attempts: -1 })), TypeError);
-        await assert.rejects(() => runEffect(Retry(failing(), { attempts: 1.5 })), TypeError);
-        await assert.rejects(() => runEffect(Retry(failing(), { attempts: /** @type {any} */ ('3') })), TypeError);
+        // It was checked only when the Retry ran, after the Commands ahead of it, and as a plain TypeError,
+        // while a misspelt name was an EffectTypeError as the flow was built.
+        for (const attempts of [0, -1, 1.5, '3', null]) {
+            assert.throws(() => Retry(failing(), { attempts: /** @type {any} */ (attempts) }), {
+                name: 'EffectTypeError',
+                message: /Retry 'attempts' must be a positive integer, received/
+            });
+        }
     });
 
-    it('should name the alternatives when it rejects attempts', async function () {
-        await assert.rejects(() => runEffect(Retry(failing(), { attempts: 0 })), /settled|data/);
+    it('should name the alternatives when it rejects attempts', function () {
+        assert.throws(() => Retry(failing(), { attempts: 0 }), /settled|data/);
+    });
+
+    it('should refuse an onExhausted that is not a function as the Retry is built', function () {
+        // Anything else meant no fallback, so `onExhausted: fetchCachedPrice(sku)`, the Effect rather than a
+        // function returning it, failed with the exhaustion it was written to handle.
+        assert.throws(() => Retry(failing(), { onExhausted: /** @type {any} */ (Success(0)) }), {
+            name: 'EffectTypeError',
+            message:
+                /Retry 'onExhausted' must be a function that returns the fallback, received an Effect of type 'Success'/
+        });
+    });
+
+    it('should check the options again when the Retry or Parallel runs, in case they changed', async function () {
+        // A node's options are a plain object a caller can change after building it, and a changed `attempts: 0`
+        // would make `onExhausted` a free catch.
+        const retry = Retry(failing(), { attempts: 1, delay: 0, onExhausted: () => Success('fallback') });
+        retry.options.attempts = 0;
+        await assert.rejects(runEffect(retry), { name: 'EffectTypeError', message: /Retry 'attempts'/ });
+        const parallel = Parallel([Success(1)], { limit: 1 });
+        /** @type {any} */ (parallel.options).limit = 0;
+        await assert.rejects(runEffect(parallel), { name: 'EffectTypeError', message: /Parallel 'limit'/ });
     });
 
     it('should still accept the smallest real retry', async function () {
@@ -6079,14 +6482,14 @@ describe('Retry attempts and the removed global retry', function () {
         );
     });
 
-    it('should reject a delay or backoff that is not a finite number of 0 or more', async function () {
+    it('should refuse a delay or backoff that is not a finite number of 0 or more as the Retry is built', function () {
         // Each of these used to mean no wait at all, so a flapping dependency was called back to back.
-        for (const bad of [NaN, -1, Infinity, '250ms']) {
+        for (const bad of [NaN, -1, Infinity, '250ms', null]) {
             const value = /** @type {any} */ (bad);
-            await assert.rejects(() => runEffect(Retry(failing(), { delay: value })), TypeError);
-            await assert.rejects(() => runEffect(Retry(failing(), { backoff: value })), TypeError);
+            assert.throws(() => Retry(failing(), { delay: value }), { name: 'EffectTypeError' });
+            assert.throws(() => Retry(failing(), { backoff: value }), { name: 'EffectTypeError' });
         }
-        await assert.rejects(() => runEffect(Retry(failing(), { delay: NaN })), /Retry 'delay' .*the number NaN/);
+        assert.throws(() => Retry(failing(), { delay: NaN }), /Retry 'delay' .*the number NaN/);
     });
 
     it('should refuse a retry key in configureEffect', function () {
