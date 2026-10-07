@@ -10,7 +10,7 @@
 //    merges them.
 // 4. Running flows: the helpers `Retry` and `Parallel` run on, the interpreter, and `runEffect`.
 // 5. Recording and replay: the trace format and replay errors, copying values and errors into a trace,
-//    `recorder`, built on `observeSteps`, and `recordEffect`, then `fromTrace`, `replayEffect` and `timeTravel`.
+//    `recorder` and `recordEffect`, then `fromTrace`, `replayEffect` and `timeTravel`.
 //
 // A new definition goes in the section it serves, which is usually the one that calls it.
 
@@ -1327,29 +1327,28 @@ const isReplayOutcome = (value) => isObject(value) && ('result' in value || 'err
  * the step took in production, rounded to microseconds. `path` is what a replay matches on.
  * `threw` marks a step that threw. The `error` key alone cannot, since JSON drops it when the value is
  * `undefined`, as it is for `reject()` with no argument or an error `redact` removed. `unrecorded`
- * marks a step the entry holds no result or error for, since `redact` threw on it or the recorder could
- * not copy it.
+ * marks a step the entry holds no result or error for, and says why.
  * @typedef {{
  *   command: string,
  *   path?: string,
  *   result?: any,
  *   threw?: true,
  *   error?: any,
- *   unrecorded?: true,
+ *   unrecorded?: UnrecordedCause,
  *   durationMs?: number
  * }} TraceEntry
  */
 
 /**
  * The reference trace format produced by `recorder`. A convenience, not a contract:
- * `replayEffect` takes a Resolver, so any storage shape works. `unrecorded` names the trace's own
- * fields, `'initialInput'` or `'context'`, that it holds nothing for, for the same reasons.
+ * `replayEffect` takes a Resolver, so any storage shape works. `unrecorded` gives, for each of the
+ * trace's own `initialInput` and `context` that it holds nothing for, why.
  * @typedef {{
  *   flowName?: string,
  *   version?: string,
  *   initialInput?: any,
  *   context?: any,
- *   unrecorded?: string[],
+ *   unrecorded?: { initialInput?: UnrecordedCause, context?: UnrecordedCause },
  *   dropped?: number,
  *   trace: TraceEntry[]
  * }} TraceLog
@@ -1492,10 +1491,33 @@ const recorderOptionRules = {
 };
 
 /**
- * Stands in for a value the recorder could not record: one `redact` threw on, or one it could not copy. It stores
- * nothing in its place and marks the spot, since anything stored there would replay as what production saw.
+ * Why the recorder stored nothing for a value: `redact` threw on it, or copying it threw, as a getter on it can. It
+ * stores nothing rather than a stand-in, since anything stored there would replay as what production saw.
+ * @typedef {'redact' | 'copy'} UnrecordedCause
  */
-const unrecorded = Symbol('pure-effect.unrecorded');
+
+/**
+ * What recording a value produced: the value the trace stores, or why it stores none.
+ * @typedef {{ value: any } | { unrecorded: UnrecordedCause }} Recorded
+ */
+
+/**
+ * Runs one of the two parts of recording a value that can throw, and names it when it does. They are the only parts
+ * caught, since each runs the caller's code or reads the caller's value, and a throw from either must not reach the
+ * run. Every read of the caller's value, or of a copy of it, happens inside one, since a copy keeps a getter that
+ * throws as it is. Nothing else in the recorder throws, and nothing else may: a throw that escaped while a Command's
+ * error was being recorded would take that error's place, and `Retry` would retry it.
+ * @param {UnrecordedCause} cause
+ * @param {() => any} compute
+ * @returns {Recorded}
+ */
+const recordPart = (cause, compute) => {
+    try {
+        return { value: compute() };
+    } catch {
+        return { unrecorded: cause };
+    }
+};
 
 /**
  * @typedef {Object} TraceMeta
@@ -1506,8 +1528,8 @@ const unrecorded = Symbol('pure-effect.unrecorded');
  */
 
 /**
- * An array, a plain object, or an object with no prototype: the shapes `copyAround` rebuilds itself rather
- * than handing to `structuredClone`.
+ * An array, a plain object, or an object with no prototype: the shapes `copyAround` rebuilds with their prototype
+ * rather than first handing to `structuredClone`.
  * @param {object} value
  * @returns {boolean}
  */
@@ -1518,9 +1540,12 @@ const isPlainContainer = (value) => {
 };
 
 /**
- * Copies what `structuredClone` refused. Arrays and plain objects are rebuilt and everything inside them is
- * copied in turn, so only the parts that cannot be copied, such as a function or an object holding one, are
- * kept as they are. A context holding a logger is the usual case.
+ * Copies what `structuredClone` refused. Arrays and objects are rebuilt and everything inside them is copied in
+ * turn, so only a function, and a getter that throws, are kept as they are. A context holding a logger is the usual
+ * case. An object `structuredClone` cannot copy on its own either, such as an instance of a class with an
+ * arrow-function field, is rebuilt as plain data, as `structuredClone` rebuilds an instance it can copy. It was kept
+ * as it was, so `redact` was handed the object the run held, and a redact that deleted a field in place changed
+ * the run.
  *
  * @param {any} value
  * @param {Map<object, any>} seen - Copies made so far, so a cycle is copied as a cycle
@@ -1529,15 +1554,16 @@ const isPlainContainer = (value) => {
 const copyAround = (value, seen) => {
     if (!isObject(value)) return value;
     if (seen.has(value)) return seen.get(value);
-    if (!isPlainContainer(value)) {
+    const plain = isPlainContainer(value);
+    // Tried on its own first, so an instance it can copy keeps what only `structuredClone` keeps, such as a Date's
+    // time; one it refuses is rebuilt below as plain data.
+    if (!plain) {
         try {
             return structuredClone(value);
-        } catch {
-            return value;
-        }
+        } catch {}
     }
     /** @type {any} */
-    const copy = Array.isArray(value) ? [] : Object.create(Object.getPrototypeOf(value));
+    const copy = Array.isArray(value) ? [] : Object.create(plain ? Object.getPrototypeOf(value) : Object.prototype);
     seen.set(value, copy);
     for (const key of Object.keys(value)) {
         let item;
@@ -1560,8 +1586,8 @@ const copyAround = (value, seen) => {
 /**
  * Snapshots a value on its way into a trace, and on its way out of one in a replay, so a later mutation
  * cannot rewrite what the trace says a step returned. The copy is also what `redact` is handed, so it has
- * to be one the flow never sees. A value that cannot be cloned whole is copied around the parts that
- * cannot be copied.
+ * to be one the flow never sees. A value that cannot be cloned whole is copied around the functions and
+ * throwing getters in it, the only parts it keeps as they are.
  *
  * @param {any} value
  * @returns {any}
@@ -1575,58 +1601,7 @@ const snapshot = (value) => {
     }
 };
 
-/**
- * @typedef {Object} StepStart
- * @property {string} name - The Command's identity: `meta.name`, else `cmd.name`, else 'anonymous'.
- * @property {string} type - 'Command', or 'Parallel' for a Parallel's decision.
- * @property {string} [path] - The Command's position in the Effect tree.
- */
-
-/**
- * @typedef {Object} StepEnd
- * @property {string} name
- * @property {string} type
- * @property {string} [path]
- * @property {any} [result] - What the Command returned, when it succeeded.
- * @property {any} [error] - What it threw, when it did not.
- * @property {number} durationMs
- */
-
 const now = () => (typeof performance === 'object' ? performance.now() : Date.now());
-
-/**
- * Wraps a step observer into an `onStep` that cannot change the run: `op` always runs, its result is
- * returned, its error propagates, and anything the observer throws is dropped.
- *
- * @param {(start: StepStart) => (end: StepEnd) => void} handler - Returns a finisher for the outcome
- * @returns {StepRunner}
- */
-const observeSteps = (handler) => async (name, type, op, path) => {
-    /** @type {((end: StepEnd) => void) | undefined} */
-    let finish;
-    try {
-        finish = handler({ name, type, path });
-    } catch {
-        finish = undefined;
-    }
-    const report = (/** @type {StepEnd} */ end) => {
-        try {
-            if (finish) finish(end);
-        } catch {
-            // Observation does not get to decide the outcome, so a broken observer is dropped.
-        }
-    };
-
-    const started = now();
-    try {
-        const result = await op();
-        report({ name, type, path, result, durationMs: now() - started });
-        return result;
-    } catch (error) {
-        report({ name, type, path, error, durationMs: now() - started });
-        throw error;
-    }
-};
 
 /**
  * Builds an `onStep` hook that records every Command's result or error and every Parallel's decision, plus
@@ -1651,82 +1626,102 @@ const recorder = (options = {}) => {
     };
 
     /**
-     * What the trace stores for a value, or `unrecorded` when it can store nothing. `redact` is the caller's code, and
-     * copying a value runs its getters, so either can throw, and the throw must not reach the run. A stand-in such as
-     * '[redaction failed]' replayed as the step's result, and the flow branched on it; and a throw the observer
-     * swallowed took the whole entry with it, so the trace lacked a step production ran.
+     * Copies a value for the trace and redacts the copy, for a step's result or one of the trace's own fields.
+     * @returns {Recorded}
      */
-    const recordValue = (/** @type {() => any} */ compute) => {
+    const copyAndRedact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
+        const copied = recordPart('copy', () => snapshot(value));
+        if ('unrecorded' in copied) return copied;
+        return recordPart('redact', () => redact(copied.value, name, kind));
+    };
+
+    /**
+     * Copies a thrown value's serialized form and redacts the copy. An Error stays marked as one when redact
+     * returns an object without the mark, as one that builds a fresh object from `name` and `message` does:
+     * otherwise the replay handed the flow a plain object where production had thrown an Error.
+     * @returns {Recorded}
+     */
+    const recordError = (/** @type {any} */ thrown, /** @type {string} */ name) => {
+        // Whether it was an Error is read here, inside the part that catches, since it reads the caller's value, and
+        // before redact runs, since redact may change the copy it is handed.
+        const copied = recordPart('copy', () => {
+            const copy = snapshot(serializeError(thrown, stack));
+            return { copy, wasError: isObject(copy) && copy.__error === true };
+        });
+        if ('unrecorded' in copied) return copied;
+        const { copy: serialized, wasError } = copied.value;
+        // Reading what redact returned is part of redacting, since that value is the caller's.
+        return recordPart('redact', () => {
+            const redacted = redact(serialized, name, 'error');
+            const rebuilt = wasError && isObject(redacted) && !Array.isArray(redacted) && redacted.__error !== true;
+            if (!rebuilt) return redacted;
+            // A field it left undefined, as `{ status: value.status }` leaves one the error did not have, is dropped
+            // as JSON drops it, so a replay from memory matches one from storage, and production.
+            const fields = Object.entries(redacted).filter(([, field]) => field !== undefined);
+            return { __error: true, ...Object.fromEntries(fields) };
+        });
+    };
+
+    /**
+     * Records each step it wraps and changes nothing about it: `op` runs, its result is returned, and its error
+     * propagates. A value it cannot record is left out, and the entry says why, rather than the entry being lost.
+     * @type {StepRunner}
+     */
+    const onStep = async (name, type, op, path) => {
+        const started = now();
+        const record = (/** @type {boolean} */ threw, /** @type {any} */ outcome) => {
+            const durationMs = Math.round((now() - started) * 1000) / 1000;
+            // A Parallel's result is its decision, which holds no user data and must survive intact for a replay
+            // to reproduce it, so it is not redacted.
+            const recorded = threw
+                ? recordError(outcome, name)
+                : type === 'Parallel'
+                  ? recordPart('copy', () => snapshot(outcome))
+                  : copyAndRedact(outcome, name, 'result');
+            /** @type {TraceEntry} */
+            const step = threw ? { command: name, path, threw: true } : { command: name, path };
+            if ('unrecorded' in recorded) push({ ...step, unrecorded: recorded.unrecorded, durationMs });
+            else
+                push(
+                    threw
+                        ? { ...step, error: recorded.value, durationMs }
+                        : { ...step, result: recorded.value, durationMs }
+                );
+        };
         try {
-            return compute();
-        } catch {
-            return unrecorded;
+            const result = await op();
+            record(false, result);
+            return result;
+        } catch (error) {
+            record(true, error);
+            throw error;
         }
     };
 
     /**
-     * Snapshots one of the trace's own fields and redacts the copy. `undefined` is left alone so a flow with no
-     * context does not acquire an empty object from a redact function that spreads its argument.
-     */
-    const redactField = (/** @type {any} */ value, /** @type {string} */ kind) =>
-        value === undefined ? undefined : recordValue(() => redact(snapshot(value), kind, kind));
-
-    /**
-     * Snapshots a thrown value's serialized form and redacts the copy. An Error stays marked as one when redact
-     * returns an object without the mark, as one that builds a fresh object from `name` and `message` does:
-     * otherwise the replay handed the flow a plain object where production had thrown an Error.
-     */
-    const redactError = (/** @type {any} */ thrown, /** @type {string} */ name) => {
-        const serialized = snapshot(serializeError(thrown, stack));
-        // Read before redact runs, since it may change the copy it is handed.
-        const wasError = isObject(serialized) && serialized.__error === true;
-        const redacted = redact(serialized, name, 'error');
-        const rebuilt = wasError && isObject(redacted) && !Array.isArray(redacted) && redacted.__error !== true;
-        if (!rebuilt) return redacted;
-        // A field it left undefined, as `{ status: value.status }` leaves one the error did not have, is dropped as
-        // JSON drops it, so a replay from memory matches one from storage, and production.
-        const fields = Object.entries(redacted).filter(([, field]) => field !== undefined);
-        return { __error: true, ...Object.fromEntries(fields) };
-    };
-
-    const onStep = observeSteps(({ name, type, path }) => (end) => {
-        const durationMs = Math.round(end.durationMs * 1000) / 1000;
-        const threw = 'error' in end;
-        // A Parallel's result is its decision, which holds no user data and must survive intact for a replay
-        // to reproduce it, so it is not redacted.
-        const value = recordValue(() =>
-            threw
-                ? redactError(end.error, name)
-                : type === 'Parallel'
-                  ? snapshot(end.result)
-                  : redact(snapshot(end.result), name, 'result')
-        );
-        /** @type {TraceEntry} */
-        const step = threw ? { command: name, path, threw: true } : { command: name, path };
-        // A value it could not record is left out, and the entry says so, so a replay stops at this step.
-        if (value === unrecorded) push({ ...step, unrecorded: true, durationMs });
-        else push(threw ? { ...step, error: value, durationMs } : { ...step, result: value, durationMs });
-    });
-
-    /**
      * Redacts and copies `meta.initialInput` and `meta.context` when it is called, so call it before the run
      * when the run can change them, and take `dropped` and `trace` from a second call once it ends. A field it
-     * cannot record is left out and named in `unrecorded`, so a replay that needs it refuses. It never throws.
+     * cannot record is left out and named in `unrecorded` with why, so a replay that needs it refuses. It never
+     * throws. `undefined` is left alone, so a flow with no context does not acquire an empty object from a redact
+     * function that spreads its argument.
      * @param {TraceMeta} [meta]
      * @returns {TraceLog}
      */
     const toTrace = (meta = {}) => {
-        const initialInput = redactField(meta.initialInput, 'initialInput');
-        const context = redactField(meta.context, 'context');
-        const unrecordedFields = [];
-        if (initialInput === unrecorded) unrecordedFields.push('initialInput');
-        if (context === unrecorded) unrecordedFields.push('context');
+        const field = (/** @type {any} */ value, /** @type {string} */ kind) =>
+            value === undefined ? { value } : copyAndRedact(value, kind, kind);
+        const initialInput = field(meta.initialInput, 'initialInput');
+        const context = field(meta.context, 'context');
+        /** @type {{ initialInput?: UnrecordedCause, context?: UnrecordedCause }} */
+        const unrecorded = {};
+        if ('unrecorded' in initialInput) unrecorded.initialInput = initialInput.unrecorded;
+        if ('unrecorded' in context) unrecorded.context = context.unrecorded;
         return {
             flowName: meta.flowName,
             version: meta.version,
-            initialInput: initialInput === unrecorded ? undefined : initialInput,
-            context: context === unrecorded ? undefined : context,
-            ...(unrecordedFields.length > 0 ? { unrecorded: unrecordedFields } : {}),
+            initialInput: 'value' in initialInput ? initialInput.value : undefined,
+            context: 'value' in context ? context.value : undefined,
+            ...(Object.keys(unrecorded).length > 0 ? { unrecorded } : {}),
             dropped,
             trace: entries.slice()
         };
@@ -1850,11 +1845,11 @@ const fromTrace = (traceLog, options = {}) => {
     const resolveEntry = (/** @type {TraceEntry} */ entry, /** @type {ReplayStep} */ step) => {
         if (onEntry) onEntry(entry);
         // Production ran this step, so it stops the replay rather than run live under `onMissing`.
-        if (entry.unrecorded === true) {
+        if (entry.unrecorded !== undefined) {
             throw unrecordedError(
                 `outcome for '${step.name}' at path '${step.path}'`,
-                "Production ran the step, so onMissing: 'execute' does not run it either. Make redact handle every " +
-                    "value, keep the step's result or error to plain data, and record the flow again to replay past it.",
+                entry.unrecorded,
+                "Production ran the step, so onMissing: 'execute' does not run it either. To replay past it,",
                 { command: step.name, index: step.index, path: step.path }
             );
         }
@@ -1988,29 +1983,41 @@ const missingStepError = (step, describe, droppedEntries) => {
     });
 };
 
+/** What each cause the recorder writes means, and what fixes it, for a replay error. */
+const unrecordedReasons = new Map([
+    ['redact', ['redact threw on it', 'make redact handle every value it is given, null included']],
+    ['copy', ['it could not be copied, as when a getter on it throws', 'keep it to plain data']]
+]);
+
 /**
  * The error for a replay that needs a value the recorder could not record, which the trace holds nothing for.
  * @param {string} what - What the trace lacks, as the message names it
- * @param {string} advice - What to do about it
+ * @param {unknown} cause - Why, as the trace records it
+ * @param {string} lead - What that means for this replay, leading into the fix
  * @param {Object} props - The fields that locate it, such as `path`
  * @returns {Error}
  */
-const unrecordedError = (what, advice, props) =>
-    replayError(
-        `The trace holds no ${what}: the recorder left it out, because redact threw on it or it could not be ` +
-            `copied. ${advice}`,
+const unrecordedError = (what, cause, lead, props) => {
+    // A cause the recorder does not write, as a hand-built trace may hold, is not guessed at.
+    const [reason, fix] = unrecordedReasons.get(/** @type {string} */ (cause)) ?? [
+        'it could not be recorded',
+        'find out what kept it out'
+    ];
+    return replayError(
+        `The trace holds no ${what}: ${reason}, so the recorder left it out. ${lead} ${fix}, and record the flow again.`,
         props
     );
+};
 
 /**
- * Whether the recorder left one of a trace's own fields out, as it does one it could not record.
+ * Why the recorder left one of a trace's own fields out, or `undefined` when it did not.
  * @param {TraceLog | undefined} traceLog
  * @param {'initialInput' | 'context'} field
- * @returns {boolean}
+ * @returns {unknown}
  */
-const isUnrecorded = (traceLog, field) => {
-    const fields = traceLog?.unrecorded;
-    return Array.isArray(fields) && fields.includes(field);
+const unrecordedCause = (traceLog, field) => {
+    const fields = /** @type {any} */ (traceLog?.unrecorded);
+    return isObject(fields) ? fields[field] : undefined;
 };
 
 /**
@@ -2084,11 +2091,12 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     const traceLog = fromResolver || Array.isArray(traceOrResolver) ? undefined : traceOrResolver;
     // Defaults to the trace's context: an `Ask` gate replayed with another one takes another branch, and
     // no paradox flags it. For the same reason, a trace that holds none because it could not be recorded needs one.
-    if (options.context == null && isUnrecorded(traceLog, 'context')) {
+    const contextCause = unrecordedCause(traceLog, 'context');
+    if (options.context == null && contextCause !== undefined) {
         throw unrecordedError(
             'context',
-            'A replay with an empty one could take another branch at an Ask. Pass options.context, or record the ' +
-                'flow again once the context can be recorded.',
+            contextCause,
+            'A replay with an empty one could take another branch at an Ask: pass options.context, or',
             { field: 'context' }
         );
     }
@@ -2202,10 +2210,9 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
     checkOptions(options, 'timeTravel', { log: [isFunction, 'a function'], context: null, version: null });
     const { log = console.log, context, version } = options;
     const { initialInput, trace, flowName, version: traceVersion } = traceLog;
-    if (isUnrecorded(traceLog, 'initialInput')) {
-        throw unrecordedError('initialInput', 'The flow is rebuilt from it, so record the flow again once it can be.', {
-            field: 'initialInput'
-        });
+    const inputCause = unrecordedCause(traceLog, 'initialInput');
+    if (inputCause !== undefined) {
+        throw unrecordedError('initialInput', inputCause, 'The flow is rebuilt from it, so', { field: 'initialInput' });
     }
     // `message` is non-enumerable on Error, so JSON.stringify alone would drop it. JSON.stringify throws on
     // a BigInt and on a cycle, and narration must not be what fails a replay.

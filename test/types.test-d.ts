@@ -872,11 +872,11 @@ declare const importedFixture: {
 expectAssignable<TraceLog>(importedFixture);
 replayEffect(typedFlow(importedFixture.initialInput), importedFixture);
 // A value the recorder could not record is marked rather than stored, and declared as JSON imports widen it, as `threw` is
-expectType<boolean | undefined>(rec.entries[0].unrecorded);
-expectType<string[] | undefined>(rec.toTrace().unrecorded);
+expectType<string | undefined>(rec.entries[0].unrecorded);
+expectType<{ initialInput?: string; context?: string } | undefined>(rec.toTrace().unrecorded);
 declare const unrecordedFixture: {
-    unrecorded: string[];
-    trace: { command: string; path: string; unrecorded: boolean; durationMs: number }[];
+    unrecorded: { context: string };
+    trace: { command: string; path: string; unrecorded: string; durationMs: number }[];
 };
 expectAssignable<TraceLog>(unrecordedFixture);
 

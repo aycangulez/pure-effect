@@ -1324,8 +1324,8 @@ export type TraceEntry = {
     /** Marks a step that threw; `false` is the same as leaving it out. */
     threw?: boolean;
     error?: unknown;
-    /** Marks a step whose value the recorder could not record, which the entry holds nothing for; a replay stops there. */
-    unrecorded?: boolean;
+    /** Why the entry holds no value: `'redact'` threw on it, or copying it threw (`'copy'`). A replay stops there. */
+    unrecorded?: string;
     /** How long the Command took in production, rounded to microseconds. */
     durationMs?: number;
 };
@@ -1336,8 +1336,8 @@ export type TraceLog<I = unknown, C = unknown> = {
     version?: string;
     initialInput?: I;
     context?: C;
-    /** The fields above, `'initialInput'` or `'context'`, that the recorder could not record and holds nothing for. */
-    unrecorded?: string[];
+    /** Why the trace holds no `initialInput` or `context`, as an entry's `unrecorded` says it for a step. */
+    unrecorded?: { initialInput?: string; context?: string };
     dropped?: number;
     trace: TraceEntry[];
 };
@@ -1375,7 +1375,10 @@ export type RecordOptions<Ctx = unknown> = RecorderOptions & {
     version?: string | undefined;
 };
 
-/** Runs a flow for real and returns its outcome with a trace, which keeps the input's type for the replay. */
+/**
+ * Runs a flow for real and returns its outcome with a trace, which keeps the input's type for the replay. That type is
+ * wrong when `redact` changes the input, or the trace marks it `unrecorded`.
+ */
 export declare function recordEffect<I, T, E = unknown, Ctx = unknown>(
     flowFn: (input: I) => Effect<T, E, Ctx>,
     initialInput: I,

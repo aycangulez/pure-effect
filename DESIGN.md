@@ -234,11 +234,13 @@ Undoing work: a fail-fast `Parallel` drops the values of the branches that succe
 - **Anything that wraps `onStep` passes `path` on as the fourth argument.** A wrapper that drops it records a trace without paths, which cannot replay a `Parallel`. In TypeScript it no longer compiles, since `StepRunner` declares `path` as present.
 - Only the innermost hook can pass `op` an argument, the recorded decision, since `chainHooks` hands outer hooks a closure that takes none. Replay's hook is per-call, and so innermost.
 
-### `observeSteps`
+### The recorder only watches
 
-`observeSteps(handler)` (internal) is the contract for a hook that only watches: `op` always runs, its result is returned, its error propagates, and anything the observer throws is dropped.
+The recorder's `onStep` runs `op`, returns its result and lets its error propagate. Recording never changes that, because the recorder catches exactly the two parts of recording a value that run the caller's code or read the caller's value: `redact`, and the copy, which runs the value's getters. `recordPart` wraps each and names the one that threw, and the value is marked `unrecorded` with that cause.
 
-It exists because the raw hooks let a throwing `redact` turn a successful run into a `Failure`. Keep it minimal: `recorder` is its only caller and needs only `onStep`. The `durationMs` on each trace entry comes from it, rounded to microseconds.
+- There is no catch-all. The raw hooks once let a throwing `redact` turn a successful run into a `Failure`, and `observeSteps`, a wrapper that dropped anything the observer threw, was the answer. Once `redact` and the copy were caught where they run, nothing else in the recorder could throw, so `observeSteps`' catches could not be reached from its only caller, and it was folded into the recorder.
+- A catch-all would hide a bug in the recorder as a value it could not record, blamed on the caller's `redact` or data. Without one, nothing else in the recorder may throw, and that has to hold by construction: a throw that escaped while a Command's error was being recorded would take that error's place, and `Retry` would retry it as an I/O fault. That happened once, after the catch-all went: `recordError` read the copy of a thrown value outside `recordPart`, and the copy keeps a getter that throws as it is, so a thrown object with one lost both its attempts from the trace and had its error replaced. So every read of the caller's value, or of a copy of it, happens inside `recordPart`, and a new part that runs the caller's code goes through it too.
+- The `durationMs` on each trace entry is measured around `op`, and rounded to microseconds.
 
 ## Recording and replay
 
@@ -341,13 +343,14 @@ What `reviveError` restores:
 - A subclass revives as a plain `Error`, since the trace carries a name rather than a prototype, so that check holds for plain errors.
 - A thrown value that is not an `Error` passes through unchanged.
 
-Loops: a `cause` or `errors` chain that loops back is cut where it returns, carrying that error's name and message only. Following it overflowed the stack, and `observeSteps` dropped the step with the recorder's other failures, so the trace silently lacked it. A failure like that now marks the step `unrecorded` rather than losing it. Only an error's ancestors cut the chain, so one that appears twice without a loop is carried in full both times.
+Loops: a `cause` or `errors` chain that loops back is cut where it returns, carrying that error's name and message only. Following it overflowed the stack, and the recorder's catch-all dropped the step with its other failures, so the trace silently lacked it. A failure like that now marks the step `unrecorded: 'copy'` rather than losing it. Only an error's ancestors cut the chain, so one that appears twice without a loop is carried in full both times.
 
 #### 7. Recorded values are copies, both ways
 
 Without a copy, a later step that mutates a returned object rewrites what the trace says an earlier step returned.
 
-- `snapshot` copies with `structuredClone`, or a JSON round trip without it. When that throws, `copyAround` rebuilds arrays and plain objects and keeps only the parts that cannot be copied, such as a function or a logger, as they are. It does not fall back to JSON, which would drop those functions even in memory.
+- `snapshot` copies with `structuredClone`, or a JSON round trip without it. When that throws, `copyAround` rebuilds arrays and objects and keeps only a function, and a getter that throws, as they are. It does not fall back to JSON, which would drop those functions even in memory.
+- An object `structuredClone` refuses on its own, such as an instance of a class with an arrow-function field, is rebuilt as plain data, as `structuredClone` rebuilds an instance it can copy. It was kept as it was, so the trace held the object the run held, and `redact` was handed it: one that deleted a password in place changed what the run's `next` received, the incident below, still open for any value that could not be cloned. A replay from memory now gets that plain data too, as one from JSON does, so a context holding a logger replays without the logger's methods; the README already says to keep the context to plain values.
 - A property whose getter throws when read, as a lazy client's does, is kept as it is too, getter and all. Reading it once made `toTrace` throw, so `recordEffect` rejected before the run and the reference wiring vetoed the run's first Command.
 - `redact` is handed the copy, so a redact that deletes a field in place never reaches the run, and what it returns is not copied again. One written as `delete value.password` once saved users without a password, but only while recording was installed.
 - Replay copies on the way out, in `entryToOutcome`, so a replayed step or a caller that mutates a value cannot change the next replay.
@@ -359,8 +362,8 @@ Without a copy, a later step that mutates a returned object rewrites what the tr
 
 - An absent `initialInput` or `context` stays `undefined`, so a redact that spreads its argument cannot invent an empty object.
 - A thrown `Error` stays one through `redact` (`redactError`). The recorder puts the `__error` mark back on an object `redact` returns for it without one, since a redact that built a fresh `{ name, message }` once dropped it, and the replay handed the flow a plain object where production had thrown an `Error`, with nothing to say so. A value that is not an object, such as `'[redacted]'`, is stored as it is. A field such an object leaves `undefined`, as `{ status: value.status }` does for an error without one, is dropped as JSON drops it, so a replay from memory matches one from storage; it once left the error replayed from memory with a field production's never had.
-- A value the recorder cannot record gets no stand-in: one `redact` throws on, or one whose copy throws, as a thrown error's `cause` getter can. The step's entry holds nothing and says `unrecorded: true`, and an `initialInput` or `context` is left out and named in the trace's own `unrecorded`. A replay stops at such a step with a `ReplayError`, even under `onMissing: 'execute'`, since production ran it; `timeTravel` refuses a trace without its input, and `replayEffect` one without its context unless `options.context` is passed. The recorder stored `'[redaction failed]'` for a `redact` throw, so the run stayed safe and the replay did not: a `redact` that read a field of a lookup that found nothing replayed it as one that found a user. Any other throw reached `observeSteps`, which dropped it with the entry: a trace lacked two attempts that charged a card, `dropped` stayed 0, and a replay under `'execute'` charged it twice more. One marker covers both, since a replay does the same for either. The new fields hold no user data, so `redact` needs no new `kind` for them.
-- So `toTrace` never throws, and the recorder no longer relies on `observeSteps` to drop its own failures, which it did silently.
+- A value the recorder cannot record gets no stand-in: one `redact` throws on, or one whose copy throws, as a thrown error's `cause` getter can. The step's entry holds nothing and says why, as `unrecorded: 'redact'` or `unrecorded: 'copy'`, and an `initialInput` or `context` is left out and given its cause in the trace's own `unrecorded`, as in `{ context: 'copy' }`. A replay stops at such a step with a `ReplayError`, even under `onMissing: 'execute'`, since production ran it; `timeTravel` refuses a trace without its input, and `replayEffect` one without its context unless `options.context` is passed. The recorder stored `'[redaction failed]'` for a `redact` throw, so the run stayed safe and the replay did not: a `redact` that read a field of a lookup that found nothing replayed it as one that found a user. A throw from copying reached `observeSteps`, which dropped it with the entry: a trace lacked two attempts that charged a card, `dropped` stayed 0, and a replay under `'execute'` charged it twice more. One marker covers both, since a replay does the same for either, and it carries the cause, so the replay's error names it and its fix rather than guessing between them. A cause the recorder does not write, as a hand-built trace may hold, is reported as not recorded, without a guess. The new fields hold no user data, so `redact` needs no new `kind` for them.
+- So `toTrace` never throws.
 - A stand-in for a field a step checks must get the same verdict, since a replay rebuilds the flow from the redacted input. The README's recording example replaced any password with `'[redacted]'`, which passes the Quick Start's length rule, so the failed signups its `keep` stores replayed as valid ones.
 
 ### What replay proves
@@ -384,7 +387,7 @@ And since a trace matches a Command by name, a Command whose result changes shap
 
 `onResolved` is the seam for observing a replay (logging, counting, step assertions), and a `Resolver` is the seam for supplying outcomes. Narration that reaches for a `Resolver` is using the wrong one.
 
-A throw from `onResolved` stops the replay, and `replayEffect` rejects with the observer's own error, carried through a harness-marked stand-in so nothing in the flow absorbs it. A `Resolver`'s throw goes the same way, for the same reason. It is not dropped the way `observeSteps` drops a recorder's error, because step assertions are one of the things the seam is for, and a swallowed assertion is a test that cannot fail.
+A throw from `onResolved` stops the replay, and `replayEffect` rejects with the observer's own error, carried through a harness-marked stand-in so nothing in the flow absorbs it. A `Resolver`'s throw goes the same way, for the same reason. It is not absorbed the way the recorder absorbs a throw from `redact`, because step assertions are one of the things the seam is for, and a swallowed assertion is a test that cannot fail.
 
 `timeTravel` narrates through `onResolved` and returns the bare outcome, since narration is its job.
 
@@ -534,7 +537,7 @@ It takes a `CommandState`, not an `Effect`, since the runtime throws for anythin
 - `StepRunner`'s `path` and `onRun`'s `flowName` and `initialInput` are declared present, since the runtime always passes them. So a wrapper that calls another hook without passing one on does not compile.
 - `redact`'s value is `any`, since every redact spreads or reads it.
 - `version` accepts `undefined` explicitly for `exactOptionalPropertyTypes`, which `tsd` does not run with, so that one was checked by hand and is not pinned.
-- `recordEffect` types the trace's input from the input passed in, so a `redact` that changes its shape makes that type wrong.
+- `recordEffect` types the trace's input from the input passed in, so a `redact` that changes its shape makes that type wrong, and so does an input the trace marks `unrecorded`, which it holds none of. Typing it `I | undefined` would put a `!` in every `replayEffect(flow(trace.initialInput), trace)`, which the typed input exists to avoid; `timeTravel` refuses such a trace instead.
 
 #### `Parallel` reads its types from the branches
 
@@ -754,7 +757,7 @@ The name `inherit` was chosen over `global`, Node's alias for `globalThis`, and 
 ### What is internal stays internal
 
 - `fromTrace` is not exported. A caller with traces in another shape writes a `Resolver`, and one who only wants to watch uses `onResolved`. Export it again if rewriting outcomes from a reference trace comes up, since `onResolved`'s return value is ignored.
-- `observeSteps` was briefly exported as `observe` and removed, since it cost 270 bytes for one internal caller and no consumer, the same argument that removed `tap`.
+- `observeSteps` was briefly exported as `observe` and removed, since it cost 270 bytes for one internal caller and no consumer, the same argument that removed `tap`. It was later folded into the recorder, its only caller, once its catches could no longer be reached (see [The recorder only watches](#the-recorder-only-watches)).
 - `chainHooks` was briefly exported and folded into `configureEffect`, since a merge is only useful on the way into a configuration.
 
 ### A helper ships only when users would otherwise copy a library rule
@@ -845,7 +848,7 @@ The signal edge was narrowed, not guarded, in October 2026. It used to cover any
 - Assert on the returned data, such as Commands, Failures and traces, rather than on side effects. That is the usage pattern the library exists for.
 - Reset the hooks in every suite with `beforeEach(() => configureEffect())`, a bare call. Hooks are process-wide and outlive a suite, and `configureEffect({})` adds an empty layer rather than resetting. Suites guarded that way once ran under whatever the previous suite had installed, and stayed green only because the leaked hooks wrote to arrays nobody read. The first suite resets too, since being declared first is luck rather than isolation.
 - Count I/O in replay tests. Their Commands count their own invocations, so a test can assert that a replay performed none, and a replay is checked from memory and from JSON.
-- Test behaviour through the public surface. Composition such as `configureEffect merging` and `Per-call inherit` is checked by what runs rather than by inspecting a merged object, and an internal such as `observeSteps` is reached through its only public consumer.
+- Test behaviour through the public surface. Composition such as `configureEffect merging` and `Per-call inherit` is checked by what runs rather than by inspecting a merged object, and an internal such as `fromTrace` is reached through its only public consumer.
 - Anchor an equation to a value. The `Kleisli laws` suite checks the laws by running both sides. A `chain` that dropped every continuation would satisfy them with both sides equally broken, so it also anchors one composition to the value and I/O computed by hand.
 - Each example file has a suite, so a change to the hook contract breaks the examples rather than letting them rot. The telemetry suite injects a stub through the example's `tracer` option, which is why that option exists.
 - Audit the guidance when behaviour changes. Write the flow a careful reader would write after reading each documented sharp edge, and run it: twice the code here moved and the README's advice did not move with it.

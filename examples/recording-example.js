@@ -81,7 +81,9 @@ export function recordingHooks(options = {}) {
             try {
                 if (keep(result)) {
                     const { dropped = 0, trace } = rec.toTrace();
-                    const unrecorded = (head.unrecorded?.length ?? 0) + trace.filter((e) => e.unrecorded).length;
+                    const unrecorded =
+                        Object.keys(head.unrecorded ?? {}).length +
+                        trace.filter((e) => e.unrecorded !== undefined).length;
                     warnAboutReplay(flowName, initialInput, dropped, trace, unrecorded);
                     await sink({ ...head, dropped, trace });
                 }
@@ -170,8 +172,7 @@ export function recordingHooks(options = {}) {
         const withContext = store.rec.toTrace({ context });
         store.head.context = withContext.context;
         // A context it could not record is left out, and the trace the run started with has to say so too.
-        const missing = withContext.unrecorded ?? [];
-        if (missing.length > 0) store.head.unrecorded = [...(store.head.unrecorded ?? []), ...missing];
+        if (withContext.unrecorded) store.head.unrecorded = { ...store.head.unrecorded, ...withContext.unrecorded };
     };
 
     return { onRun, onStep, onBeforeCommand };

@@ -1017,10 +1017,11 @@ Returns `{ onStep, entries, toTrace }`, a hook that records every step of a run,
 { command, path, result, durationMs }                          a Command that returned
 { command, path, threw: true, error, durationMs }              a Command that threw
 { command: 'Parallel', path, result: { cancelled, branch } }   which branch, if any, cancelled the others
-{ command, path, unrecorded: true, durationMs }                a Command whose result or error could not be recorded
+{ command, path, unrecorded, durationMs }                      a Command whose result or error could not be recorded,
+                                                               because 'redact' threw on it or the 'copy' failed
 ```
 
-- `toTrace(meta)`: the entries as a trace, with `meta`'s `initialInput`, `context`, `flowName` and `version`, copied when it is called (a part that cannot be copied, such as a function or a getter that throws, is kept as it is). An `initialInput` or `context` that `redact` throws on, or whose copy fails outright, is left out and named in the trace's `unrecorded`. If a Command can change the input or the context, as an ORM save that adds an id does, call it before the run for those and again afterwards for the entries, as `recordEffect` does.
+- `toTrace(meta)`: the entries as a trace, with `meta`'s `initialInput`, `context`, `flowName` and `version`, copied when it is called (a part that cannot be copied, such as a function or a getter that throws, is kept as it is). An `initialInput` or `context` that `redact` throws on, or whose copy fails outright, is left out, and the trace's `unrecorded` says why, as in `{ context: 'copy' }`. If a Command can change the input or the context, as an ORM save that adds an id does, call it before the run for those and again afterwards for the entries, as `recordEffect` does.
 - `options.redact(value, name, kind)`: returns what the trace stores in place of `value`. `kind` is `'result'`, `'error'`, `'initialInput'` or `'context'`, and `name` is the Command's name, or the kind. It gets a copy, so changing it in place is safe. A thrown `Error` arrives as a plain object holding its `name`, `message` and own fields, and any object returned for it replays as an `Error`.
 - `options.maxEntries`: the most entries a trace keeps; the rest are counted in `dropped`, and a replay stops at the first step the trace lacks.
 - `options.stack`: record stack traces for thrown errors (off by default).

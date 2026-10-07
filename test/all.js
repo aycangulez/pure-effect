@@ -1771,7 +1771,7 @@ describe('Recording and replay', function () {
         assert.equal(valueOf(result), 'ok');
         // Nothing is stored for the value, and the entry says why.
         const [{ durationMs, ...entry }] = rec.entries;
-        assert.deepEqual(entry, { command: 'cmdWork', path: '0', unrecorded: true });
+        assert.deepEqual(entry, { command: 'cmdWork', path: '0', unrecorded: 'redact' });
     });
 
     it('should stop a replay at a step redact threw on, rather than hand the flow a stand-in', async function () {
@@ -1795,7 +1795,7 @@ describe('Recording and replay', function () {
         assert.deepEqual(result, Success('created'));
         assert.equal(lookups, 1);
         const [{ durationMs, ...entry }] = trace.trace;
-        assert.deepEqual(entry, { command: 'cmdFindUser', path: '0', unrecorded: true });
+        assert.deepEqual(entry, { command: 'cmdFindUser', path: '0', unrecorded: 'redact' });
 
         for (const stored of [trace, JSON.parse(JSON.stringify(trace))]) {
             for (const onMissing of /** @type {const} */ (['throw', 'execute'])) {
@@ -1803,10 +1803,8 @@ describe('Recording and replay', function () {
                 const error = /** @type {any} */ (errorOf(replayed));
                 assert.equal(error.name, 'ReplayError');
                 assert.match(error.message, /no outcome for 'cmdFindUser' at path '0'/);
-                assert.match(
-                    error.message,
-                    /the recorder left it out, because redact threw on it or it could not be copied/
-                );
+                assert.match(error.message, /: redact threw on it, so the recorder left it out\./);
+                assert.match(error.message, /make redact handle every value it is given, null included/);
                 assert.equal(error.path, '0');
                 assert.deepEqual(unreached, []);
             }
@@ -1814,9 +1812,14 @@ describe('Recording and replay', function () {
         assert.equal(lookups, 1, 'the step production ran is not run again, even under execute');
 
         // A trace without paths, matched by position, stops there too.
-        const legacy = { trace: [{ command: 'cmdFindUser', unrecorded: true }] };
+        const legacy = { trace: [{ command: 'cmdFindUser', unrecorded: 'redact' }] };
         const { result: positional } = await replayEffect(signup('a@b.c'), legacy);
         assert.match(/** @type {any} */ (errorOf(positional)).message, /no outcome for 'cmdFindUser' at path '0':/);
+
+        // A cause the library does not write, as a hand-built trace may hold, still stops, and is not guessed at.
+        const handBuilt = { trace: [{ command: 'cmdFindUser', path: '0', unrecorded: /** @type {any} */ (true) }] };
+        const { result: unknown } = await replayEffect(signup('a@b.c'), handBuilt);
+        assert.match(/** @type {any} */ (errorOf(unknown)).message, /: it could not be recorded, so the recorder/);
     });
 
     it('should mark a thrown error redact threw on as a throw that holds no error', async function () {
@@ -1830,10 +1833,25 @@ describe('Recording and replay', function () {
         };
         const { trace } = await recordEffect(flow, null, { redact });
         const [{ durationMs, ...entry }] = trace.trace;
-        assert.deepEqual(entry, { command: 'cmdCharge', path: '0', threw: true, unrecorded: true });
+        assert.deepEqual(entry, { command: 'cmdCharge', path: '0', threw: true, unrecorded: 'redact' });
         assert.ok(!JSON.stringify(trace).includes('4111'));
         const { result } = await replayEffect(flow(), trace);
         assert.match(/** @type {any} */ (errorOf(result)).message, /no outcome for 'cmdCharge'/);
+
+        // What redact returns is its own: one the recorder cannot read while keeping it an Error is blamed on redact.
+        const unreadable = new Proxy(
+            {},
+            {
+                ownKeys() {
+                    throw new Error('cannot list keys');
+                }
+            }
+        );
+        const { trace: rebuilt } = await recordEffect(flow, null, {
+            redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
+                kind === 'error' ? unreadable : value
+        });
+        assert.equal(rebuilt.trace[0].unrecorded, 'redact');
     });
 
     it('should mark a step whose value the recorder cannot copy, rather than drop it', async function () {
@@ -1861,12 +1879,15 @@ describe('Recording and replay', function () {
         assert.deepEqual(
             trace.trace.map(({ durationMs, ...entry }) => entry),
             [
-                { command: 'cmdCharge', path: '0r0/0', threw: true, unrecorded: true },
-                { command: 'cmdCharge', path: '0r1/0', threw: true, unrecorded: true }
+                { command: 'cmdCharge', path: '0r0/0', threw: true, unrecorded: 'copy' },
+                { command: 'cmdCharge', path: '0r1/0', threw: true, unrecorded: 'copy' }
             ]
         );
         const { result: replayed } = await replayEffect(flow(), trace, { onMissing: 'execute' });
-        assert.match(/** @type {any} */ (errorOf(replayed)).message, /no outcome for 'cmdCharge' at path '0r0\/0'/);
+        assert.match(
+            /** @type {any} */ (errorOf(replayed)).message,
+            /no outcome for 'cmdCharge' at path '0r0\/0': it could not be copied, as when a getter on it throws/
+        );
         assert.equal(charges, 2, 'the replay charged nothing');
 
         // A result it cannot copy is marked the same way.
@@ -1887,7 +1908,44 @@ describe('Recording and replay', function () {
         );
         assert.equal(loaded.type, 'Success');
         const [{ durationMs, ...entry }] = loadedTrace.trace;
-        assert.deepEqual(entry, { command: 'cmdLoad', path: '0', unrecorded: true });
+        assert.deepEqual(entry, { command: 'cmdLoad', path: '0', unrecorded: 'copy' });
+    });
+
+    it('should never let recording a thrown value replace it or lose its entry', async function () {
+        // The recorder read a property of the thrown value's copy outside the part that catches, and the copy of an
+        // instance it could not clone was the live value, so a getter that throws there escaped the recorder: the
+        // trace lost both attempts, and the recorder's error replaced the Command's own, retried as an I/O fault.
+        const proxied = new Proxy(new (class Thrown {})(), {
+            get(target, key) {
+                if (key === '__error') throw new Error('getter');
+                return Reflect.get(target, key);
+            }
+        });
+        // The copy keeps a getter that throws as it is, so reading the copy runs it.
+        const withGetter = {
+            get __error() {
+                throw new Error('getter');
+            }
+        };
+        for (const hostile of [proxied, withGetter]) {
+            let calls = 0;
+            const flow = () =>
+                Retry(
+                    Command(function cmdCharge() {
+                        calls++;
+                        throw hostile;
+                    }),
+                    { attempts: 1, delay: 0 }
+                );
+            const { result, trace } = await recordEffect(flow, null);
+            assert.equal(/** @type {any} */ (errorOf(result)).lastError, hostile, "the Command's own error");
+            assert.equal(calls, 2);
+            assert.deepEqual(
+                trace.trace.map((e) => e.path),
+                ['0r0/0', '0r1/0'],
+                'both attempts are recorded'
+            );
+        }
     });
 
     it('should mark an input or context the recorder cannot copy, and still run the flow', async function () {
@@ -1913,7 +1971,7 @@ describe('Recording and replay', function () {
         assert.equal(calls, 1);
         assert.equal(trace.initialInput, undefined);
         assert.equal(trace.context, undefined);
-        assert.deepEqual(trace.unrecorded, ['initialInput', 'context']);
+        assert.deepEqual(trace.unrecorded, { initialInput: 'copy', context: 'copy' });
     });
 
     it('should leave out an input or context redact threw on, and refuse a replay that needs it', async function () {
@@ -1945,19 +2003,19 @@ describe('Recording and replay', function () {
         assert.deepEqual(result, Success({ id: 1, tenant: 'acme' }));
         assert.equal(trace.initialInput, undefined);
         assert.equal(trace.context, undefined);
-        assert.deepEqual(trace.unrecorded, ['initialInput', 'context']);
+        assert.deepEqual(trace.unrecorded, { initialInput: 'redact', context: 'redact' });
         const stored = JSON.parse(JSON.stringify(trace));
 
         await assert.rejects(timeTravel(flow, stored, { log: () => {} }), (/** @type {any} */ e) => {
             assert.equal(e.name, 'ReplayError');
-            assert.match(e.message, /holds no initialInput: the recorder left it out/);
+            assert.match(e.message, /holds no initialInput: redact threw on it, so the recorder left it out/);
             assert.equal(e.field, 'initialInput');
             return true;
         });
         await assert.rejects(replayEffect(flow({ id: 1 }), stored), (/** @type {any} */ e) => {
             assert.equal(e.name, 'ReplayError');
-            assert.match(e.message, /holds no context: the recorder left it out/);
-            assert.match(e.message, /Pass options\.context/);
+            assert.match(e.message, /holds no context: redact threw on it, so the recorder left it out/);
+            assert.match(e.message, /pass options\.context/);
             assert.equal(e.field, 'context');
             return true;
         });
@@ -3138,14 +3196,14 @@ describe('examples/recording-example.js', function () {
         assert.equal(calls, 1, 'the Command ran');
         assert.equal(written.length, 1, 'the trace was still kept');
         assert.equal(written[0].context, undefined);
-        assert.deepEqual(written[0].unrecorded, ['context']);
+        assert.deepEqual(written[0].unrecorded, { context: 'copy' });
 
         const withInput = await runEffect(charge(uncopyable({ amount: 7 })), { tenant: 'acme' });
         assert.deepEqual(withInput, Success(7));
         assert.equal(calls, 2, 'the run started');
         assert.equal(written.length, 2);
         assert.equal(written[1].initialInput, undefined);
-        assert.deepEqual(written[1].unrecorded, ['initialInput']);
+        assert.deepEqual(written[1].unrecorded, { initialInput: 'copy' });
         assert.deepEqual(errors, [], 'nothing failed: the trace says what it lacks');
         assert.equal(warnings.length, 1, 'the flow is warned about once');
         assert.match(warnings[0], /could not be recorded/);
@@ -3258,7 +3316,7 @@ describe('examples/recording-example.js', function () {
         assert.equal(result.type, 'Failure', 'the run keeps its own outcome');
         assert.equal(written[0].initialInput, undefined);
         assert.equal(written[0].context, undefined);
-        assert.deepEqual(written[0].unrecorded, ['initialInput', 'context']);
+        assert.deepEqual(written[0].unrecorded, { initialInput: 'redact', context: 'redact' });
     });
 
     it('should not let a failing sink change the outcome, and report the failure', async function () {
@@ -3808,7 +3866,7 @@ describe('Recorded step timings', function () {
     });
 
     it('should not let an observation failure change the outcome', async function () {
-        // The guarantee `observeSteps` exists for, reached through its only caller.
+        // What the recorder's two catches are for: a redact that throws marks its value and leaves the run alone.
         let ran = 0;
         const rec = recorder({
             redact: () => {
@@ -4069,8 +4127,64 @@ describe('Recorded values are snapshots', function () {
         assert.equal(entry.options.retries, 1, 'an object without a prototype is copied');
         assert.equal(Object.getPrototypeOf(entry.options), null, 'and keeps having none');
         assert.equal(entry.options.onRetry, options.onRetry);
-        assert.equal(entry.logger, logger, 'an instance that cannot be cloned is kept as it is');
-        assert.equal(entry.callback, callback, 'and so is a function');
+        // An instance that cannot be cloned was kept as it is, so the trace held the live object: see the next test.
+        assert.notEqual(entry.logger, logger, 'an instance that cannot be cloned is copied too');
+        assert.equal(
+            Object.getPrototypeOf(entry.logger),
+            Object.prototype,
+            'as plain data, as structuredClone copies one'
+        );
+        assert.equal(entry.logger.write, logger.write, 'around the function it holds');
+        assert.equal(entry.callback, callback, 'and a function is kept as it is');
+    });
+
+    it('should copy an object it cannot clone, so an in-place redact never reaches the run', async function () {
+        // A class with an arrow-function field cannot be cloned, and the copy fell back to the live object. So redact
+        // was handed the object the run held, and one that deleted the password in place changed what next received:
+        // the run returned undefined where it returned the password without recording, the incident DESIGN.md records
+        // as fixed for values that can be cloned. The trace held the live object too, so a later change rewrote it.
+        class User {
+            email = 'a@b.c';
+            password = 'secret';
+            save = () => {};
+        }
+        const user = new User();
+        const flow = () =>
+            Command(
+                function cmdLoadUser() {
+                    return user;
+                },
+                (/** @type {any} */ u) => Success(u.password)
+            );
+        const { result, trace } = await recordEffect(flow, null, {
+            redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
+                if (kind === 'result') delete value.password;
+                return value;
+            }
+        });
+        assert.deepEqual(result, Success('secret'), 'the run is what it is without recording');
+        assert.equal(user.password, 'secret');
+        const recorded = /** @type {any} */ (trace.trace[0].result);
+        assert.notEqual(recorded, user);
+        assert.equal(recorded.password, undefined, 'the trace holds the redacted copy');
+        user.email = 'changed@later.io';
+        assert.equal(recorded.email, 'a@b.c', 'a later change does not rewrite it');
+
+        // A replay from memory hands the flow a copy as well.
+        const { result: replayed } = await replayEffect(
+            Command(
+                function cmdLoadUser() {
+                    return user;
+                },
+                (/** @type {any} */ u) => {
+                    u.email = 'replayed';
+                    return Success(u.email);
+                }
+            ),
+            trace
+        );
+        assert.deepEqual(replayed, Success('replayed'));
+        assert.equal(recorded.email, 'a@b.c', 'the replay did not rewrite the trace');
     });
 
     it('should copy a cycle in a value that cannot be cloned as a cycle', async function () {
