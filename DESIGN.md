@@ -218,7 +218,7 @@ Undoing work: a fail-fast `Parallel` drops the values of the branches that succe
 - `chainHooks` merges the layers into `globalConfig`, earliest outermost. `onStep` and `onRun` are wrappers that nest, so a thrown Command unwinds from the innermost hook back out, and `onBeforeCommand` interceptors run in order. Keep those semantics if the hook shapes change.
 - A slot no layer defines is absent, and `interpret` picks the library default where it reads the slot.
 - A leftover `retry` key throws from `configureEffect` and from `callConfig`, checked before any layer is installed. It is migration scaffolding and comes out at 1.0.
-- `checkConfiguration` refuses a key no hook is named, a hook that is not a function, and a configuration that is not an object, from `configureEffect` before any layer is installed and from `callConfig` before the run. A misspelt `onstep` was ignored, so telemetry or recording switched off with nothing to say so, and `onStep: 42` made every Command an I/O fault, so `Retry` retried a configuration mistake and reported an exhausted outage for a Command that never ran. A hook left `undefined` or `null` is a slot left unset.
+- `checkConfiguration` refuses a key no hook is named, a hook that is not a function, and a configuration that is not an object, from `configureEffect` before any layer is installed and from `callConfig` before the run. A misspelt `onstep` was ignored, so telemetry or recording switched off with nothing to say so, and `onStep: 42` made every Command an I/O fault, so `Retry` retried a configuration mistake and reported an exhausted outage for a Command that never ran. Only `undefined` leaves a configuration or a hook out, as in `configureEffect(flag ? hooks : undefined)`. `null` and the other falsy values were skipped too, which the types never allowed, so a kill switch wired as `killSwitch ?? null` switched itself off with nothing to say so.
 
 ### Per-call configuration
 
@@ -344,6 +344,7 @@ Loops: a `cause` or `errors` chain that loops back is cut where it returns, carr
 Without a copy, a later step that mutates a returned object rewrites what the trace says an earlier step returned.
 
 - `snapshot` copies with `structuredClone`, or a JSON round trip without it. When that throws, `copyAround` rebuilds arrays and plain objects and keeps only the parts that cannot be copied, such as a function or a logger, as they are. It does not fall back to JSON, which would drop those functions even in memory.
+- A property whose getter throws when read, as a lazy client's does, is kept as it is too, getter and all. Reading it once made `toTrace` throw, so `recordEffect` rejected before the run and the reference wiring vetoed the run's first Command.
 - `redact` is handed the copy, so a redact that deletes a field in place never reaches the run, and what it returns is not copied again. One written as `delete value.password` once saved users without a password, but only while recording was installed.
 - Replay copies on the way out, in `entryToOutcome`, so a replayed step or a caller that mutates a value cannot change the next replay.
 - The trace's own `initialInput` and `context` are copied when the run starts. `toTrace` copies what it is given at the moment it is called, so `recordEffect` calls it before the run, and so does the reference wiring. Otherwise an ORM save that assigns an id to the object it is handed rewrote what the trace said production received.
@@ -353,7 +354,7 @@ Without a copy, a later step that mutates a returned object rewrites what the tr
 `redact` sees results, serialized errors, and the trace's own `initialInput` and `context`, told apart by its `kind` argument. **Keep that coverage complete if the trace format grows a field**, since a field `redact` cannot see is a field that leaks.
 
 - An absent `initialInput` or `context` stays `undefined`, so a redact that spreads its argument cannot invent an empty object.
-- A thrown `Error` stays one through `redact` (`redactError`). The recorder puts the `__error` mark back on an object `redact` returns for it without one, since a redact that built a fresh `{ name, message }` once dropped it, and the replay handed the flow a plain object where production had thrown an `Error`, with nothing to say so. A value that is not an object, such as `'[redacted]'`, is stored as it is.
+- A thrown `Error` stays one through `redact` (`redactError`). The recorder puts the `__error` mark back on an object `redact` returns for it without one, since a redact that built a fresh `{ name, message }` once dropped it, and the replay handed the flow a plain object where production had thrown an `Error`, with nothing to say so. A value that is not an object, such as `'[redacted]'`, is stored as it is. A field such an object leaves `undefined`, as `{ status: value.status }` does for an error without one, is dropped as JSON drops it, so a replay from memory matches one from storage; it once left the error replayed from memory with a field production's never had.
 - A stand-in for a field a step checks must get the same verdict, since a replay rebuilds the flow from the redacted input. The README's recording example replaced any password with `'[redacted]'`, which passes the Quick Start's length rule, so the failed signups its `keep` stores replayed as valid ones.
 
 ### What replay proves
@@ -569,7 +570,7 @@ It opens a span per run in `onRun`, a child span per Command in `onStep`, and on
 ### Recording
 
 - It keeps one recorder per run in an `AsyncLocalStorage` scope. `onRun` packages the input it is handed before the run, the first `onBeforeCommand` copies the context, and `onStep` passes `path` on.
-- An error from `keep` or the sink goes to `onSinkError`, by default `console.error`, rather than replacing the run's outcome.
+- An error from `keep` or the sink goes to `onSinkError`, by default `console.error`, rather than replacing the run's outcome. So does a copy of the input or context that fails, which leaves that field out of the trace: the input is copied in `onRun` ahead of the run and the context in `onBeforeCommand`, where a throw would stop the run or veto the Command.
 - A run that rejects because its own code threw is offered to `keep` as a `Failure`, and sent to the sink before the rejection is rethrown, since those are the runs most worth replaying. `recordEffect` rejects without its trace, since in a test or a script the error is already in front of the caller.
 
 Three kinds of kept trace produce a warning through `onWarning`, by default `console.warn`, once per flow:
@@ -912,6 +913,10 @@ The size badge, `img.shields.io/bundlejs/size/pure-effect`, measures the latest 
 A correction to the README, the JSDoc, `CLAUDE.md` or this file changes nothing the library does. So a changelog, which says what changed for a user of the library, has nothing to report. And a commit message, which says why the code changed, would only restate the diff by listing the documents updated alongside it.
 
 So a docs change that ships with a behaviour change goes unmentioned in both, and one that ships alone gets no changelog entry. A commit that changes only documentation still needs a message, and it says why the docs changed.
+
+### Changelog entries are ordered by importance
+
+Someone upgrading reads each section from the top and may stop before its end, so the entry most likely to need a change in their code, or to change what their runs do, comes first. A breaking change leads, then what affects the most users. The order entries were written in says nothing to that reader, and the October 2026 `Unreleased` section had put a check on misspelt hooks above the change to every `Failure`'s shape.
 
 ### The README's `Load Tests` section is re-measured by nothing
 

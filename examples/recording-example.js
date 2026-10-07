@@ -30,7 +30,8 @@ import { configureEffect, recorder, Failure } from 'pure-effect';
  *           failures only by default. Return `true` to keep everything, or sample. A run whose own code threw is
  *           offered as a Failure carrying the thrown error.
  * @property {(error: unknown, flowName?: string) => void} [onSinkError] - Receives an error thrown by `keep` or
- *           `sink`. Defaults to `console.error`.
+ *           `sink`, or by copying the run's input or context, which leaves that field out of the trace. Defaults to
+ *           `console.error`.
  * @property {(message: string, flowName?: string) => void} [onWarning] - Receives a warning, once per flow, about a
  *           kept trace that will not replay as recorded: it has no input, `maxEntries` cut it short, or some of its
  *           steps are named 'anonymous'. Defaults to `console.warn`.
@@ -59,11 +60,27 @@ export function recordingHooks(options = {}) {
     /** Warnings already given, as `kind:flowName`. */
     const warned = new Set();
 
+    /**
+     * Copies part of a run into its trace. A copy that fails is reported rather than thrown: in `onRun` a throw would
+     * stop the run before it started, and in `onBeforeCommand` it would veto the Command.
+     * @param {ReturnType<typeof recorder>} rec
+     * @param {Parameters<ReturnType<typeof recorder>['toTrace']>[0]} meta
+     * @param {string} flowName
+     */
+    const packaged = (rec, meta, flowName) => {
+        try {
+            return rec.toTrace(meta);
+        } catch (error) {
+            reportSinkError(error, flowName);
+            return undefined;
+        }
+    };
+
     /** @type {RunWrapper} */
     const onRun = async (effect, pipeline, flowName, initialInput) => {
         const rec = recorder({ redact, maxEntries, stack });
         // Packaged before the run, so a Command that changes its input cannot rewrite what the trace says it received.
-        const head = rec.toTrace({ flowName, initialInput });
+        const head = packaged(rec, { flowName, initialInput }, flowName) ?? rec.toTrace({ flowName });
         return scope.run({ rec, head, contextCaptured: false }, async () => {
             /** @type {{ result: SuccessState<any> | FailureState<any> } | { error: unknown }} */
             let outcome;
@@ -153,7 +170,7 @@ export function recordingHooks(options = {}) {
         const store = scope.getStore();
         if (!store || store.contextCaptured) return;
         store.contextCaptured = true;
-        store.head.context = store.rec.toTrace({ context }).context;
+        store.head.context = packaged(store.rec, { context }, store.head.flowName ?? '')?.context;
     };
 
     return { onRun, onStep, onBeforeCommand };

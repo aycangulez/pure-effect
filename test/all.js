@@ -1821,6 +1821,39 @@ describe('Recording and replay', function () {
         assert.ok(/** @type {any} */ (result).error instanceof Error);
     });
 
+    it('should replay an error redact rebuilt the same from memory as from JSON', async function () {
+        // Picking fields the error did not have, as `{ status: value.status }` does, left `status: undefined` on the
+        // error replayed from memory, which JSON drops, so the two replays and production disagreed.
+        const flow = (/** @type {any} */ input) =>
+            effectPipe(() =>
+                Command(function cmdCall() {
+                    throw new Error('down');
+                })
+            )(input);
+        const redact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
+            kind === 'error' ? { name: value.name, message: value.message, status: value.status } : value;
+        const { result, trace } = await recordEffect(flow, 'in', { redact });
+        const { result: fromMemory } = await replayEffect(flow('in'), trace);
+        const { result: fromJson } = await replayEffect(flow('in'), JSON.parse(JSON.stringify(trace)));
+        assert.deepEqual(fromMemory, result);
+        assert.deepEqual(fromJson, result);
+    });
+
+    it('should keep an undefined field on an error redact passed through, as production had it', async function () {
+        // Only an error redact rebuilt loses its undefined fields: one it returns as it was handed keeps them, so a
+        // replay from memory still deep-equals what production threw.
+        const flow = (/** @type {any} */ input) =>
+            effectPipe(() =>
+                Command(function cmdCall() {
+                    throw Object.assign(new Error('down'), { code: undefined });
+                })
+            )(input);
+        const { result, trace } = await recordEffect(flow, 'in');
+        const { result: fromMemory } = await replayEffect(flow('in'), trace);
+        assert.deepEqual(fromMemory, result);
+        assert.ok(Object.hasOwn(/** @type {any} */ (errorOf(fromMemory)), 'code'));
+    });
+
     it('should leave an error redact replaced with a value that is not an object as that value', async function () {
         const flow = (/** @type {any} */ input) =>
             effectPipe(() =>
@@ -1833,6 +1866,36 @@ describe('Recording and replay', function () {
         const { trace } = await recordEffect(flow, 'in', { redact });
         const { result: replayed } = await replayEffect(flow('in'), JSON.parse(JSON.stringify(trace)));
         assert.equal(errorOf(replayed), '[redacted]');
+    });
+
+    it('should keep a property whose getter throws as it is, rather than failing the copy', async function () {
+        // A lazy client in the context threw when the copy read it, so `toTrace` threw, and `recordEffect` rejected
+        // before running the flow, although a part that cannot be copied is documented as kept as it is.
+        const context = {
+            tenant: 'acme',
+            services: {
+                get client() {
+                    throw new Error('client not connected');
+                }
+            }
+        };
+        const stored = /** @type {any} */ (recorder().toTrace({ context }).context);
+        assert.equal(typeof Object.getOwnPropertyDescriptor(stored.services, 'client')?.get, 'function');
+        assert.equal(stored.tenant, 'acme');
+        let calls = 0;
+        const flow = effectPipe(() =>
+            Command(function cmdCharge() {
+                calls++;
+                return 'ch_1';
+            })
+        );
+        const { result } = await recordEffect(flow, 'in', {
+            context,
+            redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
+                kind === 'context' ? { tenant: value.tenant } : value
+        });
+        assert.deepEqual(result, Success('ch_1'));
+        assert.equal(calls, 1);
     });
 
     it('should leave an absent initialInput or context undefined rather than redacting nothing into an object', function () {
@@ -2729,6 +2792,50 @@ describe('examples/recording-example.js', function () {
         assert.deepEqual(warnings, [], 'the flow carries its input, so there is nothing to warn about');
         const { result: replayed } = await replayEffect(register(written[0].initialInput), written[0]);
         assert.deepEqual(replayed, result);
+    });
+
+    it('should not let an input or a context it cannot copy decide the run', async function () {
+        // The wiring copied the context in `onBeforeCommand`, where a throw vetoes the Command, so a context that
+        // could not be copied stopped the charge and failed the run, and `onSinkError` never heard of it. The input
+        // was copied in `onRun` ahead of the run, where a throw rejected the run before it started.
+        const uncopyable = (/** @type {object} */ target) =>
+            new Proxy(target, {
+                ownKeys() {
+                    throw new Error('cannot list keys');
+                }
+            });
+        /** @type {unknown[]} */
+        const errors = [];
+        /** @type {any[]} */
+        const written = [];
+        enableRecording({
+            keep: () => true,
+            sink: (/** @type {any} */ t) => void written.push(t),
+            onSinkError: (error) => void errors.push(error)
+        });
+        let calls = 0;
+        const charge = (/** @type {any} */ input) =>
+            effectPipe((/** @type {any} */ i) =>
+                Command(function cmdCharge() {
+                    calls++;
+                    return i.amount;
+                })
+            )(input);
+
+        const withContext = await runEffect(charge({ amount: 5 }), uncopyable({ tenant: 'acme' }));
+        assert.deepEqual(withContext, Success(5));
+        assert.equal(calls, 1, 'the Command ran');
+        assert.equal(written.length, 1, 'the trace was still kept');
+        assert.equal(written[0].context, undefined);
+        assert.equal(errors.length, 1);
+        assert.match(String(/** @type {any} */ (errors[0]).message), /cannot list keys/);
+
+        const withInput = await runEffect(charge(uncopyable({ amount: 7 })), { tenant: 'acme' });
+        assert.deepEqual(withInput, Success(7));
+        assert.equal(calls, 2, 'the run started');
+        assert.equal(written.length, 2);
+        assert.equal(written[1].initialInput, undefined);
+        assert.equal(errors.length, 2);
     });
 
     it('should send the trace of a run whose own code throws, and still reject', async function () {
@@ -5151,6 +5258,8 @@ describe('README examples', function () {
                 throw new Error('a README example must not perform network I/O');
             },
             checkoutFlow: stubCommand,
+            mySpans: [{ attributes: { path: '0', output: {} } }],
+            flags: { get: async () => false },
             chargeCard: stubCommand,
             sendReceipt: stubCommand,
             validateOrder: stubCommand,
@@ -6041,10 +6150,49 @@ describe('Retry attempts and the removed global retry', function () {
         );
     });
 
-    it('should accept a hook left undefined or null, as a slot left unset', async function () {
-        const remove = configureEffect({ onStep: undefined, onRun: /** @type {any} */ (null) });
+    it('should accept a hook left undefined, as a slot left unset', async function () {
+        const remove = configureEffect({ onStep: undefined, onRun: undefined });
         assert.deepEqual(await runEffect(Success(1), {}, { onBeforeCommand: undefined }), Success(1));
         remove();
+    });
+
+    it('should refuse null for a configuration or a hook, as the types do', async function () {
+        // `configureEffect` skipped any falsy argument and a hook set to null, while `runEffect` refused a null
+        // callConfig, so a kill switch wired as `killSwitch ?? null` switched itself off without a word.
+        let calls = 0;
+        const charge = Command(function cmdCharge() {
+            calls++;
+            return 'ch_1';
+        });
+        for (const config of [null, false, 0, '']) {
+            assert.throws(
+                () => configureEffect(/** @type {any} */ (config)),
+                /configureEffect expects configuration objects/
+            );
+        }
+        assert.throws(
+            () => configureEffect(/** @type {any} */ ({ onBeforeCommand: null })),
+            /configureEffect's onBeforeCommand must be a function, got null\./
+        );
+        await assert.rejects(
+            () => runEffect(charge, {}, /** @type {any} */ ({ onBeforeCommand: null })),
+            /callConfig\.onBeforeCommand must be a function, got null\./
+        );
+        assert.equal(calls, 0);
+        assert.doesNotThrow(() => configureEffect(undefined), 'undefined still leaves a configuration out');
+    });
+
+    it('should name an array and a function that builds hooks for what they are', async function () {
+        // An array was described as a plain object, and a hook factory passed uncalled got a hint about flows.
+        assert.throws(
+            () => configureEffect(/** @type {any} */ ([{}])),
+            /configureEffect expects configuration objects, got an array\./
+        );
+        const telemetryHooks = () => ({});
+        const factoryHint =
+            /got a function, which usually means one that builds hooks was passed without being called\./;
+        assert.throws(() => configureEffect(/** @type {any} */ (telemetryHooks)), factoryHint);
+        await assert.rejects(() => runEffect(Success(1), {}, /** @type {any} */ (telemetryHooks)), factoryHint);
     });
 
     it('should leave no installed layer behind when configureEffect refuses', function () {

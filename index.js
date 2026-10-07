@@ -299,6 +299,7 @@ const describeValue = (value) => {
     if (typeof value !== 'object') {
         return `the ${typeof value} ${typeof value === 'string' ? JSON.stringify(value) : String(value)}`;
     }
+    if (Array.isArray(value)) return 'an array';
     if (typeof value.type === 'string') return `an object with an unrecognised type '${value.type}'`;
     return 'a plain object';
 };
@@ -546,9 +547,20 @@ const rejectRetryKey = (config, source) => {
 const hookNames = ['onStep', 'onRun', 'onBeforeCommand'];
 
 /**
+ * Describes what was passed where a configuration belongs. A function there is usually one that builds hooks,
+ * as `telemetryHooks` does, passed without calling it.
+ * @param {any} value
+ * @returns {string}
+ */
+const describeConfiguration = (value) =>
+    typeof value === 'function'
+        ? 'a function, which usually means one that builds hooks was passed without being called'
+        : describeArgument(value);
+
+/**
  * Refuses a configuration that would quietly switch a hook off or break every run: a key no hook is named, as a
  * misspelt `onstep` is, or a hook that is not a function, which made every Command an I/O fault that `Retry`
- * retried. A hook left `undefined` or `null` is a slot left unset.
+ * retried. A hook left `undefined` is a slot left unset; `null` is refused, as the types refuse it.
  * @param {any} config
  * @param {string} source - Where it was passed, as the message names it
  * @param {string} prefix - What precedes a hook's name in the message, as in `configureEffect's onStep`
@@ -559,7 +571,7 @@ const checkConfiguration = (config, source, prefix, known) => {
     rejectUnknownOptions(config, source, known);
     for (const name of hookNames) {
         const hook = config[name];
-        if (hook != null && typeof hook !== 'function') {
+        if (hook !== undefined && typeof hook !== 'function') {
             throw new TypeError(`${prefix}${name} must be a function, got ${describeArgument(hook)}.`);
         }
     }
@@ -623,11 +635,12 @@ const configureEffect = (...configs) => {
         applyLayers();
         return () => {};
     }
-    const present = configs.filter(Boolean);
+    // Only `undefined` leaves a configuration out, as in `configureEffect(flag ? hooks : undefined)`.
+    const present = configs.filter((config) => config !== undefined);
     // Before installing anything, so a refused call leaves the wiring untouched.
     present.forEach((config) => {
         if (!isOptionsObject(config)) {
-            throw new TypeError(`configureEffect expects configuration objects, got ${describeArgument(config)}.`);
+            throw new TypeError(`configureEffect expects configuration objects, got ${describeConfiguration(config)}.`);
         }
         checkConfiguration(config, 'configureEffect', "configureEffect's ", hookNames);
     });
@@ -838,7 +851,7 @@ const interpret =
      */
     async function interpret(effect, context = {}, callConfig = {}, fastRetry = false) {
         if (!isOptionsObject(callConfig)) {
-            throw new TypeError(`runEffect's callConfig must be an object, got ${describeArgument(callConfig)}.`);
+            throw new TypeError(`runEffect's callConfig must be an object, got ${describeConfiguration(callConfig)}.`);
         }
         checkConfiguration(callConfig, "runEffect's callConfig", 'callConfig.', [...hookNames, 'inherit']);
         const { inherit = true, ...local } = callConfig;
@@ -1435,7 +1448,21 @@ const copyAround = (value, seen) => {
     /** @type {any} */
     const copy = Array.isArray(value) ? [] : Object.create(Object.getPrototypeOf(value));
     seen.set(value, copy);
-    for (const key of Object.keys(value)) copy[key] = copyAround(value[key], seen);
+    for (const key of Object.keys(value)) {
+        let item;
+        try {
+            item = value[key];
+        } catch {
+            // A getter that throws when read, as a lazy client's does, cannot be copied either, so it is kept too.
+            Object.defineProperty(
+                copy,
+                key,
+                /** @type {PropertyDescriptor} */ (Object.getOwnPropertyDescriptor(value, key))
+            );
+            continue;
+        }
+        copy[key] = copyAround(item, seen);
+    }
     return copy;
 };
 
@@ -1558,7 +1585,12 @@ const recorder = (options = {}) => {
         // Read before redact runs, since it may change the copy it is handed.
         const wasError = isObject(serialized) && serialized.__error === true;
         const redacted = safeRedact(serialized, name, 'error');
-        return wasError && isObject(redacted) && !Array.isArray(redacted) ? { __error: true, ...redacted } : redacted;
+        const rebuilt = wasError && isObject(redacted) && !Array.isArray(redacted) && redacted.__error !== true;
+        if (!rebuilt) return redacted;
+        // A field it left undefined, as `{ status: value.status }` leaves one the error did not have, is dropped as
+        // JSON drops it, so a replay from memory matches one from storage, and production.
+        const fields = Object.entries(redacted).filter(([, field]) => field !== undefined);
+        return { __error: true, ...Object.fromEntries(fields) };
     };
 
     const onStep = observeSteps(({ name, type, path }) => (end) => {

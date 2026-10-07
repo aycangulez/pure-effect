@@ -389,11 +389,13 @@ assert.deepEqual(replayed, result); // fails if a step computed a fresh value, o
 
 This also works for a `Failure`: an error read back from a trace keeps its message, name, cause, custom properties, and an `AggregateError`'s list of errors, and is deep-equal to the one the Command threw, including one whose `name` or `cause` was set after it was created. The exception is a custom error class, which comes back as a plain `Error` with that class's name; compare `error.name` and `error.message` instead.
 
-**You choose the trace format.** `replayEffect` also accepts a resolver function instead of a trace, so you can replay from OpenTelemetry spans, a log pipeline, or a database table, not only from the JSON that `recorder` produces.
+**You choose the trace format.** `replayEffect` also accepts a resolver function instead of a trace, so you can replay from OpenTelemetry spans, a log pipeline, or a database table, not only from the JSON that `recorder` produces. Whatever you store needs each step's `path`, which `onStep` receives, and its result; the telemetry example records neither, since it keeps values off spans.
 
 ```js
-// A resolver answers one question: what did production get back for this step?
-const resolve = (step) => ({ result: mySpans[step.index].attributes.output });
+// A resolver answers one question: what did production get back for this step? Look the step up by its path, its
+// position in the flow. `step.index` counts steps in the order they finished, which shifts around a Parallel.
+const outputs = new Map(mySpans.map((span) => [span.attributes.path, span.attributes.output]));
+const resolve = (step) => (outputs.has(step.path) ? { result: outputs.get(step.path) } : undefined);
 await replayEffect(checkoutFlow(input), resolve);
 ```
 
@@ -420,7 +422,7 @@ configureEffect(
 );
 ```
 
-By default, successful runs are held in memory and then discarded. A run that rejects because your own code threw, such as a `TypeError` after an API changed the shape of its response, is offered to `keep` as a `Failure` carrying the thrown error, so by default its trace is kept, and the run still rejects. Replaying that trace reproduces the throw. If `keep` or the sink throws, for example because `JSON.stringify` meets a value it cannot serialize, the run keeps its own outcome and the error goes to `onSinkError`, which defaults to `console.error`. `redact` runs before anything enters the trace, including the stored `initialInput` and `context`. `maxEntries` caps the length of a trace and reports the overflow as `dropped`; a capped trace replays only up to the first step it lacks, so the example warns through `onWarning` the first time it keeps one for a flow. It warns the same way about a flow whose steps include any named `'anonymous'`. The sink can write a trace to S3 or a database column as JSON, as long as your Commands return plain data.
+By default, successful runs are held in memory and then discarded. A run that rejects because your own code threw, such as a `TypeError` after an API changed the shape of its response, is offered to `keep` as a `Failure` carrying the thrown error, so by default its trace is kept, and the run still rejects. Replaying that trace reproduces the throw. If `keep` or the sink throws, for example because `JSON.stringify` meets a value it cannot serialize, the run keeps its own outcome and the error goes to `onSinkError`, which defaults to `console.error`. So does an input or context the example cannot copy, which it leaves out of the trace. `redact` runs before anything enters the trace, including the stored `initialInput` and `context`. `maxEntries` caps the length of a trace and reports the overflow as `dropped`; a capped trace replays only up to the first step it lacks, so the example warns through `onWarning` the first time it keeps one for a flow. It warns the same way about a flow whose steps include any named `'anonymous'`. The sink can write a trace to S3 or a database column as JSON, as long as your Commands return plain data.
 
 The example takes the input from `onRun`, which is handed it only for a flow `effectPipe` built, so build the outermost flow with `effectPipe`. A flow that starts with a bare `Command`, `Ask`, `Retry`, or `Parallel` records no input, and `timeTravel` would rebuild it from `undefined`. A one-step pipeline is enough, as in `runEffect(effectPipe(loadProfile)(userId))`. The example warns through `onWarning`, which defaults to `console.warn`, the first time it keeps a trace of such a flow, and `timeTravel` warns when it replays one. The example also takes the context from the run's first Command, so a run that stops before any Command, for example at an `Ask` check, records no context. Such a run did no I/O, so running the flow again with its input and the context from your logs reproduces it.
 
@@ -453,7 +455,7 @@ app.post('/checkout', async (req, res) => {
 
 Recording stores the context alongside the trace, so `Ask` replays with the values the original request saw. It is copied once per run, so read a value that can change while a run is under way, such as a switch an operator can flip to stop a batch, in a Command, whose result the trace records each time.
 
-Keep the context to plain values such as IDs, flags and settings. Recording copies it into every trace, so a database client or connection pool in it puts its connection string in the trace, and one that refers back to itself makes the trace impossible to write as JSON. Reach a service from the Command's function, as `findProduct` reaches `db`, or leave it out of the trace with `redact`.
+Keep the context to plain values such as IDs, flags and settings. Recording copies it into every trace, so a database client or connection pool in it puts its connection string in the trace, and one that refers back to itself makes the trace impossible to write as JSON. Reach a service from the Command's function, as `findProduct` reaches `db`. To run a flow against fakes, have the function that builds it take the services, as in `checkoutFlow(services)(productId)`, and pass fakes in the test.
 
 ## Retrying Transient Failures
 
@@ -579,6 +581,24 @@ Parallel(work, (outcomes) => Success(outcomes.map((o) => (o.type === 'Success' ?
 ```
 
 The outcomes are plain `Success` and `Failure` objects. Returning one of them from `next` is the same as returning any other `Failure`: the flow stops, and `Retry` does not run it again.
+
+A `Failure` among them can also hold an error the branch never returned: what one of its Commands threw, or what an `onBeforeCommand` hook vetoed it with. Neither is in the branch's declared error type, so give the code that reads the outcomes a case for an error it does not recognise, as for a run's result (see [TypeScript](#typescript-typed-errors-and-context)), rather than letting it fall into the last error it expects, which would report a vetoed charge as a declined card.
+
+Fewer such errors reach the outcomes when a branch returns what it can as data. Catch an error the flow can handle inside the Command's function and return it (see [Which Errors Are Data](#which-errors-are-data)), and stop a batch by reading the operator's switch in a Command whose `next` returns a `Failure`, rather than by vetoing in `onBeforeCommand`:
+
+```js
+// Read before each charge, so a switch flipped mid-batch stops the charges that have not started.
+const cmdBillingHalted = () => flags.get('billing.halted');
+const billUnlessHalted = (subscription) =>
+    Command(cmdBillingHalted, (halted) => (halted ? Failure('halted') : billOne(subscription)));
+
+Parallel(subscriptions.map(billUnlessHalted), (outcomes) => Success(outcomes.map(summarize)), {
+    limit: 5,
+    settled: true
+});
+```
+
+The halt is then one of the branch's declared errors, typed like a declined card, and the trace records each read of the switch, so the batch replays. A vetoed Command leaves no entry in the trace, so a replay of a vetoed batch fails at the first veto.
 
 Bugs in the flow are not collected. An `EffectTypeError`, thrown for a malformed flow, and an error thrown by a `next` function or a pure step both still escape a settled `Parallel`, after the other branches are cancelled.
 
@@ -775,7 +795,7 @@ if (result.type === 'Failure') {
 }
 ```
 
-The annotations are optional. Without them, the union holds whatever each step can pass to `Failure`, each error kept exactly as written, whether a string or an object, and a step that cannot fail, such as a Command without a `next`, adds nothing. The union covers the `Failure`s your steps return. A Command whose function throws, or that an `onBeforeCommand` hook vetoes, also ends the run with a `Failure` the union does not name, so where the result is handled, give it one fallback, such as a `default` in a `switch` over `result.error`, and treat what reaches it as a server error. One fallback covers the whole flow: catch inside a Command's function only what the flow can handle, and let the rest throw, which is also what lets `Retry` act on it. To check for a thrown error, copy it into a variable typed `unknown` first, as in `const error: unknown = result.error`, since TypeScript refuses `instanceof Error` on an error type made only of strings, or on a flow that declares none.
+The annotations are optional. Without them, the union holds whatever each step can pass to `Failure`, each error kept exactly as written, whether a string or an object, and a step that cannot fail, such as a Command without a `next`, adds nothing. The union covers the `Failure`s your steps return. A Command whose function throws, or that an `onBeforeCommand` hook vetoes, also ends the run with a `Failure` the union does not name, so where the result is handled, give it one fallback, such as a `default` in a `switch` over `result.error`, and treat what reaches it as a server error. The same goes for the outcomes a settled `Parallel` hands `next`. One fallback covers the whole flow: catch inside a Command's function only what the flow can handle, and let the rest throw, which is also what lets `Retry` act on it. To check for a thrown error, copy it into a variable typed `unknown` first, as in `const error: unknown = result.error`, since TypeScript refuses `instanceof Error` on an error type made only of strings, or on a flow that declares none.
 
 To type what a Command's function returns, such as a JSON response, write the function's result type, as in `Command((): Promise<User | null> => fetchJson(url), next)`. `Command<User | null>(…)` also compiles, but with some type arguments given TypeScript infers none of the others, so that Command's errors are typed `unknown`, which hides the rest of the union.
 
@@ -936,7 +956,7 @@ That covers a missing `return`, a `next` that returns a plain value, a step or `
 
 #### `configureEffect(...configs)`
 
-Adds a layer of hooks for the whole process and returns a function that removes it. Several configurations passed to one call form one layer, the same as installing each on its own. Removing a layer removes only that layer, even when others were installed after it, so a library can add and remove its own hooks without touching the application's. `configureEffect()` with no arguments removes every layer, and a call whose arguments are all `undefined`, such as `configureEffect(flag ? hooks : undefined)`, changes nothing. A configuration that is not an object, a key other than `onStep`, `onRun` and `onBeforeCommand`, and a hook that is not a function each throw a `TypeError` before anything is installed, so a misspelt hook fails instead of switching itself off. A `retry` key throws too, since retry options belong to each `Retry`.
+Adds a layer of hooks for the whole process and returns a function that removes it. Several configurations passed to one call form one layer, the same as installing each on its own. Removing a layer removes only that layer, even when others were installed after it, so a library can add and remove its own hooks without touching the application's. `configureEffect()` with no arguments removes every layer, and a call whose arguments are all `undefined`, such as `configureEffect(flag ? hooks : undefined)`, changes nothing. A configuration that is not an object, a key other than `onStep`, `onRun` and `onBeforeCommand`, and a hook that is not a function each throw a `TypeError` before anything is installed, so a misspelt hook fails instead of switching itself off. Only `undefined` leaves a configuration or a hook out; `null` throws. A `retry` key throws too, since retry options belong to each `Retry`.
 
 ```js
 const remove = configureEffect(telemetryHooks(), recordingHooks({ sink }));
@@ -949,7 +969,7 @@ remove();
     - For a Command, `op()` returns a promise, even for a synchronous function. Returning a value without calling `op()` answers for the Command, which is how replay works, and throwing without calling it counts as the Command failing.
     - A throw after `op()` succeeded, or `undefined` returned in place of its value, as a hook that forgot its `return` or its `await` does, is a bug in the hook: the run rejects, and `Retry` does not run the Command again.
     - For a `Parallel`, `op()` runs the branches, so a hook must call it or the run rejects with a `TypeError`. It returns which branch, if any, cancelled the others, as in `{ cancelled: true, branch: 0 }`, even when a branch threw.
-- `onBeforeCommand(command, context)`: runs before each Command. A throw vetoes the Command: the run returns a `Failure` carrying the thrown error, and `Retry` does not retry it.
+- `onBeforeCommand(command, context)`: runs before each Command. A throw vetoes the Command: the run returns a `Failure` carrying the thrown error, and `Retry` does not retry it. A vetoed Command leaves no entry in a trace, so a replay of that run fails where it was vetoed; to stop a batch, read a switch in a Command instead, as [Running Effects in Parallel](#running-effects-in-parallel) shows.
 
 Layers run in the order they were installed, the first outermost, so a result or a thrown error unwinds from the innermost hook out:
 
@@ -999,7 +1019,7 @@ Returns `{ onStep, entries, toTrace }`, a hook that records every step of a run,
 { command: 'Parallel', path, result: { cancelled, branch } }   which branch, if any, cancelled the others
 ```
 
-- `toTrace(meta)`: the entries as a trace, with `meta`'s `initialInput`, `context`, `flowName` and `version`, copied when it is called (a part that cannot be copied, such as a function, is kept as it is). If a Command can change the input or the context, as an ORM save that adds an id does, call it before the run for those and again afterwards for the entries, as `recordEffect` does.
+- `toTrace(meta)`: the entries as a trace, with `meta`'s `initialInput`, `context`, `flowName` and `version`, copied when it is called (a part that cannot be copied, such as a function or a getter that throws, is kept as it is). If a Command can change the input or the context, as an ORM save that adds an id does, call it before the run for those and again afterwards for the entries, as `recordEffect` does.
 - `options.redact(value, name, kind)`: returns what the trace stores in place of `value`. `kind` is `'result'`, `'error'`, `'initialInput'` or `'context'`, and `name` is the Command's name, or the kind. It gets a copy, so changing it in place is safe. A thrown `Error` arrives as a plain object holding its `name`, `message` and own fields, and any object returned for it replays as an `Error`.
 - `options.maxEntries`: the most entries a trace keeps; the rest are counted in `dropped`, and a replay stops at the first step the trace lacks.
 - `options.stack`: record stack traces for thrown errors (off by default).
