@@ -5,8 +5,6 @@ Thanks for taking the time. These are the rules a change has to follow.
 ## Before opening a pull request
 
 - **Read the matching section of `DESIGN.md` before changing how something works.** It records why each part works as it does, what broke before it did, and the designs already weighed and dropped. A change that settles a design question adds its reason there.
-- **Propose a design change before building it.** Open an issue and let the maintainer choose first. A choice the docs do not explain may still be deliberate, so ask about it before treating it as an accident.
-
 - **Run `npm test` and check its exit code.** It runs mocha, `tsd`, and strict `tsc` in sequence. A `tsd` failure prints neither "passing" nor "failing", so a glance at the output can miss it; a non-zero exit cannot.
 - **Run `npm run format`.** Prettier covers the source, the tests, the examples, the scripts, and the Markdown. Prose in Markdown is written as one line per paragraph or list item, never wrapped at a column.
 - **Name a condition in `index.js` when it's used more than once, or when you'd otherwise need a comment to say what it means.** Use a predicate defined beside its first use, or a named `const` when one function uses it once.

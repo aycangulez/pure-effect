@@ -185,6 +185,13 @@ expectType<RetryState<number, RetryExhaustedError>>(retried);
 const retriedNoOpts = Retry(innerCmd);
 expectType<RetryState<number, RetryExhaustedError>>(retriedNoOpts);
 
+// A Retry or Parallel keeps a frozen copy of its options, so the types refuse a change that would throw when it runs.
+// @ts-expect-error a Retry's options are a frozen copy
+retried.options.attempts = 0;
+const limited = Parallel([innerCmd], { limit: 2 });
+// @ts-expect-error a Parallel's options are a frozen copy
+if (limited.options) limited.options.limit = 0;
+
 // Retry in effectPipe preserves type flow
 const retryFlow = effectPipe((input: User) =>
     Retry(

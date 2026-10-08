@@ -238,19 +238,25 @@ describe('examples/recording-example.js', function () {
         // the run started with.
         /** @type {any[]} */
         const written = [];
+        /** @type {[string, string | undefined][]} */
+        const warnings = [];
         enableRecording({
             keep: () => true,
             sink: (/** @type {any} */ t) => void written.push(t),
             redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
                 if (kind === 'initialInput' || kind === 'context') throw new Error('redact bug');
                 return value;
-            }
+            },
+            onWarning: (message, flowName) => void warnings.push([message, flowName])
         });
         const result = await runEffect(failing({ id: 5 }), { flowName: 'writer', tenant: 'acme' });
         assert.equal(result.type, 'Failure', 'the run keeps its own outcome');
         assert.equal(written[0].initialInput, undefined);
         assert.equal(written[0].context, undefined);
         assert.deepEqual(written[0].unrecorded, { initialInput: 'redact', context: 'redact' });
+        assert.equal(warnings.length, 1, 'one warning for the flow');
+        assert.match(warnings[0][0], /^Recording 'writer': 2 of the values a kept trace holds could not be recorded/);
+        assert.equal(warnings[0][1], 'writer');
     });
 
     it('should not let a failing sink change the outcome, and report the failure', async function () {

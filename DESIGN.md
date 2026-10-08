@@ -577,6 +577,10 @@ Under `settled`:
 
 `EffectValue`, `EffectError` and `EffectContext` are named for general use, because every type in a `.d.ts` module is public whether or not it says `export`.
 
+#### A node's options are `readonly`
+
+`RetryState`'s and `ParallelState`'s `options` are `Readonly`, since the constructors keep a frozen copy of what they checked. Declared changeable, they let TypeScript accept `node.options.attempts = 0`, an assignment that throws when it runs, in strict mode. Two `@ts-expect-error` lines pin it.
+
 ## Reference integrations
 
 `examples/opentelemetry-example.js` and `examples/recording-example.js` are reference code, not part of the library. The rule for both is that observing a run never decides it.

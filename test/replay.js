@@ -496,6 +496,29 @@ describe('Replay', function () {
             });
         });
 
+        it('should raise a TimeParadox for a Parallel that runs no Commands where the trace recorded one', async function () {
+            // Its branches ask for no step, so only the Parallel's own step can see the change: without that check, the
+            // step after it matches the trace and the reshaped flow replays as a Success.
+            const { trace } = await recordEffect(
+                flowOf(
+                    () => step('cmdA'),
+                    () => step('cmdB')
+                ),
+                'in'
+            );
+            const parallel = flowOf(
+                () => Parallel([Success(1), Success(2)]),
+                () => step('cmdB')
+            );
+            const { result } = await replayEffect(parallel('in'), trace);
+            assert.deepEqual(paradox(result), {
+                name: 'TimeParadox',
+                path: '0',
+                expected: 'cmdA',
+                actual: 'Parallel'
+            });
+        });
+
         it('should raise a TimeParadox for a Retry where the trace recorded a Parallel', async function () {
             const { trace } = await recordEffect(
                 flowOf(() => Parallel([step('cmdA')])),
@@ -1666,6 +1689,31 @@ describe('Replaying a cancelled Parallel', function () {
             'production never reached it'
         );
         replays.forEach(assertDeclined);
+    });
+
+    it('should not run a nested Parallel that production never started, as a hook watching the replay sees', async function () {
+        // The outcome is the recorded trigger's failure either way, so only a hook can tell whether the replay ran the
+        // nested Parallel. Running it would show the hook a step production never took.
+        const lateThenParallel = effectPipe(
+            () => step('slowIgnoresSignal', () => new Promise((r) => setTimeout(() => r('late'), 30))),
+            () => Parallel([step('neverA', () => 1), step('neverB', () => 2)])
+        )(null);
+        const flow = () => Parallel([chargeBranch(), lateThenParallel]);
+        const { trace } = await recordEffect(flow, null);
+        /** @type {string[]} */
+        const ran = [];
+        configureEffect({
+            onStep: async (name, type, op, path) => {
+                const result = await op();
+                if (type === 'Parallel') ran.push(/** @type {string} */ (path));
+                return result;
+            }
+        });
+        const before = io.calls;
+        const replay = await replayEffect(flow(), trace, { hooks: true });
+        assert.equal(io.calls, before, 'a replay executes nothing');
+        assertDeclined(replay);
+        assert.deepEqual(ran, ['0p'], 'only the Parallel production ran');
     });
 
     it('should not run the next of a nested Parallel cancelled from outside', async function () {

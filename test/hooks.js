@@ -722,6 +722,27 @@ describe('Where a throw comes from', function () {
         assert.equal(calls, 2);
     });
 
+    it('should not hold up a hook that returns its own value without waiting for op', async function () {
+        // Only a hook that returns undefined is waited for. One that answers for itself while the Command is still
+        // running, as a timeout with a fallback does, has decided the step.
+        let release = () => {};
+        const slow = Command(function cmdSlowLookup() {
+            return new Promise((resolve) => {
+                release = () => resolve('late');
+            });
+        });
+        configureEffect({
+            onStep: async (name, type, op) => {
+                op();
+                return 'fallback';
+            }
+        });
+        const heldUp = new Promise((resolve) => setTimeout(() => resolve('held up'), 100));
+        const outcome = await Promise.race([runEffect(slow), heldUp]);
+        release();
+        assert.deepEqual(outcome, Success('fallback'));
+    });
+
     it('should let a hook return undefined when there was no result to lose', async function () {
         // Replay answers without calling op, a Command can return undefined itself, and a Parallel's op returns
         // its decision, which the interpreter takes from op rather than from the hook.

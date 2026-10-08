@@ -49,7 +49,8 @@ export type RetryOptions = {
 export type RetryState<T, E = unknown, Ctx = unknown, R = T> = {
     type: 'Retry';
     effect: Effect<R, any, Ctx>;
-    options: RetryOptions & { onExhausted?: (error: RetryExhaustedError) => Effect<R, any, Ctx> };
+    /** A frozen copy of the options the `Retry` was built with. */
+    options: Readonly<RetryOptions & { onExhausted?: (error: RetryExhaustedError) => Effect<R, any, Ctx> }>;
     next(value: R): Effect<T, E, Ctx>;
 };
 
@@ -80,7 +81,8 @@ export type ParallelState<
     type: 'Parallel';
     effects: { [K in keyof T]: Effect<T[K], BranchError, Ctx> };
     next(values: [...V]): Effect<R, E, Ctx>;
-    options?: ParallelOptions;
+    /** A frozen copy of the options the `Parallel` was built with. */
+    options?: Readonly<ParallelOptions>;
 };
 
 export type Effect<T, E = unknown, Ctx = unknown> =

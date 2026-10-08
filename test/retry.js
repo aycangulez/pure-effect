@@ -197,7 +197,7 @@ describe('Retry attempts and the removed global retry', function () {
         given.attempts = 0;
         assert.equal(retry.options.attempts, 1, "a change to the caller's object does not reach the node");
         assert.throws(() => {
-            retry.options.attempts = 0;
+            /** @type {any} */ (retry.options).attempts = 0;
         }, TypeError);
         assert.deepEqual(await runEffect(retry), Success('fallback'));
         assert.equal(fallbacks, 1);

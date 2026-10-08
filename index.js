@@ -45,7 +45,7 @@
  * @typedef {{
  *   type: 'Retry',
  *   effect: Effect,
- *   options: { attempts?: number, delay?: number, backoff?: number, onExhausted?: (error: any) => Effect },
+ *   options: Readonly<{ attempts?: number, delay?: number, backoff?: number, onExhausted?: (error: any) => Effect }>,
  *   next: (value: any) => Effect
  * }} RetryState
  */
@@ -61,7 +61,7 @@
  *   type: 'Parallel',
  *   effects: Effect[],
  *   next: (values: any[]) => Effect,
- *   options?: ParallelOptions
+ *   options?: Readonly<ParallelOptions>
  * }} ParallelState
  */
 
