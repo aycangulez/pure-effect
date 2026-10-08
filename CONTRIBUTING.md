@@ -24,6 +24,8 @@ Thanks for taking the time. These are the rules a change has to follow.
 
 ## What to know about the tests
 
+The runtime tests are in `test/`, a file for each concern (`core`, `retry`, `parallel`, `hooks`, `recording`, `replay`, `examples` and `docs`). Put a new test in the file for its concern, and anything two files need in `test/helpers.js`.
+
 Tests assert on the data structures a flow returns rather than on side effects; that is the usage pattern the library exists for, so keep it. Hooks installed with `configureEffect` are process-wide and outlive a suite, so every `describe` that could inherit another's wiring resets with `beforeEach`. Both files in `examples/` are covered by tests and should not be edited without running them.
 
 ## Reporting a bug

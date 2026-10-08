@@ -422,9 +422,9 @@ A throw from `onResolved` stops the replay, and `replayEffect` rejects with the 
 
 - The `Declaration parity` test pins the two export lists to each other.
 - `tsd` checks `test/types.test-d.ts`.
-- `tsc -p jsconfig.json` runs strict `checkJs` over `index.js`, `test/all.js`, `test/types.test-d.ts`, `examples/*.js` and `scripts/*.js`.
+- `tsc -p jsconfig.json` runs strict `checkJs` over `index.js`, `test/*.js`, `test/types.test-d.ts`, `examples/*.js` and `scripts/*.js`.
 
-`test/all.js` imports `../index.js`, which TypeScript resolves to `index.d.ts`, so the tests are checked as a strict consumer of the public types.
+The test files import `../index.js`, which TypeScript resolves to `index.d.ts`, so the tests are checked as a strict consumer of the public types.
 
 The config is named `jsconfig.json` and is strict so that VS Code and the gate read one configuration: VS Code reads only `jsconfig.json` or `tsconfig.json`, and checks JavaScript strictly by default. Add any checked JavaScript in this repository to its `include` list.
 
@@ -473,7 +473,7 @@ Each of these is pinned in the tsd file, unless it says otherwise. The tsd file 
 #### `Retry`'s error and `RetryState`'s `R`
 
 - `Retry`'s error is `E | RetryExhaustedError`. An abort escapes as its own `E`.
-- `lastError` is `unknown`, since only a thrown value reaches it, and nothing declares what a function throws. The type parameter defaults to `unknown` for a caller who knows what their function throws, as `test/all.js` does with `RetryExhaustedError<Error>`.
+- `lastError` is `unknown`, since only a thrown value reaches it, and nothing declares what a function throws. The type parameter defaults to `unknown` for a caller who knows what their function throws, as the tests in `test/core.js` and `test/replay.js` do with `RetryExhaustedError<Error>`.
 - With `onExhausted`, the error is `E` and the fallback's, and that overload comes first.
 - `RetryState`'s fourth parameter, `R`, is what the retried tree succeeds with. `next` receives it, and it types `effect` and the fallback. It defaults to `T`, which is right for a `Retry` as built.
 - `Effect`'s `Retry` member takes `any` for `R`, as its `Command` member does, since once a pipeline continues past a `Retry`, its `next` receives the retried Command's value rather than the pipeline's. It was typed with `T`, so a test walking a flow through a `Retry` that starts a pipeline needed a cast, which the checkout experiment found.
@@ -867,7 +867,9 @@ The signal edge was narrowed, not guarded, in October 2026. It used to cover any
 
 ## Tests
 
-`test/all.js` holds every runtime test, with a user-registration domain as the running example. `registerUserFlow` has the same shape as the README's Quick Start, so the tests and the documentation demonstrate one idiom. The test names say what each suite covers; these are the conventions they follow.
+The runtime tests are in `test/`, a file for each concern (`core`, `retry`, `parallel`, `hooks`, `recording`, `replay`, `examples` and `docs`), with what more than one file needs in `test/helpers.js`, including the user-registration domain that is their running example. `registerUserFlow` has the same shape as the README's Quick Start, so the tests and the documentation demonstrate one idiom. Until October 2026 every runtime test was in one file, `test/all.js`, which reached 7,700 lines, three and a half times `index.js`. The case for keeping `index.js` whole does not carry over: nothing in the tests is followed from one suite into another, since each suite resets the hooks and reads top to bottom, so a split by concern cost only a shared helpers file. The split moved every test unchanged, and the full title of each was compared before and after. The Recording and replay suite, about 2,300 lines, became `Recording` and `Replay`, along runs of tests that were already grouped by theme.
+
+The test names say what each suite covers. These are the conventions they follow.
 
 - Assert on the returned data, such as Commands, Failures and traces, rather than on side effects. That is the usage pattern the library exists for.
 - Reset the hooks in every suite with `beforeEach(() => configureEffect())`, a bare call. Hooks are process-wide and outlive a suite, and `configureEffect({})` adds an empty layer rather than resetting. Suites guarded that way once ran under whatever the previous suite had installed, and stayed green only because the leaked hooks wrote to arrays nobody read. The first suite resets too, since being declared first is luck rather than isolation.

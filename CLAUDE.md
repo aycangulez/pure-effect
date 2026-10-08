@@ -8,14 +8,14 @@ This file holds the rules. `DESIGN.md` holds the reasons: how each part works, w
 
 ```bash
 npm test                                          # run all tests
-npx mocha test/all.js --grep "pattern"            # run a single test by name
-npm run format                                    # Prettier over index.js, index.d.ts, examples/*.js, scripts/*.js, test/all.js, test/types.test-d.ts, README.md, CLAUDE.md, DESIGN.md, CHANGELOG.md, CONTRIBUTING.md
+npx mocha --grep "pattern"                        # run a single test by name; npx mocha test/replay.js runs one file
+npm run format                                    # Prettier over index.js, index.d.ts, examples/*.js, scripts/*.js, test/*.js, test/types.test-d.ts, README.md, CLAUDE.md, DESIGN.md, CHANGELOG.md, CONTRIBUTING.md
 npx tsd                                           # type-level gate over test/types.test-d.ts
-npx tsc -p jsconfig.json                          # strict tsc over index.js, test/all.js, test/types.test-d.ts, examples/*.js, and scripts/*.js, reading index.d.ts as a consumer; the same config VS Code uses
+npx tsc -p jsconfig.json                          # strict tsc over index.js, test/*.js, test/types.test-d.ts, examples/*.js, and scripts/*.js, reading index.d.ts as a consumer; the same config VS Code uses
 npm run test:ts-minimum                           # compiles index.d.ts and test/types.test-d.ts with TypeScript 5.1, the oldest the declarations support
 npm run generate                                  # rewrites effectPipe's overloads in index.d.ts from scripts/effect-pipe-overloads.js
 npx esbuild index.js --minify --format=esm | gzip -9 | wc -c    # the size the README claims
-npx stryker run                                   # mutation testing: mutates index.js, runs test/all.js against each mutant; report in reports/mutation/
+npx stryker run                                   # mutation testing: mutates index.js, runs the tests in test/ against each mutant; report in reports/mutation/
 npx stryker run --mutate "index.js:120-180"       # the same, limited to the lines a change touched
 ```
 
@@ -147,7 +147,7 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 
 ## Tests
 
-`test/all.js` holds every runtime test, with a user-registration domain as the running example; `registerUserFlow` has the same shape as the README's Quick Start. `test/types.test-d.ts` holds the type-level tests, run by `tsd`.
+The runtime tests are in `test/`, a file for each concern (`core`, `retry`, `parallel`, `hooks`, `recording`, `replay`, `examples` and `docs`), and a new test goes in the file for its concern. `test/helpers.js` holds what more than one file needs, including the user-registration domain that is their running example; `registerUserFlow` has the same shape as the README's Quick Start. `test/types.test-d.ts` holds the type-level tests, run by `tsd`.
 
 - Assert on the returned data, such as Commands, Failures and traces, rather than on side effects.
 - Reset the hooks in every suite with `beforeEach(() => configureEffect())`, a bare call; `configureEffect({})` adds an empty layer rather than resetting.
