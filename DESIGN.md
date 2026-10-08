@@ -396,6 +396,7 @@ A throw from `onResolved` stops the replay, and `replayEffect` rejects with the 
 - It looks each step's timing up by path, or by position for a trace without paths.
 - It falls back to `String(v)` for a value `JSON.stringify` cannot print, such as a `BigInt` or a cycle.
 - It skips its unreached warning after a `TimeParadox` or `ReplayError`, since the error already names where the flow diverged.
+- It names the unreached steps rather than counting them, since the step a fix stopped issuing is usually the one under suspicion.
 - It warns when recorded steps are named `'anonymous'`, since a replay cannot tell two of them apart.
 - It warns when a trace holds no `initialInput`, since it rebuilds the flow from it, and a hook-based recorder is handed one only for a flow `effectPipe` built.
 
@@ -995,6 +996,12 @@ Or when you'd otherwise need a comment to say what it means. This applies to `in
 A concept written inline drifts into spellings that each have to be checked against the others: "a non-null object" was spelled three ways across six places before `isObject` replaced them. A condition one function uses once can be a named `const`, as `pastTheEnd` and `haltedByReplay` are.
 
 Make a predicate a type guard (`@returns {value is T}`) only where a caller needs the narrowing, as the interpreter loop does with `isPending`. A guard to `object` on a value typed `any` narrows it to `object`, and reading a property off it stops compiling, which is why `isObject` returns a plain `boolean`.
+
+### Comments in `index.js` stay short and about the present
+
+A comment says what the code does now and why, in a sentence or two. The bug a line fixed, and the full case for a choice, go in this file.
+
+By October 2026 the comments in `index.js` ran to as many lines as the code, about 8,700 words of prose. Many recounted the bug each line had fixed, in long chains of clauses that took rereading, and nearly every one of those reasons was already here, so the file said everything twice and its logic was hard to find. Cutting the comments to what the code does now and why removed a quarter of the prose and changed no code: the minified build stayed byte for byte the same. The rule is written down because an agent told to match the comments around a change rebuilds whatever density it finds, one fix at a time.
 
 ### Proposals come before builds
 

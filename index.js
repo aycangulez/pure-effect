@@ -12,15 +12,16 @@
 // 5. Recording and replay: the trace format and replay errors, copying values and errors into a trace,
 //    `recorder` and `recordEffect`, then `fromTrace`, `replayEffect` and `timeTravel`.
 //
-// A new definition goes in the section it serves, which is usually the one that calls it.
+// A new definition goes in the section it serves, which is usually the one that calls it. DESIGN.md explains why
+// each part works the way it does.
 
 // #region Types
 
 /** @typedef {{ type: 'Success', value: any }} SuccessState */
 /** @typedef {{ type: 'Failure', error: any }} FailureState */
 /**
- * Metadata attached to a Command. A string `name` is read by the interpreter as the Command's
- * identity; every other key is carried through untouched for `onBeforeCommand`.
+ * Metadata attached to a Command. A string `name` is the Command's identity; every other key is carried through
+ * for `onBeforeCommand`.
  * @typedef {{ name?: string } & Record<string, any>} CommandMeta
  */
 /**
@@ -63,7 +64,7 @@
  */
 
 /**
- * The Union type for all possible states
+ * Every node a flow can be made of.
  * @typedef {SuccessState | FailureState | CommandState | AskState | RetryState | ParallelState} Effect
  */
 
@@ -78,7 +79,7 @@
 const Success = (value) => ({ type: 'Success', value });
 
 /**
- * Represents a failed computation. Stops the pipeline execution
+ * Represents a failed computation. Stops the pipeline.
  * @param {any} error - The error reason (string, Error object, etc).
  * @returns {FailureState}
  */
@@ -87,14 +88,12 @@ const Failure = (error) => ({ type: 'Failure', error });
 /**
  * Represents a side effect to be executed later.
  *
- * @param {(signal?: AbortSignal) => Promise<any>|any} cmd - The side-effect function to execute. Inside a
- *        `Parallel` branch, a function that declares a parameter receives an `AbortSignal` in it that fires when a
- *        sibling branch fails, so I/O that accepts one can be cancelled in flight. A parameter with a default value
- *        does not count, so `nanoid(size = 21)` keeps its default. Outside a `Parallel` no argument is passed.
- * @param {(result: any) => Effect} [next] - Receives the result of `cmd` and returns the next Effect.
- *        Defaults to `(result) => Success(result)`, which is what most Commands want; `null` counts as omitted.
- * @param {CommandMeta} [meta] - Optional metadata, passed to `onBeforeCommand`. A string `meta.name`
- *        becomes this Command's identity for traces, replay matching, and telemetry spans.
+ * @param {(signal?: AbortSignal) => Promise<any>|any} cmd - The function that does the I/O. Inside a `Parallel`, a
+ *        function that declares a parameter receives an `AbortSignal` that fires when a sibling branch fails. A
+ *        parameter with a default value does not count, so `nanoid(size = 21)` keeps its default.
+ * @param {(result: any) => Effect} [next] - Receives the result of `cmd`. Defaults to `Success(result)`; `null`
+ *        counts as omitted.
+ * @param {CommandMeta} [meta] - Passed to `onBeforeCommand`. A string `meta.name` is the Command's identity.
  * @returns {CommandState}
  */
 const Command = (cmd, next, meta) => {
@@ -119,9 +118,8 @@ const Command = (cmd, next, meta) => {
 };
 
 /**
- * The name a Command is known by: what a trace records, what replay matches on, and what a
- * telemetry span is called. A non-empty string `meta.name`, else `cmd.name`, else 'anonymous'.
- * Exported so a test walking a flow checks each step by the same rule.
+ * The name a Command is known by in traces, replay matching and telemetry: a non-empty string `meta.name`, else
+ * `cmd.name`, else 'anonymous'. Exported so a test walking a flow uses the same rule.
  *
  * @param {CommandState} eff
  * @returns {string}
@@ -148,24 +146,20 @@ const Ask = (next) => {
 };
 
 /**
- * Wraps an Effect tree with retry-on-failure semantics.
+ * Runs `effect` again when a Command in it throws.
  *
- * Each attempt runs the **entire** wrapped tree again, including Commands that already succeeded, so
- * wrap the one Command that fails transiently rather than a pipeline. `Retry(effectPipe(charge, receipt))`
- * charges the customer again every time the receipt step fails. Wrapping a pipeline is only safe when
- * every Command in it is idempotent.
+ * Each attempt runs the **entire** wrapped tree again, including Commands that already succeeded, so wrap the one
+ * Command that fails transiently. `Retry(effectPipe(charge, receipt))` charges the customer again every time the
+ * receipt step fails.
  *
  * @param {Effect} effect - The inner Effect tree to retry
- * @param {Object} [options] - Retry options, checked as the Retry is built and merged over the library defaults when
- *        it runs. An option set to `undefined` keeps its default, as an absent config key does.
- * @param {number} [options.attempts] - Max retries (not counting first try), a positive integer
- * @param {number} [options.delay] - Ms before first retry, a finite number of 0 or more
- * @param {number} [options.backoff] - Multiplier applied to delay on each subsequent retry, a finite number
- *        of 0 or more
- * @param {(error: any) => Effect} [options.onExhausted] - Runs a fallback Effect when every attempt has
- *        failed, receiving `{ retryExhausted, lastError, attempts }`. The fallback's success feeds `next`
- *        exactly as the primary's would have; its failure propagates unwrapped. A fallback never starts
- *        in a `Parallel` branch a sibling has cancelled.
+ * @param {Object} [options] - Merged over the defaults when it runs; an option set to `undefined` keeps its default.
+ * @param {number} [options.attempts] - Retries after the first try, a positive integer
+ * @param {number} [options.delay] - Ms before the first retry, a finite number of 0 or more
+ * @param {number} [options.backoff] - Multiplier applied to the delay on each later retry, a finite number of 0 or
+ *        more
+ * @param {(error: any) => Effect} [options.onExhausted] - Builds a fallback from `{ retryExhausted, lastError,
+ *        attempts }` once every attempt has failed. Its success feeds `next`; its failure propagates unwrapped.
  * @returns {RetryState}
  */
 const Retry = (effect, options) => {
@@ -179,27 +173,19 @@ const Retry = (effect, options) => {
 };
 
 /**
- * Runs multiple Effect trees concurrently. The first branch to fail cancels its siblings, and that
- * branch's Failure is what the Parallel returns; `next` is skipped. Which branch fails first depends on
- * timing, so it is recorded, and a replay returns the same one.
+ * Runs Effect trees at the same time. The first branch to fail cancels the others, and its Failure is the result.
+ * A cancelled branch starts no further Commands, but one already in flight stops only if its function passes on
+ * the `AbortSignal` it receives.
  *
- * A cancelled branch starts no further Commands. Stopping the Command already in flight needs its
- * function to pass the `AbortSignal` it receives to whatever performs the I/O; one that ignores the
- * signal runs to completion, so a branch's first Command can still write after a sibling has failed.
+ * `settled: true` runs every branch to completion and hands `next` each outcome as a `Success` or `Failure`.
+ * `limit: n` keeps at most `n` branches in flight. Results and paths follow array order either way.
  *
- * `settled: true` turns off that first-failure rule: every branch runs to completion and `next`
- * receives the branch outcomes, `Success` and `Failure` nodes in array order. An `EffectTypeError`
- * still escapes. `limit: n` keeps at most `n` branches in flight. Results and paths stay in array
- * order either way.
- *
- * The second argument is the `next` function or the options, whichever it looks like, so
- * `Parallel(effects, { limit: 5 })` needs no placeholder. `undefined` or `null` there is a skipped `next`,
- * so `Parallel(effects, undefined, { limit: 5 })` still reads the options.
+ * The second argument is `next` or the options, whichever it looks like. `undefined` or `null` there is a skipped
+ * `next`, so options passed third still count.
  *
  * @param {Effect[]} effects - Array of Effect trees to run concurrently
- * @param {((values: any[]) => Effect) | ParallelOptions | null} [nextOrOptions] - Receives array of success
- *        values in order and returns the next Effect, or the options. `next` defaults to
- *        `(values) => Success(values)`, same as `Command`'s default.
+ * @param {((values: any[]) => Effect) | ParallelOptions | null} [nextOrOptions] - Receives the success values in
+ *        order, and defaults to `Success(values)`; or the options.
  * @param {ParallelOptions} [maybeOptions] - Options, when `next` was given or skipped
  * @returns {ParallelState}
  */
@@ -211,14 +197,13 @@ const Parallel = (effects, nextOrOptions, maybeOptions) => {
         if (!isEffect(branch)) throw malformed(`Parallel's branch ${i} is ${describeValue(branch)}.`, branch);
     });
     const hasNext = typeof nextOrOptions === 'function';
-    // A caller forwarding an absent `next` still passes its options third, as the signature reads.
     const nextSkipped = nextOrOptions == null;
     const optionsSecond = !hasNext && !nextSkipped;
     if (optionsSecond && !isOptionsObject(nextOrOptions)) {
         const got = describeArgument(nextOrOptions);
         throw malformed(`Parallel's second argument must be next or the options, got ${got}.`, nextOrOptions);
     }
-    // Nothing reads a third argument after the options, so a `next` passed there would silently be skipped.
+    // Nothing would read a third argument after the options.
     if (optionsSecond && maybeOptions != null) {
         throw malformed(
             typeof maybeOptions === 'function'
@@ -242,7 +227,7 @@ const Parallel = (effects, nextOrOptions, maybeOptions) => {
 };
 
 /**
- * Whether a value is an object that can carry properties: not `null`, a primitive, or a function.
+ * Whether a value is an object: not `null`, a primitive, or a function.
  * @param {any} value
  * @returns {boolean}
  */
@@ -280,13 +265,11 @@ const isFunction = (value) => typeof value === 'function';
 const isOptionsObject = (value) => isObject(value) && !Array.isArray(value) && !isEffect(value);
 
 /**
- * Refuses an option name a function does not read. A misspelt name, or one borrowed from another library, as
- * `concurrency` is from p-limit, otherwise ran with the default and nothing to say so.
+ * Refuses an option name the function does not read, such as p-limit's `concurrency` passed to `Parallel`.
  * @param {any} options
  * @param {string} source - The function that takes them, as the message names it
  * @param {string[]} known
- * @param {(message: string, value: any) => Error} [raise] - Builds the error; a constructor's argument errors are
- *        EffectTypeErrors
+ * @param {(message: string, value: any) => Error} [raise] - Builds the error; a constructor's are EffectTypeErrors
  */
 const rejectUnknownOptions = (options, source, known, raise = (message) => new TypeError(message)) => {
     const name = isObject(options) ? Object.keys(options).find((key) => !known.includes(key)) : undefined;
@@ -297,15 +280,14 @@ const rejectUnknownOptions = (options, source, known, raise = (message) => new T
 };
 
 /**
- * What an option takes: a test its value has to pass, the words for what passes, and advice the message adds after
- * them. `null` for an option that takes any value.
+ * An option's rule: a test its value has to pass, the words for what passes, and advice for the message. `null`
+ * for an option that takes any value.
  * @typedef {[(value: any) => boolean, string, string?] | null} OptionRule
  */
 
 /**
- * Refuses an option a function does not read, by its name, and a value it cannot use. A value of the wrong kind
- * otherwise ran as something else: `settled: 'false'` ran a batch settled, and `maxEntries: null` recorded nothing.
- * An option set to `undefined` keeps its default, as an absent config key does.
+ * Refuses an option name the function does not read, and a value it cannot use. An option set to `undefined` keeps
+ * its default.
  * @param {any} options
  * @param {string} source - The function that takes them, as the message names it
  * @param {Record<string, OptionRule>} rules - Every option the function reads, in the order a message lists them
@@ -327,28 +309,24 @@ const checkOptions = (options, source, rules, raise = (message) => new TypeError
 const defaultRetryOptions = { attempts: 3, delay: 100, backoff: 1 };
 
 /**
- * Checked as the flow is built, with the names, and again when the Retry runs, since its options are a plain object a
- * caller can change in between.
+ * Checked when the Retry is built and again when it runs, since a caller can change the options object in between.
  * @type {Record<string, OptionRule>}
  */
 const retryOptionRules = {
-    // `0` is refused rather than meaning run once: it would make `onExhausted` a free catch.
+    // Not 0, which would make `onExhausted` a catch.
     attempts: [
         isPositiveInteger,
         'a positive integer',
         "To handle an outcome without retrying, branch on it as data in the Command's next, or isolate a failing " +
             "branch with Parallel's settled option."
     ],
-    // A wait that is NaN, negative or infinite used to be no wait at all, so a flapping dependency was called back to
-    // back.
     delay: [isFiniteNonNegative, 'a finite number of 0 or more'],
     backoff: [isFiniteNonNegative, 'a finite number of 0 or more'],
-    // Anything else meant no fallback, so the Effect passed where a function returning it belongs went unused.
     onExhausted: [isFunction, 'a function that returns the fallback']
 };
 
 /**
- * Checked as the flow is built, and again when the Parallel runs, as `Retry`'s are.
+ * Checked when the Parallel is built and again when it runs, as `Retry`'s are.
  * @type {Record<string, OptionRule>}
  */
 const parallelOptionRules = {
@@ -367,7 +345,7 @@ const describeValue = (value) => {
     if (value instanceof Promise) return 'a Promise, which usually means an async function';
     if (typeof value === 'function')
         return 'a function, which usually means a flow was passed without being called with its input';
-    // `String`, since `JSON.stringify` prints NaN and Infinity as null and throws on a BigInt.
+    // `String` for the rest, since JSON prints NaN as null and throws on a BigInt.
     if (typeof value !== 'object') {
         return `the ${typeof value} ${typeof value === 'string' ? JSON.stringify(value) : String(value)}`;
     }
@@ -377,8 +355,8 @@ const describeValue = (value) => {
 };
 
 /**
- * Describes a constructor's argument for an error message. A missing one is usually a misspelt name
- * rather than a missing return, and an Effect in the wrong place is named by its type.
+ * Describes a constructor's argument for an error message. A missing one is usually a misspelt name rather than a
+ * missing return, and an Effect in the wrong place is named by its type.
  * @param {any} value
  * @returns {string}
  */
@@ -386,11 +364,10 @@ const describeArgument = (value) =>
     value === undefined ? 'undefined' : isEffect(value) ? `an Effect of type '${value.type}'` : describeValue(value);
 
 /**
- * Marks an error as the harness failing rather than the flow: a malformed flow, or a trace that cannot
- * answer a step. The interpreter rethrows anything carrying it instead of folding it into a `Failure`, so
- * nothing that handles a domain failure can absorb it. A new kind of harness error gets this mark rather
- * than a name the interpreter has to know. Non-enumerable, so it never shows up in a serialized error or
- * a `deepEqual`.
+ * Marks an error as the harness failing rather than the flow: a malformed flow, or a trace that cannot answer a
+ * step. The interpreter rethrows it rather than folding it into a `Failure`, so nothing that handles a domain
+ * failure can absorb it. A new kind of harness error gets this mark, not a name to match on. Non-enumerable, so it
+ * stays out of a serialized error and a `deepEqual`.
  */
 const harnessError = Symbol('pure-effect.harnessError');
 
@@ -409,9 +386,9 @@ const asHarnessError = (error) => Object.defineProperty(error, harnessError, { v
 const hasMark = (e, mark) => Boolean(e && /** @type {any} */ (e)[mark]);
 
 /**
- * An I/O fault: a Command's function threw, or a `Retry` ran out of attempts. `Retry` retries this, never a
- * `Failure` a step returned, which is an abort. Internal: only `execute` and its per-node functions return
- * one, and `asOutcome` turns it into a plain `Failure` before it reaches user code.
+ * An I/O fault: a Command's function threw, or a `Retry` ran out of attempts. It is what `Retry` retries, unlike a
+ * `Failure` a step returned. Only `execute` and its per-node functions return one, and `asOutcome` turns it into a
+ * plain `Failure` before it reaches user code.
  * @typedef {{ type: 'IoFault', error: any }} IoFaultState
  */
 
@@ -428,17 +405,15 @@ const IoFault = (error) => ({ type: 'IoFault', error });
 const asOutcome = (state) => (state.type === 'IoFault' ? Failure(state.error) : state);
 
 /**
- * Builds an `EffectTypeError`, for a malformed flow: a step or continuation that returned something other
- * than an Effect, or a constructor given an argument it cannot use. It is a harness error: a malformed flow
- * is a bug, so it is thrown rather than becoming a `Failure`.
+ * Builds an `EffectTypeError`, the harness error for a malformed flow or a constructor argument it cannot use.
  *
  * @param {string} message
  * @param {any} value - The malformed value
  * @returns {Error}
  */
 const malformed = (message, value) => {
-    // This error already reports the bug, so the Promise rejecting must not also crash the process as
-    // unhandled. Only a native Promise: calling `then` on a Knex or Mongoose query builder runs the query.
+    // The error reports the bug, so the rejection must not also crash the process as unhandled. Only a native
+    // Promise: calling `then` on a Knex or Mongoose query builder runs the query.
     if (value instanceof Promise) value.catch(() => {});
     return asHarnessError(Object.assign(new Error(message), { name: 'EffectTypeError' }));
 };
@@ -500,8 +475,8 @@ const asEffect = (value, source) => {
 };
 
 /**
- * Connects an Effect to the next function in the pipeline.
- * Handles the branching logic for Success, Failure, Command, Ask, Retry, and Parallel.
+ * Connects an Effect to the next function in the pipeline: a Success passes its value on, a Failure stops, and
+ * every other node gets a `next` that continues into `fn`.
  *
  * @param {Effect} effect - The current Effect object
  * @param {(value: any) => Effect} fn - The next function to run if the current effect is a Success
@@ -511,7 +486,7 @@ const asEffect = (value, source) => {
 const chain = (effect, fn, from) => {
     const source = () => (from ? nextOf(from) : 'A continuation');
 
-    // Checked before `effect.type` is read, which would otherwise throw a bare TypeError naming no step.
+    // Before reading `.type`, so a missing return is named rather than thrown as a bare TypeError.
     if (effect == null) return asEffect(effect, source());
 
     switch (effect.type) {
@@ -541,8 +516,8 @@ const chain = (effect, fn, from) => {
 };
 
 /**
- * The input each flow `effectPipe` built was called with, keyed on the flow's root, for `interpret` to hand
- * `onRun`. Kept off the flow itself, so no node or outcome user code holds carries it.
+ * The input each flow `effectPipe` built was called with, keyed on the flow's root, for `interpret` to hand `onRun`.
+ * Kept off the flow, so no node or outcome carries it.
  * @type {WeakMap<Effect, any>}
  */
 const flowInputs = new WeakMap();
@@ -568,8 +543,7 @@ const effectPipe = (...fns) => {
     });
     return (start) => {
         const tree = fns.reduce((eff, fn) => chain(eff, fn), /** @type {Effect} */ (Success(start)));
-        // A copy, since the last step can return an object other flows share, such as a Failure kept in a
-        // constant, and the input is keyed on it.
+        // Keyed on a copy, since the last step can return an object other flows share, such as a constant Failure.
         const root = { ...tree };
         flowInputs.set(root, start);
         return root;
@@ -580,10 +554,8 @@ const effectPipe = (...fns) => {
 // #region Configuration
 
 /**
- * Wraps one Command execution, or one Parallel: `type` is 'Parallel', and `op` runs the branches and
- * returns the Parallel's decision, even when a branch threw, so a hook must call it. Only a replay passes
- * `op` an argument, the recorded decision. `path` is the step's position in the Effect tree, so it matches
- * between a run and its replay whatever order `Parallel` branches finish in.
+ * Wraps one Command, or one Parallel, whose `op` runs the branches and returns the decision, so a hook must call it.
+ * Only a replay passes `op` an argument, the recorded decision. `path` is the step's position in the Effect tree.
  * @typedef {(name: string, type: string, op: function, path?: string) => Promise<any>} StepRunner
  */
 /** @type StepRunner */
@@ -601,8 +573,7 @@ const defaultRunWrapper = async (effect, op, flowName, initialInput) => await op
 const defaultCommandInterceptor = async (command, context) => {};
 
 /**
- * Refuses the removed `retry` key rather than ignoring it, which would quietly turn a configured
- * `attempts: 5` back into 3. Migration scaffolding: remove at 1.0.
+ * Refuses the removed `retry` key rather than ignoring it. Migration scaffolding: remove at 1.0.
  * @param {any} config
  * @param {string} source
  */
@@ -617,8 +588,8 @@ const rejectRetryKey = (config, source) => {
 const hookNames = ['onStep', 'onRun', 'onBeforeCommand'];
 
 /**
- * Describes what was passed where a configuration belongs. A function there is usually one that builds hooks,
- * as `telemetryHooks` does, passed without calling it.
+ * Describes what was passed where a configuration belongs. A function there is usually one that builds hooks, as
+ * `telemetryHooks` does, passed without calling it.
  * @param {any} value
  * @returns {string}
  */
@@ -628,9 +599,8 @@ const describeConfiguration = (value) =>
         : describeArgument(value);
 
 /**
- * Refuses a configuration that would quietly switch a hook off or break every run: a key no hook is named, as a
- * misspelt `onstep` is, or a hook that is not a function, which made every Command an I/O fault that `Retry`
- * retried. A hook left `undefined` is a slot left unset; `null` is refused, as the types refuse it.
+ * Refuses a key no hook has, such as a misspelt `onstep`, and a hook that is not a function. Only `undefined`
+ * leaves a hook unset.
  * @param {any} config
  * @param {string} source - Where it was passed, as the message names it
  * @param {string} prefix - What precedes a hook's name in the message, as in `configureEffect's onStep`
@@ -650,15 +620,13 @@ const checkConfiguration = (config, source, prefix, known) => {
 /**
  * @typedef {Object} EffectConfiguration
  * @property {StepRunner} [onStep] - Wraps each Command's execution, and each Parallel's branches.
- * @property {RunWrapper} [onRun] - Fires once per runEffect call. It wraps the entire workflow execution, and is
- *           handed the flow's input when `effectPipe` built it.
- * @property {CommandInterceptor} [onBeforeCommand] - Intercepts a Command and any context passed to runEffect before execution.
+ * @property {RunWrapper} [onRun] - Wraps a whole run once, and is handed the flow's input when `effectPipe` built it.
+ * @property {CommandInterceptor} [onBeforeCommand] - Runs before each Command; a throw vetoes it.
  */
 
 /**
- * A per-call configuration: an `EffectConfiguration` plus `inherit`. With `inherit: true` (the default)
- * the call's hooks are merged over the wiring `configureEffect` installed, global outermost. With
- * `inherit: false` that wiring is ignored, so a slot the call leaves unset falls back to the library default.
+ * A per-call configuration. With `inherit: true` (the default) its hooks merge over the installed wiring, global
+ * outermost; with `inherit: false` that wiring is ignored.
  *
  * @typedef {EffectConfiguration & { inherit?: boolean }} CallConfiguration
  */
@@ -667,8 +635,8 @@ const checkConfiguration = (config, source, prefix, known) => {
 let layers = [];
 
 /**
- * The installed layers merged into one configuration. A slot no layer defines is absent, and `runEffect`
- * picks the library default where it reads the slot.
+ * The installed layers merged into one configuration. A slot no layer defines is absent, and `interpret` picks the
+ * library default for it.
  * @type {EffectConfiguration}
  */
 let globalConfig = {};
@@ -679,22 +647,14 @@ const applyLayers = () => {
 };
 
 /**
- * Adds a configuration to the global wiring of the Effect runner: telemetry and the command
- * interceptor. Retry options are not part of it; they are per-use, passed to `Retry(effect, options)`.
- *
- * Each call adds one layer on top of those already installed and returns a function that removes that
- * layer, wherever it sits by then. Layers merge the way several configurations passed to one call do:
- * `onStep` and `onRun` are wrappers, so they nest with the earliest layer outermost and the latest
- * closest to the Command; and `onBeforeCommand` interceptors run in the order installed, the first to throw
- * vetoing the Command. So these
- * are the same:
+ * Adds a layer of global hooks and returns a function that removes it, wherever it sits by then. Layers merge as
+ * configurations passed to one call do, so these are the same:
  *
  *     configureEffect(telemetryHooks(), recordingHooks({ sink }));
  *     configureEffect(telemetryHooks()); configureEffect(recordingHooks({ sink }));
  *
- * Calling it with no arguments at all removes every layer. A call whose arguments are all `undefined`,
- * such as `configureEffect(flag ? hooks : undefined)`, is a conditional install that installed nothing:
- * it adds no layer and removes none.
+ * A call with no arguments removes every layer. A call whose arguments are all `undefined`, as in
+ * `configureEffect(flag ? hooks : undefined)`, adds and removes nothing.
  *
  * @param {...(EffectConfiguration | undefined)} configs - Configurations merged into one layer, outermost first
  * @returns {() => void} Removes the layer this call added; a second call does nothing
@@ -705,7 +665,6 @@ const configureEffect = (...configs) => {
         applyLayers();
         return () => {};
     }
-    // Only `undefined` leaves a configuration out, as in `configureEffect(flag ? hooks : undefined)`.
     const present = configs.filter((config) => config !== undefined);
     // Before installing anything, so a refused call leaves the wiring untouched.
     present.forEach((config) => {
@@ -726,13 +685,9 @@ const configureEffect = (...configs) => {
 };
 
 /**
- * Merges several configurations into one, so independent concerns can share the hooks.
- *
- * `onStep` and `onRun` are wrappers around an `op`, so they nest: the first config given is the
- * outermost and the last sits closest to the Command, so a thrown Command unwinds from the last back
- * to the first. `onBeforeCommand` interceptors do not nest: they run in the order given, and the first to
- * throw vetoes the Command, so the ones after it do not run. A hook
- * no config defines is left unset, so the caller keeps its default for that slot.
+ * Merges configurations into one, the first given outermost. `onStep` and `onRun` nest around `op`, and
+ * `onBeforeCommand` interceptors run in order, the first to throw vetoing the Command. A hook no configuration
+ * defines is left unset.
  *
  * @param {...(EffectConfiguration | undefined)} configs - Configurations to merge, outermost first
  * @returns {EffectConfiguration}
@@ -773,22 +728,22 @@ const chainHooks = (...configs) => {
 // #region Running flows
 
 /**
- * The Failure a cancelled `Parallel` branch stops with. Its error is named so it is never mistaken for
- * the failure that triggered the cancellation.
+ * The Failure a cancelled `Parallel` branch stops with, named so it is never mistaken for the failure that
+ * triggered the cancellation.
  * @returns {FailureState}
  */
 const cancelledBranch = () =>
     Failure(Object.assign(new Error('Parallel branch cancelled.'), { name: 'ParallelCancelled' }));
 
 /**
- * Which branch, if any, cancelled a Parallel. `branch: null` means an enclosing Parallel cancelled it.
- * It is recorded as the Parallel's own step, since it is decided by timing and a replay cannot recompute it.
+ * Which branch, if any, cancelled a Parallel; `branch: null` means an enclosing Parallel did. Timing decides it, so
+ * it is recorded as the Parallel's own step for a replay to hand back.
  * @typedef {{ cancelled: false } | { cancelled: true, branch: number | null }} ParallelDecision
  */
 
 /**
- * What running a Parallel's branches produced: each branch's outcome in array order, the decision, and
- * the first error a branch threw, which the Parallel rethrows once its step has returned the decision.
+ * What running a Parallel's branches produced: each branch's outcome in array order, the decision, and the first
+ * error a branch threw, which the Parallel rethrows once its step has returned the decision.
  * @typedef {{
  *   results: (SuccessState | FailureState | IoFaultState)[],
  *   decision: ParallelDecision,
@@ -804,8 +759,7 @@ const cancelledBranch = () =>
 const isBranchIndex = (branch, count) => Number.isInteger(branch) && branch >= 0 && branch < count;
 
 /**
- * Reads a recorded decision, or `undefined` for anything that is not one, which replays the Parallel
- * under timing.
+ * Reads a recorded decision, or `undefined` for anything that is not one, which replays the Parallel by timing.
  * @param {any} value
  * @param {number} branches - How many branches the Parallel has, so a stale branch index is refused too
  * @returns {ParallelDecision | undefined}
@@ -820,9 +774,8 @@ const asDecision = (value, branches) => {
 };
 
 /**
- * Marks a step a replay reached that production never ran, in a branch a recorded decision cancelled.
- * Only `fromTrace` raises it, and `runCommand` and `runParallel` catch it and stop the branch there, as
- * production did.
+ * Marks a step a replay reached that production never ran, in a branch a recorded decision cancelled. Only
+ * `fromTrace` raises it, and `runCommand` and `runParallel` catch it and stop the branch there, as production did.
  */
 const replayCut = Symbol('pure-effect.replayCut');
 
@@ -857,8 +810,8 @@ const linkedScope = (signal) => {
 };
 
 /**
- * Awaits every task, with at most `limit` of them in flight. Workers pull by index, so results land where
- * the caller put the effect rather than where it finished, which keeps trace paths stable.
+ * Awaits every task, with at most `limit` in flight. Workers pull by index, so results land where the caller put
+ * the effect rather than where it finished, which keeps trace paths stable.
  * @param {(() => Promise<void>)[]} tasks
  * @param {number} [limit]
  * @returns {Promise<void>}
@@ -876,8 +829,8 @@ const runBounded = async (tasks, limit) => {
 };
 
 /**
- * Sleeps, but gives up early when the surrounding branch is cancelled. Resolves either way: the
- * caller's abort check is what turns a cancelled wait into a Failure.
+ * Sleeps, but stops early when the branch is cancelled. Resolves either way; the caller's abort check turns a
+ * cancelled wait into a Failure.
  *
  * @param {number} ms
  * @param {AbortSignal} [signal]
@@ -889,8 +842,8 @@ const delayFor = (ms, signal) =>
             setTimeout(resolve, ms);
             return;
         }
-        // A listener added to an aborted signal never runs, and this is the usual case: a Command that
-        // honours the signal rejects when a sibling fails, and the Retry around it backs off on that signal.
+        // A listener added to an aborted signal never runs, and a Retry often backs off on a signal that has already
+        // fired.
         if (signal.aborted) {
             resolve();
             return;
@@ -908,10 +861,8 @@ const delayFor = (ms, signal) =>
 
 const interpret =
     /**
-     * The interpreter: walks the Effect tree, executing Commands and resolving Ask, Retry, and Parallel.
-     * `runEffect` and `replayEffect` both run flows through it, so a replay cannot drift from a run.
-     * `fastRetry` is the one thing only a replay sets: it waits no time between retry attempts, since a
-     * delay is written on the Retry node and nothing else can override it.
+     * The interpreter, which `runEffect` and `replayEffect` share, so a replay cannot drift from a run. Only a
+     * replay sets `fastRetry`, which waits no time between retry attempts.
      *
      * @param {Effect} effect
      * @param {any} [context]
@@ -925,11 +876,10 @@ const interpret =
         }
         checkConfiguration(callConfig, "runEffect's callConfig", 'callConfig.', [...hookNames, 'inherit']);
         const { inherit = true, ...local } = callConfig;
-        // Not coerced: `'false'` quietly inheriting everything is the behaviour this option exists to remove.
+        // Not coerced, so `'false'` cannot inherit everything.
         if (typeof inherit !== 'boolean') {
             throw new TypeError(`callConfig.inherit must be true or false, got ${JSON.stringify(inherit)}.`);
         }
-        // Merged the way `configureEffect` merges layers. A call with no hooks of its own skips the merge.
         const base = inherit ? globalConfig : {};
         const resolved = Object.keys(local).length ? chainHooks(base, local) : base;
         const localStepRunner = resolved.onStep || defaultStepRunner;
@@ -937,15 +887,13 @@ const interpret =
         const localCommandInterceptor = resolved.onBeforeCommand || defaultCommandInterceptor;
 
         /**
-         * Walks a subtree until it reaches a Success or a Failure. Every node but `Ask` runs in its own
-         * function, which returns a Success carrying the value for the node's `next`, or the Failure or I/O
-         * fault that stops the subtree.
+         * Walks a subtree until it reaches a Success, a Failure or an I/O fault. Every node but `Ask` runs in its
+         * own function, which returns a Success carrying the value for the node's `next`, or what stops the subtree.
          *
          * @param {Effect} eff
          * @param {AbortSignal} [signal] - Cancellation for this subtree, set for `Parallel` branches.
-         * @param {string} [path] - Prefix for this subtree's position in the Effect tree. Steps are numbered
-         *        within a subtree and each `Parallel` branch and `Retry` attempt opens its own prefix, so a
-         *        path depends only on the tree's shape, never on the order branches finish in.
+         * @param {string} [path] - This subtree's prefix. Each `Parallel` branch and `Retry` attempt opens its own, so
+         *        a path depends only on the tree's shape, never on the order branches finish in.
          * @returns {Promise<SuccessState | FailureState | IoFaultState>}
          */
         async function execute(eff, signal, path = '') {
@@ -953,7 +901,7 @@ const interpret =
             /** @type {Effect | undefined} The node whose `next` returned `eff`, which an error names. */
             let from;
             while (isPending(eff)) {
-                // Checked before every node: a Command already in flight cannot be stopped, but the next never starts.
+                // A Command already in flight cannot be stopped, but the next one never starts.
                 if (signal?.aborted) return cancelledBranch();
                 if (eff.type === 'Ask') {
                     from = eff;
@@ -978,8 +926,8 @@ const interpret =
         }
 
         /**
-         * Runs a Retry's wrapped tree until it succeeds or runs out of attempts, then its fallback if it has
-         * one. Each attempt opens its own path prefix, and so does the fallback.
+         * Runs a Retry's wrapped tree until it succeeds or runs out of attempts, then its fallback if it has one.
+         * Each attempt opens its own path prefix, and so does the fallback.
          *
          * @param {RetryState} retry
          * @param {AbortSignal | undefined} signal
@@ -987,9 +935,7 @@ const interpret =
          * @returns {Promise<SuccessState | FailureState | IoFaultState>}
          */
         async function runRetry(retry, signal, stepPath) {
-            // Checked again, since a node's options are a plain object a caller can change after building it.
             checkOptions(retry.options, 'Retry', retryOptionRules, malformed);
-            // An option set to `undefined` keeps its default, since that is how an absent config key arrives.
             const given = Object.entries(retry.options ?? {}).filter(([, value]) => value !== undefined);
             const opts = /** @type {typeof defaultRetryOptions & RetryState['options']} */ ({
                 ...defaultRetryOptions,
@@ -998,31 +944,29 @@ const interpret =
             const { attempts, onExhausted } = opts;
             let lastError;
             for (let attempt = 0; attempt <= attempts; attempt++) {
-                // Under `fastRetry` this waits for no time rather than skipping the wait, so branches replayed by
-                // timing still interleave as they do with a delay.
+                // `fastRetry` waits for no time rather than skipping the wait, so branches replayed by timing still
+                // interleave.
                 if (attempt > 0) {
                     await delayFor(fastRetry ? 0 : opts.delay * Math.pow(opts.backoff, attempt - 1), signal);
                 }
                 // After the wait, so a branch cancelled mid-backoff makes no further attempt.
                 if (signal?.aborted) return cancelledBranch();
                 const result = await execute(retry.effect, signal, `${stepPath}r${attempt}/`);
-                // A Success feeds `next`. An abort is the flow deciding, not the I/O failing: not retried, not
-                // wrapped.
+                // Only an I/O fault is retried. An abort passes through unwrapped.
                 if (result.type !== 'IoFault') return result;
                 lastError = result.error;
             }
             const exhausted = { retryExhausted: true, lastError, attempts };
-            // An exhaustion is a fault too, which keeps an enclosing Retry retrying this one.
+            // A fault too, so an enclosing Retry retries this one.
             if (typeof onExhausted !== 'function') return IoFault(exhausted);
-            // A cancelled branch starts no fallback, as it starts no further Commands.
             if (signal?.aborted) return cancelledBranch();
             // A failing fallback propagates as it is, not wrapped as another exhaustion.
             return execute(asEffect(onExhausted(exhausted), "Retry option 'onExhausted'"), signal, `${stepPath}rf/`);
         }
 
         /**
-         * Runs a Parallel as one step of its own, whose `op` runs the branches and returns the decision, so
-         * the decision is recorded and a replay can hand it back.
+         * Runs a Parallel as one step, whose `op` runs the branches and returns the decision, so the decision is
+         * recorded and a replay can hand it back.
          *
          * @param {ParallelState} parallel
          * @param {AbortSignal | undefined} signal
@@ -1030,11 +974,8 @@ const interpret =
          * @returns {Promise<SuccessState | FailureState | IoFaultState>}
          */
         async function runParallel(parallel, signal, stepPath) {
-            // Branch prefixes come from array index, never completion order, so two branches calling the same
-            // Command are told apart by position.
             const branchPath = `${stepPath}p`;
             const options = parallel.options ?? {};
-            // Checked again, as a Retry's are.
             checkOptions(options, 'Parallel', parallelOptionRules, malformed);
             const { settled } = options;
             // Cast rather than annotated, since only `op` assigns it.
@@ -1047,7 +988,7 @@ const interpret =
             try {
                 await localStepRunner('Parallel', 'Parallel', op, branchPath);
             } catch (e) {
-                // A cut from `fromTrace`: a replay found this Parallel inside a branch production had already stopped.
+                // A cut from `fromTrace`: production had already stopped the branch this Parallel is in.
                 if (hasMark(e, replayCut)) return cancelledBranch();
                 throw e;
             }
@@ -1059,10 +1000,8 @@ const interpret =
                 );
             }
             const { results, decision, thrown } = run;
-            // Rethrown here, after the step has returned its decision, so the decision is recorded.
+            // Rethrown only now, after the step has returned its decision, so the decision is recorded.
             if (thrown) throw thrown.error;
-            // Settled hands `next` the outcomes as plain Success and Failure nodes, so the Parallel never fails
-            // on a branch's account.
             if (settled) return Success(results.map(asOutcome));
             const failure =
                 decision.cancelled && decision.branch !== null
@@ -1073,10 +1012,9 @@ const interpret =
         }
 
         /**
-         * Runs a Parallel's branches and decides which branch, if any, cancelled the others. In a live run
-         * timing decides it, which is why the decision is recorded. A recorded cancellation passed in by a
-         * replay is reproduced rather than recomputed: no branch cancels another, each runs its recorded steps
-         * and stops where its recording stops, and the recorded branch's failure is the result.
+         * Runs a Parallel's branches and decides which branch, if any, cancelled the others. Live, timing decides.
+         * A recorded cancellation is reproduced rather than recomputed: no branch cancels another, each stops where
+         * its recording stops, and the recorded branch's failure is the result.
          *
          * @param {Effect[]} effects
          * @param {ParallelOptions} options
@@ -1088,8 +1026,8 @@ const interpret =
          */
         async function runBranches(effects, options, signal, branchPath, recorded) {
             const { limit, settled } = options;
-            // A recorded branch past the end means the flow changed shape since the recording. A negative one is
-            // not a decision, so it replays by timing like anything else.
+            // A recorded branch past the end means the flow changed shape. A negative one is not a decision, and
+            // replays by timing.
             const recordedBranch = recorded?.cancelled === true ? recorded.branch : undefined;
             const pastTheEnd = Number.isInteger(recordedBranch) && recordedBranch >= effects.length;
             if (pastTheEnd) {
@@ -1102,9 +1040,8 @@ const interpret =
             }
             const forced = asDecision(recorded, effects.length);
             const reproducing = forced !== undefined && forced.cancelled;
-            // Live, a throw cancels the others, and so does a failure unless `settled`; the run rejects on a throw
-            // either way, and an enclosing Parallel can still cancel this one. Reproducing, nothing cancels, since
-            // the recording already says where each branch stops.
+            // Live, a throw cancels the others, and so does a failure unless `settled`. Reproducing, nothing does,
+            // since the recording already says where each branch stops.
             const { results, thrown, trigger, cancelled } = await settleBranches(
                 effects,
                 limit,
@@ -1137,8 +1074,8 @@ const interpret =
 
         /**
          * Runs every branch to completion, at most `limit` at once, under one cancellation scope linked to the
-         * enclosing one. A branch that settles in a way `cancelsOthers` accepts cancels the rest, and the first
-         * to do so is the trigger.
+         * enclosing one. The first branch to settle in a way `cancelsOthers` accepts cancels the rest, and is the
+         * trigger.
          *
          * @param {Effect[]} effects
          * @param {number | undefined} limit
@@ -1159,7 +1096,7 @@ const interpret =
             // Held rather than rethrown, so every branch still settles and no `limit` worker stops early.
             /** @type {{ error: unknown }[]} */
             const thrown = new Array(effects.length);
-            // Which branch cancelled the others on its own account rather than because it was cancelled.
+            // Whether each branch cancelled the others itself, rather than being cancelled.
             const triggered = new Array(effects.length).fill(false);
             const settle = async (/** @type {Effect} */ branch, /** @type {number} */ i) => {
                 try {
@@ -1174,7 +1111,7 @@ const interpret =
                 }
             };
             try {
-                // Awaits every branch, so no cancelled work runs on unobserved after the Parallel returns.
+                // Awaits every branch, so no cancelled work runs on after the Parallel returns.
                 await runBounded(
                     effects.map((branch, i) => () => settle(branch, i)),
                     limit
@@ -1192,9 +1129,8 @@ const interpret =
         }
 
         /**
-         * Runs one Command. A throw means something different in each region: an interceptor throwing vetoes
-         * the Command, which is an abort, and the Command's function throwing is an I/O fault. A harness error
-         * is rethrown from either.
+         * Runs one Command. A throw from an interceptor vetoes the Command, an abort; a throw from its function is an
+         * I/O fault. A harness error is rethrown from either. DESIGN.md's "Where a throw comes from" has the rest.
          *
          * @param {CommandState} command
          * @param {AbortSignal | undefined} signal
@@ -1204,19 +1140,17 @@ const interpret =
         async function runCommand(command, signal, cmdPath) {
             const cmdName = commandName(command);
             const { cmd } = command;
-            // Whether the function itself succeeded: a hook throwing after it did is a bug, and retrying would
-            // repeat work already done.
+            // Whether the function itself succeeded: a hook that throws after that is a bug, not an I/O fault.
             let succeeded = false;
             // What it returned, so a hook that loses it is caught.
             /** @type {unknown} */
             let value;
-            // The signal goes only to a function that declares a parameter for it, and only inside a Parallel. A
-            // parameter with a default value does not count toward `length`, so `nanoid(size = 21)` passed by name
-            // keeps its default rather than reading the signal as its size. A plain first parameter the function
-            // treats as optional still takes the signal: a documented sharp edge.
+            // Only inside a Parallel, and only to a function that declares a parameter. A parameter with a default
+            // value does not count toward `length`, so `nanoid(size = 21)` keeps its default; a plain first parameter
+            // the function treats as optional still takes the signal, a documented sharp edge.
             const takesSignal = signal !== undefined && cmd.length > 0;
-            // Async, so a hook always gets a promise, even from a synchronous function. The latest call is kept,
-            // with whether it is still running, so a hook that does not wait for it is caught.
+            // Async, so a hook always gets a promise. The latest call is kept, with whether it is still running, to
+            // catch a hook that does not wait for it.
             /** @type {Promise<unknown> | undefined} */
             let call;
             let running = false;
@@ -1244,25 +1178,22 @@ const interpret =
             let unwaited = false;
             try {
                 returned = await localStepRunner(cmdName, 'Command', op, cmdPath);
-                // A hook that called `op` without waiting for it returned while the Command ran, so the check below
-                // would have nothing to check yet. Waiting here judges the step as though the hook had awaited `op`.
+                // A hook that returned without awaiting `op` is judged as though it had awaited it.
                 if (returned === undefined && running) {
                     unwaited = true;
                     await call;
                 }
             } catch (e) {
-                // A cut from `fromTrace`: a step production never ran, in a branch a Parallel cancelled. Stop here,
-                // as production did.
+                // A cut from `fromTrace`: production stopped this branch before this step.
                 if (hasMark(e, replayCut)) return cancelledBranch();
                 if (hasMark(e, harnessError)) throw e;
-                // A hook threw after the function returned, which is a bug in the hook. A hook that throws
-                // without calling `op` is still a fault, since that is how replay reports a recorded error.
+                // After the function succeeded, a throw is a bug in a hook. From a hook that never called `op` it is a
+                // fault, which is how replay reports a recorded error.
                 if (succeeded) throw e;
                 return IoFault(e);
             }
-            // A hook that awaited `op` and forgot to return its result: `next` would take the branch for a Command
-            // that returned nothing, while a recorder inside the hook kept the real value. Only `undefined` is
-            // refused, so a hook that returns a copy of the result still works.
+            // A hook that dropped the result would hand `next` `undefined`. Only `undefined` is refused, so a hook can
+            // return a copy.
             if (returned === undefined && succeeded && value !== undefined) {
                 throw new TypeError(
                     `An onStep hook called op for '${cmdName}' at path '${cmdPath}' and returned undefined` +
@@ -1275,13 +1206,12 @@ const interpret =
 
         // An I/O fault becomes a plain Failure here, where every outcome leaves.
         const run = async () => asOutcome(await execute(effect));
-        // Recorded by `effectPipe`, so a hook-based recorder can store what the flow was called with.
         return localRunWrapper(effect, run, context?.flowName || '', flowInputs.get(effect));
     };
 
 /**
- * Runs a flow: executes its Commands, resolving `Ask` with the context and running `Retry` and `Parallel`.
- * onRun fires exactly once per call; Retry attempts run inside that single span.
+ * Runs a flow: executes its Commands, resolving `Ask` with the context and running `Retry` and `Parallel`. `onRun`
+ * fires once per call, around every Retry attempt.
  *
  * @param {Effect} effect - The Effect tree returned by a pipeline
  * @param {any} [context] - Optional context object. Passed to Ask continuations and the Command Interceptor.
@@ -1295,19 +1225,17 @@ const runEffect = (effect, context, callConfig) => interpret(effect, context, ca
 // #region Recording and replay
 
 /**
- * The step a replay is asking about. `path` is the Command's position in the Effect tree and is stable
- * across runs; `index` is its position in this run's completion order, which is not stable for a flow
- * containing `Parallel`. Prefer `path` when writing a Resolver. A step whose `type` is 'Parallel' asks
- * for a Parallel's recorded decision; it does not advance `index`, and `undefined` or an outcome that
- * holds no decision replays that Parallel under timing.
+ * The step a replay is asking about. `path` is its position in the Effect tree, stable across runs; `index` is its
+ * position in completion order, which is not stable for a flow with a `Parallel`. A step whose `type` is 'Parallel'
+ * asks for the recorded decision and does not advance `index`; an answer that holds no decision replays that
+ * Parallel by timing.
  * @typedef {{ index: number, name: string, type: string, path?: string }} ReplayStep
  */
 
 /**
- * What production observed for a step. `{ result }` is handed to the Command's
- * `next`; `{ error }` is thrown so the interpreter produces a Failure. A resolver
- * returning `undefined` means "not recorded". Any other answer, `null` included, or a throw
- * from the resolver, rejects the replay.
+ * What production observed for a step. `{ result }` is handed to the Command's `next`; `{ error }` is thrown. A
+ * Resolver returning `undefined` means "not recorded". Any other answer, `null` included, or a throw from the
+ * Resolver, rejects the replay.
  *
  * @typedef {{ result: any } | { error: any }} ReplayOutcome
  */
@@ -1322,12 +1250,9 @@ const isReplayOutcome = (value) => isObject(value) && ('result' in value || 'err
 /** @typedef {(step: ReplayStep) => ReplayOutcome | undefined} Resolver */
 
 /**
- * A recorded step: a Command's result or error, or a Parallel's decision, recorded as `command`
- * 'Parallel' at the Parallel's own path with the decision as its `result`. `durationMs` is how long
- * the step took in production, rounded to microseconds. `path` is what a replay matches on.
- * `threw` marks a step that threw. The `error` key alone cannot, since JSON drops it when the value is
- * `undefined`, as it is for `reject()` with no argument or an error `redact` removed. `unrecorded`
- * marks a step the entry holds no result or error for, and says why.
+ * A recorded step: a Command's result or error, or a Parallel's decision, recorded as `command` 'Parallel' at the
+ * Parallel's own path. `threw` marks a throw, since JSON drops an `error` key whose value is `undefined`.
+ * `unrecorded` says why the entry holds no value. `durationMs` is rounded to microseconds.
  * @typedef {{
  *   command: string,
  *   path?: string,
@@ -1340,9 +1265,8 @@ const isReplayOutcome = (value) => isObject(value) && ('result' in value || 'err
  */
 
 /**
- * The reference trace format produced by `recorder`. A convenience, not a contract:
- * `replayEffect` takes a Resolver, so any storage shape works. `unrecorded` gives, for each of the
- * trace's own `initialInput` and `context` that it holds nothing for, why.
+ * The reference trace format produced by `recorder`. A convenience, not a contract: `replayEffect` takes a Resolver,
+ * so any storage shape works. `unrecorded` says why the trace holds no `initialInput` or `context`.
  * @typedef {{
  *   flowName?: string,
  *   version?: string,
@@ -1355,10 +1279,9 @@ const isReplayOutcome = (value) => isObject(value) && ('result' in value || 'err
  */
 
 /**
- * A replay fault: the trace cannot answer the flow, or disagrees with it. A harness error while the flow
- * runs, so nothing inside the flow can swallow it; `replayEffect` turns it into a `Failure` at its own
- * boundary. An `EffectTypeError` carries no replay mark and keeps propagating, since a malformed flow is
- * a bug in the flow rather than a problem with the trace.
+ * Marks a replay fault: the trace cannot answer the flow, or disagrees with it. `replayEffect` turns one into a
+ * `Failure` at its own boundary. An `EffectTypeError` has no such mark and keeps propagating, since a malformed flow
+ * is a bug in the flow rather than in the trace.
  */
 const replayFault = Symbol('pure-effect.replayFault');
 
@@ -1378,8 +1301,7 @@ const replayError = (message, props = {}) =>
     );
 
 /**
- * Builds a `TimeParadox`: the replay reached a point where the flow no longer matches its recording, which
- * means the code has diverged from the recorded run.
+ * Builds a `TimeParadox`: the flow no longer matches its recording at this point.
  * @param {string} at - Where, as the message names it
  * @param {string} detail - How the flow and the recording disagree
  * @param {Object} props - The fields that locate it, such as `path`
@@ -1405,8 +1327,8 @@ const timeParadox = (step, recorded) =>
 const carriedKeys = ['name', 'message', 'cause'];
 
 /**
- * Converts a thrown value into something JSON can carry. `message` and `stack` are
- * non-enumerable on Error, so a plain `JSON.stringify` would silently drop them.
+ * Converts a thrown value into something JSON can carry, including the non-enumerable `message`, `stack` and
+ * `cause` a plain `JSON.stringify` would drop.
  *
  * @param {any} e - The thrown value
  * @param {boolean} [withStack] - Include the stack (off by default: noisy, leaks paths)
@@ -1417,25 +1339,22 @@ const serializeError = (e, withStack, ancestors = new Set()) => {
     if (!(e instanceof Error)) return e;
     /** @type {any} */
     const out = { __error: true, name: e.name, message: e.message };
-    // A chain that comes back to an error it passed through is cut there, with the name and message only:
-    // following it overflowed the stack, and the recorder dropped the whole step. Only ancestors count, so an
+    // A chain that loops back is cut where it returns, with the name and message only. Only ancestors count, so an
     // error that merely appears twice is carried in full both times.
     if (ancestors.has(e)) return out;
     ancestors.add(e);
     if (withStack) out.stack = e.stack;
-    // `cause` is non-enumerable too, and it can itself be an Error, so it is carried recursively.
     if ('cause' in e) out.cause = serializeError(e.cause, withStack, ancestors);
-    // So is an AggregateError's `errors`, which is where its detail lives. It goes under its own key so
-    // revival can tell it from an enumerable `errors`, which is data and is copied below as it is.
+    // An AggregateError's hidden `errors` goes under its own key, so revival can tell it from an enumerable `errors`,
+    // which is data and is copied below as it is.
     const errors = /** @type {any} */ (e).errors;
     const hasHiddenErrors = Array.isArray(errors) && !Object.prototype.propertyIsEnumerable.call(e, 'errors');
     if (hasHiddenErrors) {
         out.__errors = errors.map((x) => serializeError(x, withStack, ancestors));
     }
     ancestors.delete(e);
-    // Assigning `name`, `message` or `cause`, as `e.name = 'TimeoutError'` or `e.cause = inner` does, makes it
-    // enumerable. It is carried above already, so it is listed for revival to restore as it was rather than
-    // copied again, where a raw cause would replace the serialized one and reach JSON as {}.
+    // An assigned `name`, `message` or `cause` is enumerable. It is carried above already, so it is only listed, for
+    // revival to restore as it was.
     const shown = carriedKeys.filter((k) => Object.prototype.propertyIsEnumerable.call(e, k));
     if (shown.length > 0) out.__enumerable = shown;
     for (const k of Object.keys(e)) if (!carriedKeys.includes(k)) out[k] = /** @type {any} */ (e)[k];
@@ -1443,23 +1362,21 @@ const serializeError = (e, withStack, ancestors = new Set()) => {
 };
 
 /**
- * Rebuilds an Error from `serializeError` output. Non-Error values pass through, so a
- * Command that rejected with a string still replays as a string.
+ * Rebuilds an Error from `serializeError` output. Non-Error values pass through, so a Command that rejected with a
+ * string still replays as a string.
  * @param {any} v - A serialized error, or any other recorded value
  * @returns {any}
  */
 const reviveError = (v) => {
     if (!isObject(v) || v.__error !== true) return v;
     const e = new Error(v.message);
-    // `name`, `message`, `cause` and `errors` are defined as the original had them, so a revived error
-    // deep-equals the one the Command threw: non-enumerable, as on a native Error, unless `__enumerable` lists
-    // them. Every other key was enumerable on the original.
+    // `name`, `message`, `cause` and `errors` get the enumerability the original had, so a revived error deep-equals
+    // the one the Command threw.
     const shown = Array.isArray(v.__enumerable) ? v.__enumerable : [];
     const restore = (/** @type {string} */ key, /** @type {any} */ value) =>
         Object.defineProperty(e, key, { enumerable: shown.includes(key), configurable: true, writable: true, value });
     restore('name', v.name);
     if (shown.includes('message')) restore('message', v.message);
-    // The markers are dropped, and `name` and `message` are already set.
     const alreadyHandled = ['__error', '__enumerable', 'name', 'message'];
     for (const [k, val] of Object.entries(v)) {
         if (alreadyHandled.includes(k)) continue;
@@ -1472,12 +1389,9 @@ const reviveError = (v) => {
 
 /**
  * @typedef {Object} RecorderOptions
- * @property {(value: any, name: string, kind: string) => any} [redact] - Scrubs every value a trace holds:
- *           each Command's result, each serialized error, and the `initialInput` and `context` stored on the
- *           trace itself. `kind` is `'result'`, `'error'`, `'initialInput'`, or `'context'`, and `name` is the
- *           Command's name for the first two and the kind for the last two. It is the single place PII is kept
- *           out of a trace, so it has to see all four. It is handed a copy, so changing the value in place
- *           never reaches the run. A value it throws on is left out of the trace, which marks where.
+ * @property {(value: any, name: string, kind: string) => any} [redact] - Scrubs every value a trace holds. `kind` is
+ *           `'result'`, `'error'`, `'initialInput'` or `'context'`, and `name` is the Command's name for the first
+ *           two and the kind for the others. It is handed a copy; a value it throws on is left out and marked.
  * @property {number} [maxEntries] - Caps trace length; further steps are counted in `dropped`, not stored.
  * @property {boolean} [stack] - Records stack traces for thrown errors.
  */
@@ -1485,14 +1399,13 @@ const reviveError = (v) => {
 /** @type {Record<string, OptionRule>} */
 const recorderOptionRules = {
     redact: [isFunction, 'a function'],
-    // `null` compared as 0, so the recorder kept nothing.
     maxEntries: [(value) => value === Infinity || isPositiveInteger(value), 'a positive integer or Infinity'],
     stack: [isBoolean, 'true or false']
 };
 
 /**
- * Why the recorder stored nothing for a value: `redact` threw on it, or copying it threw, as a getter on it can. It
- * stores nothing rather than a stand-in, since anything stored there would replay as what production saw.
+ * Why the recorder stored nothing for a value: `redact` threw on it, or copying it threw. It stores nothing rather
+ * than a stand-in, since a stand-in would replay as what production saw.
  * @typedef {'redact' | 'copy'} UnrecordedCause
  */
 
@@ -1502,11 +1415,9 @@ const recorderOptionRules = {
  */
 
 /**
- * Runs one of the two parts of recording a value that can throw, and names it when it does. They are the only parts
- * caught, since each runs the caller's code or reads the caller's value, and a throw from either must not reach the
- * run. Every read of the caller's value, and of what `redact` returns, which is the caller's too, happens inside one.
- * Nothing else in the recorder throws, and nothing else may: a throw that escaped while a Command's error was being
- * recorded would take that error's place, and `Retry` would retry it.
+ * Runs one of the two parts of recording that can throw, `redact` or the copy, and names the one that threw. Every
+ * read of the caller's value, and of what `redact` returns, goes through here. Nothing else in the recorder may
+ * throw: a throw while a Command's error was being recorded would replace that error, and `Retry` would retry it.
  * @param {UnrecordedCause} cause
  * @param {() => any} compute
  * @returns {Recorded}
@@ -1528,22 +1439,21 @@ const recordPart = (cause, compute) => {
  */
 
 /**
- * Copies a value into the one form a trace has, the JSON it is stored as, on its way into a trace and again on its way
- * out in a replay. So a later mutation cannot rewrite what the trace says a step returned, `redact` is handed a copy
- * the flow never sees, and a replay from memory hands the flow what a replay from storage does. A value JSON cannot
- * encode, such as a BigInt or a getter that throws, throws here, and the recorder marks it unrecorded.
- * `undefined`, and a function, which JSON leaves out, come back as `undefined`.
+ * Copies a value through JSON, the one form a trace has, on its way into a trace and on its way out in a replay, so a
+ * replay from memory hands the flow what one from storage does. Throws on a value JSON cannot encode, such as a
+ * BigInt; `undefined` and a function come back as `undefined`.
  *
  * @param {any} value
  * @returns {any}
  */
 const snapshot = (value) => {
-    // A reference back to an object the copy is inside of is cut, as `serializeError` cuts an error chain, so an HTTP
-    // client's request and response that point at each other still reach `redact`. One shared without a loop is kept.
+    // A reference back to an enclosing object is cut, so a request and a response that point at each other can still
+    // be recorded. An object shared without a loop is kept.
     /** @type {object[]} */
     const ancestors = [];
     const json = JSON.stringify(value, function (key, item) {
         if (!isObject(item)) return item;
+        // `this` is the object holding `item`, so popping back to it leaves only `item`'s ancestors.
         while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) ancestors.pop();
         if (ancestors.includes(item)) return undefined;
         ancestors.push(item);
@@ -1555,11 +1465,9 @@ const snapshot = (value) => {
 const now = () => (typeof performance === 'object' ? performance.now() : Date.now());
 
 /**
- * Builds an `onStep` hook that records every Command's result or error and every Parallel's decision, plus
- * a packager for the reference trace format. Pass `onStep` to `runEffect` as per-call config. A recorder holds
- * the steps of every run it sees, so installed with `configureEffect` for a whole application it mixes requests
- * into one trace with duplicate paths, which a replay refuses; examples/recording-example.js gives each run its
- * own.
+ * Builds an `onStep` hook that records every Command's result or error and every Parallel's decision, and `toTrace`,
+ * which packages them. Give each run its own recorder: one installed for a whole application mixes runs into a trace
+ * a replay refuses. examples/recording-example.js shows how.
  *
  * @param {RecorderOptions} [options] - Redaction and size limits
  * @returns {{ onStep: StepRunner, entries: TraceEntry[], toTrace: (meta?: TraceMeta) => TraceLog }}
@@ -1583,26 +1491,23 @@ const recorder = (options = {}) => {
     const copyAndRedact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
         const copied = recordPart('copy', () => snapshot(value));
         if ('unrecorded' in copied) return copied;
-        // What redact returns is stored in the same form, so it reads the same from memory as from storage.
+        // What redact returns is copied too, so it reads the same from memory as from storage.
         return recordPart('redact', () => snapshot(redact(copied.value, name, kind)));
     };
 
     /**
-     * Copies a thrown value's serialized form and redacts the copy. An Error stays marked as one when redact
-     * returns an object without the mark, as one that builds a fresh object from `name` and `message` does:
-     * otherwise the replay handed the flow a plain object where production had thrown an Error.
+     * Copies a thrown value's serialized form and redacts the copy. An Error stays marked as one when `redact` returns
+     * an object without the mark, so a replay still throws an Error.
      * @returns {Recorded}
      */
     const recordError = (/** @type {any} */ thrown, /** @type {string} */ name) => {
-        // Whether it was an Error is read here, inside the part that catches, since it reads the caller's value, and
-        // before redact runs, since redact may change the copy it is handed.
+        // Read inside the copy, since it reads the caller's value, and before `redact` can change the copy.
         const copied = recordPart('copy', () => {
             const copy = snapshot(serializeError(thrown, stack));
             return { copy, wasError: isObject(copy) && copy.__error === true };
         });
         if ('unrecorded' in copied) return copied;
         const { copy: serialized, wasError } = copied.value;
-        // Reading what redact returned is part of redacting, since that value is the caller's.
         return recordPart('redact', () => {
             const redacted = snapshot(redact(serialized, name, 'error'));
             const rebuilt = wasError && isObject(redacted) && !Array.isArray(redacted) && redacted.__error !== true;
@@ -1612,15 +1517,14 @@ const recorder = (options = {}) => {
 
     /**
      * Records each step it wraps and changes nothing about it: `op` runs, its result is returned, and its error
-     * propagates. A value it cannot record is left out, and the entry says why, rather than the entry being lost.
+     * propagates.
      * @type {StepRunner}
      */
     const onStep = async (name, type, op, path) => {
         const started = now();
         const record = (/** @type {boolean} */ threw, /** @type {any} */ outcome) => {
             const durationMs = Math.round((now() - started) * 1000) / 1000;
-            // A Parallel's result is its decision, which holds no user data and must survive intact for a replay
-            // to reproduce it, so it is not redacted.
+            // A Parallel's decision holds no user data and must survive intact for a replay, so it is not redacted.
             const recorded = threw
                 ? recordError(outcome, name)
                 : type === 'Parallel'
@@ -1647,11 +1551,10 @@ const recorder = (options = {}) => {
     };
 
     /**
-     * Redacts and copies `meta.initialInput` and `meta.context` when it is called, so call it before the run
-     * when the run can change them, and take `dropped` and `trace` from a second call once it ends. A field it
-     * cannot record is left out and named in `unrecorded` with why, so a replay that needs it refuses. It never
-     * throws. `undefined` is left alone, so a flow with no context does not acquire an empty object from a redact
-     * function that spreads its argument.
+     * Copies and redacts `meta.initialInput` and `meta.context` when it is called, so call it before a run that can
+     * change them, and again once it ends for `dropped` and `trace`. A field it cannot record is named in
+     * `unrecorded`. It never throws. `undefined` is left alone, so a redact that spreads its argument cannot invent
+     * an empty object.
      * @param {TraceMeta} [meta]
      * @returns {TraceLog}
      */
@@ -1679,9 +1582,8 @@ const recorder = (options = {}) => {
 };
 
 /**
- * Runs a flow for real while recording every Command result, and returns both the
- * outcome and a replayable trace. Convenient in tests and scripts; to record an application without
- * changing call sites, give each run its own recorder, as examples/recording-example.js does.
+ * Runs a flow for real while recording it, and returns the outcome and a replayable trace. Convenient in tests and
+ * scripts; to record an application, give each run its own recorder, as examples/recording-example.js does.
  *
  * @param {(input: any) => Effect} flowFn - Builds the Effect tree from its input
  * @param {any} initialInput - The value the flow is called with; stored so a replay can rebuild it
@@ -1693,8 +1595,7 @@ const recordEffect = async (flowFn, initialInput, options = {}) => {
     checkOptions(options, 'recordEffect', { context: null, version: null, ...recorderOptionRules });
     const { context = {}, version, ...recorderOptions } = options;
     const rec = recorder(recorderOptions);
-    // Packaged before the run, so a Command that writes to the input or the context, as an ORM save
-    // assigning an id does, cannot rewrite what the trace says the run received.
+    // Before the run, so a Command that writes to the input or the context cannot rewrite what the trace received.
     const head = rec.toTrace({ initialInput, flowName: context.flowName, context, version });
     // Merged over the global wiring, so recording inside an instrumented application keeps its spans.
     const result = await runEffect(flowFn(initialInput), context, { onStep: rec.onStep });
@@ -1703,8 +1604,7 @@ const recordEffect = async (flowFn, initialInput, options = {}) => {
 };
 
 /**
- * Whether a recorded entry says its step threw: `threw`, or an `error` key, which is how older and
- * hand-written traces say it.
+ * Whether a recorded entry says its step threw: `threw`, or an `error` key, as older and hand-written traces say it.
  * @param {TraceEntry} entry
  * @returns {boolean}
  */
@@ -1727,10 +1627,9 @@ const isInsideParallel = (path) => typeof path === 'string' && /p\d+\//.test(pat
 /** @typedef {'Command' | 'Retry' | 'Parallel'} NodeKind */
 
 /**
- * The positions a path passes through, each with the kind of node there: the Retry or Parallel each prefix
- * opens, then the Command the path ends at, or the Parallel whose own entry it is. So `0p1/2r0/1` passes a
- * Parallel at `0` and a Retry at `0p1/2`, and ends at a Command at `0p1/2r0/1`. A path that is not in the
- * recorder's format gives none, so a hand-built trace is never judged by its shape.
+ * The positions a path passes through, each with the kind of node there. `0p1/2r0/1` passes a Parallel at `0` and a
+ * Retry at `0p1/2`, and ends at a Command at `0p1/2r0/1`. A path not in the recorder's format gives none, so a
+ * hand-built trace is never judged by its shape.
  * @param {string} path
  * @returns {[string, NodeKind][]}
  */
@@ -1749,8 +1648,8 @@ const nodesAlong = (path) => {
 };
 
 /**
- * Turns a recorded entry into the outcome a Resolver must return, snapshotted so a replayed step that
- * mutates its result cannot rewrite the trace.
+ * Turns a recorded entry into the outcome a Resolver returns, copied so a replayed step that mutates its result
+ * cannot rewrite the trace.
  *
  * @param {TraceEntry} entry
  * @returns {ReplayOutcome}
@@ -1759,9 +1658,8 @@ const entryToOutcome = (entry) =>
     entryThrew(entry) ? { error: reviveError(snapshot(entry.error)) } : { result: snapshot(entry.result) };
 
 /**
- * Whether an entry is a Parallel's recorded decision rather than a Command's result. A Parallel's path
- * ends in its `p` marker and a Command's in its step number, so a Command that happens to be named
- * 'Parallel' is never mistaken for one.
+ * Whether an entry is a Parallel's recorded decision. A decision's path ends in `p`, so a Command named 'Parallel'
+ * is never mistaken for one.
  * @param {TraceEntry} entry
  * @returns {boolean}
  */
@@ -1769,21 +1667,14 @@ const isDecisionEntry = (entry) =>
     entry.command === 'Parallel' && typeof entry.path === 'string' && entry.path.endsWith('p');
 
 /**
- * Builds a Resolver for the reference trace format. Internal: `replayEffect` is the only caller, and a
- * caller with traces in another shape writes a Resolver instead.
- *
- * When every entry carries a `path`, steps are matched by path, which is order-independent and still
- * detects a paradox: two `Parallel` branches calling the same Command are told apart by position. A
- * trace without paths is matched positionally, each entry checked against the Command the flow asks
- * for, which is exact for sequential flows and cannot tell `Parallel` branches apart.
- *
- * A step the trace does not hold resolves to `undefined`, as from a Resolver, so `replayEffect` applies
- * `onMissing` to both; `missing` describes the step for the error.
+ * Builds a Resolver for the reference trace format; `replayEffect` is its only caller. A trace whose entries all
+ * carry a `path` is matched by path. One without is matched in order, which cannot tell `Parallel` branches apart.
+ * A step the trace lacks resolves to `undefined`, as from a Resolver, and `missing` describes it for the error.
  *
  * @param {TraceLog | TraceEntry[]} traceLog - A reference-format trace, or a bare array of entries
  * @param {Object} [options]
- * @param {(entry: TraceEntry) => void} [options.onEntry] - Observes each entry as it is handed to a step,
- *        which is how `replayEffect` learns which recorded entries the flow never asked for.
+ * @param {(entry: TraceEntry) => void} [options.onEntry] - Observes each entry as it is handed to a step, which is
+ *        how `replayEffect` learns which entries the flow never asked for.
  * @returns {{ resolve: Resolver, missing: (step: ReplayStep) => string }}
  */
 const fromTrace = (traceLog, options = {}) => {
@@ -1801,7 +1692,7 @@ const fromTrace = (traceLog, options = {}) => {
                 { command: step.name, index: step.index, path: step.path }
             );
         }
-        // A recorded trace is JSON, so a value the copy cannot encode, such as a BigInt, comes from one built by hand.
+        // Only a hand-built trace can hold a value the copy cannot encode.
         try {
             return entryToOutcome(entry);
         } catch {
@@ -1815,23 +1706,20 @@ const fromTrace = (traceLog, options = {}) => {
 
     if (entries.length > 0 && entries.every(hasPath)) {
         const byPath = new Map(entries.map((e) => [e.path, e]));
-        // Paths are unique by construction, so a collision means a hand-built trace or a bug, and keeping
-        // either entry would hand a branch the wrong result.
+        // A recorder never writes a duplicate path, and keeping either entry would hand a branch the wrong result.
         if (byPath.size !== entries.length) {
             throw replayError('Trace has duplicate step paths.');
         }
         /** The kind of node the recorded run had at each position its steps passed through. */
         const recordedKinds = new Map(entries.flatMap((e) => nodesAlong(/** @type {string} */ (e.path))));
-        // A step the trace lacks is a change of shape, not a missing step, when the trace recorded another kind of
-        // node somewhere along its path: a Command added where a Retry was, or one removed so that a Retry moved
-        // onto a Command's position. Its path is one the trace never had, so it would otherwise be reported as
-        // missing, and run live under `onMissing: 'execute'`.
         /** Names the first Command the trace recorded inside the Retry or Parallel at `at`, for a message. */
         const firstStepIn = (/** @type {string} */ at, /** @type {NodeKind} */ kind) => {
             const opens = `${at}${kind === 'Retry' ? 'r' : 'p'}`;
             const inside = entries.find((e) => e.path?.startsWith(opens) && !isDecisionEntry(e));
             return inside ? `, with '${inside.command}' at path '${inside.path}'` : '';
         };
+        // A step the trace lacks is a change of shape when the trace recorded another kind of node along its path, as
+        // when a Command was added where a Retry was. Reported as missing, it would run live under 'execute'.
         const throwIfReshaped = (/** @type {ReplayStep} */ step) => {
             const nodes = nodesAlong(/** @type {string} */ (step.path));
             const diverged = nodes.find(([at, kind]) => (recordedKinds.get(at) ?? kind) !== kind);
@@ -1854,9 +1742,9 @@ const fromTrace = (traceLog, options = {}) => {
         };
         /** Recorded Parallel decisions that cancelled branches, by the Parallel's path. */
         const cancellations = entries.filter(isDecisionEntry).filter((e) => e.result?.cancelled === true);
-        // A missing step is where production stopped a branch when it lies in a branch a recorded decision
-        // cancelled: any branch but the cancelling one, or every branch of a Parallel cancelled from outside. Such a
-        // step throws a cut, which `runCommand` or `runParallel` catches to stop the branch.
+        // A missing step in a branch a recorded decision cancelled (any branch but the trigger, or every branch of a
+        // Parallel cancelled from outside) is where production stopped. It throws a cut, which `runCommand` or
+        // `runParallel` catches to stop the branch.
         const stoppedInProduction = (/** @type {string | undefined} */ stepPath) =>
             typeof stepPath === 'string' &&
             cancellations.some((e) => {
@@ -1869,7 +1757,7 @@ const fromTrace = (traceLog, options = {}) => {
             const entry = byPath.get(step.path);
             if (step.type === 'Parallel') {
                 // A decision rather than I/O. `replayEffect` hands a recorded one to the Parallel's `op`, and
-                // `runBranches` reproduces it; with none recorded, the Parallel replays under timing.
+                // `runBranches` reproduces it; with none recorded, the Parallel replays by timing.
                 if (entry && entry.command !== 'Parallel') throw timeParadox(step, entry.command);
                 if (entry) return resolveEntry(entry, step);
                 throwIfReshaped(step);
@@ -1878,7 +1766,6 @@ const fromTrace = (traceLog, options = {}) => {
             }
             if (!entry) {
                 throwIfReshaped(step);
-                // Production never ran this step, so it is not run live under `onMissing` either.
                 if (stoppedInProduction(step.path)) throw replayCutError(/** @type {string} */ (step.path));
                 return undefined;
             }
@@ -1892,10 +1779,9 @@ const fromTrace = (traceLog, options = {}) => {
 
     /** @type {Resolver} */
     const resolve = (step) => {
-        // A trace with no paths predates recorded decisions, so a Parallel replays under timing.
+        // A trace with no paths predates recorded decisions, so a Parallel replays by timing.
         if (step.type === 'Parallel') return undefined;
-        // Positional matching pairs steps by completion order, which cannot tell Parallel branches apart.
-        // Refusing beats a result that is right only when the replay finishes in production's order.
+        // Completion order cannot tell Parallel branches apart, so a step inside one is refused rather than guessed.
         if (isInsideParallel(step.path)) {
             throw replayError(
                 `Trace carries no paths, so '${step.name}' inside a Parallel cannot be matched positionally.`,
@@ -1912,7 +1798,8 @@ const fromTrace = (traceLog, options = {}) => {
 };
 
 /**
- * The error for a step a replay has no recorded outcome for, which it refuses to run live.
+ * The error for a step a replay has no recorded outcome for, which it refuses to run live. It says whether a cap
+ * may have dropped the step or production may never have run it, since the fix differs.
  * @param {ReplayStep} step
  * @param {((step: ReplayStep) => string) | undefined} describe - `fromTrace`'s `missing`; a Resolver has none
  * @param {number} droppedEntries - How many entries the trace dropped under `maxEntries`
@@ -1920,9 +1807,6 @@ const fromTrace = (traceLog, options = {}) => {
  */
 const missingStepError = (step, describe, droppedEntries) => {
     const what = describe ? describe(step) : `No recorded outcome for '${step.name}' at step ${step.index}`;
-    // Why the step may be missing decides the fix. A capped trace needs a higher cap, since the step may be one
-    // production ran; any other missing step may be one production never ran, and running it live against
-    // production would do I/O production refused.
     const why =
         droppedEntries > 0
             ? `The trace dropped ${droppedEntries} entries under maxEntries, so production may have run ` +
@@ -1947,7 +1831,7 @@ const unrecordedReasons = new Map([
 ]);
 
 /**
- * The error for a replay that needs a value the recorder could not record, which the trace holds nothing for.
+ * The error for a replay that needs a value the recorder could not record.
  * @param {string} what - What the trace lacks, as the message names it
  * @param {unknown} cause - Why, as the trace records it
  * @param {string} lead - What that means for this replay, leading into the fix
@@ -1980,64 +1864,41 @@ const unrecordedCause = (traceLog, field) => {
 /**
  * @typedef {Object} ReplayOptions
  * @property {any} [context] - Context for `Ask`; defaults to the context a trace recorded.
- * @property {boolean} [fastRetry] - Waits no time between Retry attempts, so a replay does not wait out
- *           production backoff. On by default.
- * @property {boolean} [hooks] - Runs the replay inside the hooks `configureEffect` installed, with the
- *           resolver innermost, so a configured `onStep` observes each replayed step and `onRun` and
- *           `onBeforeCommand` fire. Off by default, which ignores the global hooks, so a replay cannot
- *           reach a telemetry backend or a guardrail that performs I/O.
- * @property {'throw' | 'execute'} [onMissing] - What to do when the resolver has no recording for a step.
- *           `'throw'` (default) fails the replay, which makes side effects impossible for the whole run.
- *           `'execute'` runs the real Command, so pass it only where the Commands reach test doubles or only
- *           read. A trace that dropped entries under `maxEntries` refuses it, since a step it lacks may be one
- *           production ran.
+ * @property {boolean} [fastRetry] - Waits no time between Retry attempts. On by default.
+ * @property {boolean} [hooks] - Runs the replay inside the hooks `configureEffect` installed, with the resolver
+ *           innermost. Off by default, so a replay cannot reach a telemetry backend or a guardrail that does I/O.
+ * @property {'throw' | 'execute'} [onMissing] - What to do with a step the resolver has no recording for. `'throw'`
+ *           (default) fails the replay, so no side effect can occur. `'execute'` runs the real Command, so pass it
+ *           only where the Commands reach test doubles or only read. A trace that dropped entries refuses it.
  * @property {(step: ReplayStep, outcome: ReplayOutcome | undefined) => void} [onResolved] - Observes each step.
  */
 
 /**
- * What a replay returns: the flow's own outcome, and, when a trace was supplied, the recorded
- * entries the flow never asked for. `unreached` is absent for a Resolver, since only a trace
- * knows what it holds.
- *
- * A flow that stops issuing Commands before its recording ends mismatches nothing, so no
- * `TimeParadox` fires and `result` can be a `Success` with recorded steps left over. That is
- * sometimes the point of a fix and sometimes a fix that quietly dropped a step; `unreached` is
- * the only place the difference shows.
+ * What a replay returns: the flow's own outcome and, for a trace, the recorded entries the flow never asked for. A
+ * flow that stops early mismatches nothing, so `unreached` is the only sign that a step went away.
  * @typedef {{ result: SuccessState | FailureState, unreached?: TraceEntry[] }} Replay
  */
 
 /**
- * Replays an Effect tree, feeding recorded results to Commands instead of running them.
- *
- * No side effect can occur by default. The interpreter's only execution point is
- * `await localStepRunner(cmdName, 'Command', op, cmdPath)`, which hands the Command thunk
- * to `onStep` as `op` rather than calling it. The `onStep` installed here never invokes
- * `op` unless `onMissing: 'execute'` is set, so `eff.cmd` is never applied and the I/O
- * it describes does not happen.
- *
- * Driving the interpreter instead of walking the tree is what makes `Ask`, `Retry` and
- * `Parallel` work, and means replay cannot drift from execution semantics.
+ * Replays a flow, feeding recorded outcomes to its Commands instead of running them. No side effect can occur by
+ * default: the interpreter executes a Command only as the `op` it hands `onStep`, and the `onStep` here calls `op`
+ * only under `onMissing: 'execute'`. Async, so a malformed trace rejects rather than throwing.
  *
  * @param {Effect} effect - The Effect tree, rebuilt from the recorded initial input
- * @param {Resolver | TraceLog | TraceEntry[]} traceOrResolver - A reference-format trace, resolved here, or a
- *        Resolver supplying each Command's recorded outcome (`undefined` if it has none). Write a Resolver when
- *        traces are stored in some other shape; to observe a replay without one, use `onResolved`.
+ * @param {Resolver | TraceLog | TraceEntry[]} traceOrResolver - A reference-format trace, or a Resolver supplying
+ *        each Command's recorded outcome (`undefined` if it has none) for traces stored in another shape.
  * @param {ReplayOptions} [options]
  * @returns {Promise<Replay>} `{ result, unreached }` for a trace, `{ result }` for a Resolver
  */
-// `async` so a malformed trace arrives as a rejection rather than a synchronous throw.
 const replayEffect = async (effect, traceOrResolver, options = {}) => {
     checkOptions(options, 'replayEffect', {
         context: null,
         fastRetry: [isBoolean, 'true or false'],
-        // Checked here, since passed on as `inherit` it was refused under a name the caller never wrote.
         hooks: [isBoolean, 'true or false'],
         onMissing: [(value) => value === 'throw' || value === 'execute', "'throw' or 'execute'"],
         onResolved: [isFunction, 'a function']
     });
     const { fastRetry = true, hooks = false, onMissing = 'throw', onResolved } = options;
-    // A trace is data and a Resolver is a function, so nothing else is needed to tell them
-    // apart, including the bare entries array that `fromTrace` also accepts.
     const fromResolver = typeof traceOrResolver === 'function';
     /** @type {Set<TraceEntry>} */
     const reached = new Set();
@@ -2046,8 +1907,8 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
         : fromTrace(traceOrResolver, { onEntry: (entry) => void reached.add(entry) });
     // Only a trace log carries metadata; a bare entries array and a Resolver carry none.
     const traceLog = fromResolver || Array.isArray(traceOrResolver) ? undefined : traceOrResolver;
-    // Defaults to the trace's context: an `Ask` gate replayed with another one takes another branch, and
-    // no paradox flags it. For the same reason, a trace that holds none because it could not be recorded needs one.
+    // Another context can take another branch at an `Ask` with nothing to flag it, so a trace whose context was not
+    // recorded needs one passed.
     const contextCause = unrecordedCause(traceLog, 'context');
     if (options.context == null && contextCause !== undefined) {
         throw unrecordedError(
@@ -2058,8 +1919,7 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
         );
     }
     const context = options.context ?? traceLog?.context ?? {};
-    // A trace capped by `maxEntries` lacks steps production ran, so running a missing step live repeats
-    // production's I/O: a billing batch replayed that way charged and invoiced subscriptions again.
+    // A capped trace lacks steps production ran, so running a missing one live could repeat production's I/O.
     const droppedEntries = Number(traceLog?.dropped) || 0;
     const capped = droppedEntries > 0;
     if (capped && onMissing === 'execute') {
@@ -2070,9 +1930,8 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
         );
     }
     let index = 0;
-    // What the Resolver or `onResolved` threw, or a Resolver's answer that is not an outcome. It stops the replay,
-    // which rejects with it, rather than counting as the Command failing, which let a Retry ask for attempts
-    // production never made and then run its fallback. Cast rather than annotated, since only the step runner
+    // What the Resolver or `onResolved` threw, or a Resolver's answer that is not an outcome. The replay rejects with
+    // it, rather than counting it as the Command failing. Cast rather than annotated, since only the step runner
     // assigns it.
     let callbackFailure = /** @type {{ error: unknown } | undefined} */ (undefined);
     /** Keeps the first such failure for the replay to reject with, and returns a stand-in nothing in the flow absorbs. */
@@ -2106,8 +1965,8 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     /** @type {StepRunner} */
     const onStep = async (name, type, op, path) => {
         if (type === 'Parallel') {
-            // A Parallel's step carries its recorded decision into `op`, where `runBranches` reproduces it.
-            // It is not a Command: `index` still counts Commands, and `onResolved` still sees only them.
+            // A Parallel's step carries its recorded decision into `op`, where `runBranches` reproduces it. It is not
+            // a Command: `index` still counts Commands, and `onResolved` still sees only them.
             const outcome = answer({ index, name, type, path });
             return await op(outcome !== undefined && 'result' in outcome ? outcome.result : undefined);
         }
@@ -2128,13 +1987,10 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
         return outcome.result;
     };
 
-    // With `hooks` off the replay ignores the global wiring, so it reaches no telemetry backend or
-    // guardrail. On, the resolver sits innermost and a configured onStep observes each replayed step.
     /** @type {CallConfiguration} */
     const callConfig = { onStep, inherit: hooks };
 
-    // The interpreter rethrows a replay fault so nothing in the flow can absorb it; it becomes a Failure
-    // here, where nothing downstream can.
+    // A replay fault becomes a Failure here, outside the flow, where nothing can absorb it.
     let result;
     try {
         result = await interpret(effect, context, callConfig, fastRetry);
@@ -2144,15 +2000,14 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
         result = Failure(e);
     }
     if (fromResolver) return { result };
-    // `fromTrace` has already validated the shape, so the entries are here in one form or the other.
+    // `fromTrace` has already checked the shape.
     const entries = Array.isArray(traceOrResolver) ? traceOrResolver : traceOrResolver.trace;
     return { result, unreached: entries.filter((entry) => !reached.has(entry)) };
 };
 
 /**
- * Replays a reference-format trace and narrates each step. Rebuilds the flow from the
- * recorded input, reports the outcome, and names any recorded steps that were never
- * reached, which means the current code issued fewer Commands than production did.
+ * Replays a reference-format trace and narrates each step. Rebuilds the flow from the recorded input, reports the
+ * outcome, and names any recorded steps that were never reached.
  *
  * @param {(input: any) => Effect} flowFn - The same flow function that produced the trace
  * @param {TraceLog} traceLog - A trace from `recordEffect` or a `recorder`
@@ -2160,8 +2015,8 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
  * @param {(...args: any[]) => void} [options.log] - Defaults to `console.log`
  * @param {any} [options.context] - Overrides the context stored on the trace
  * @param {string} [options.version] - Current build id; warns when it differs from the trace's
- * @returns {Promise<SuccessState | FailureState>} The flow's outcome. Narration is the point of this function;
- *          a caller who wants the unreached entries as data uses `replayEffect`.
+ * @returns {Promise<SuccessState | FailureState>} The flow's outcome. For the unreached entries as data, use
+ *          `replayEffect`.
  */
 const timeTravel = async (flowFn, traceLog, options = {}) => {
     checkOptions(options, 'timeTravel', { log: [isFunction, 'a function'], context: null, version: null });
@@ -2171,8 +2026,8 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
     if (inputCause !== undefined) {
         throw unrecordedError('initialInput', inputCause, 'The flow is rebuilt from it, so', { field: 'initialInput' });
     }
-    // `message` is non-enumerable on Error, so JSON.stringify alone would drop it. JSON.stringify throws on
-    // a BigInt and on a cycle, and narration must not be what fails a replay.
+    // Spreads an Error's hidden `message`, and falls back to `String` where JSON throws: narration must not be what
+    // fails a replay.
     const format = (/** @type {any} */ v) => {
         try {
             return JSON.stringify(v instanceof Error ? { ...v, name: v.name, message: v.message } : v, null, 2);
@@ -2184,15 +2039,12 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
     if (version && traceVersion && version !== traceVersion) {
         log(`Warning: trace was recorded at ${traceVersion}, replaying against ${version}.`);
     }
-    // The flow is rebuilt from this input, and a recorder installed as a hook reads it off the flow, where only
-    // effectPipe puts it.
     if (initialInput === undefined) {
         log(
             'Warning: the trace holds no initial input, so the flow is rebuilt from undefined. A recorder ' +
                 'installed as a hook finds the input only on a flow built with effectPipe.'
         );
     }
-    // A replay tells steps apart by name, so two anonymous Commands that swapped places replay without complaint.
     const anonymous = trace.filter((e) => e.command === 'anonymous').length;
     if (anonymous > 0) {
         log(
@@ -2201,20 +2053,19 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
                 'a const or meta.name.'
         );
     }
-    // Parallel decisions are not narrated as steps, so the header counts Commands to match the lines below.
+    // Decisions are not narrated as steps, so the header counts only Commands.
     const commandCount = trace.filter((e) => !isDecisionEntry(e)).length;
     const stepsText = commandCount === 1 ? 'step' : 'steps';
     log(`Replaying '${flowName || 'flow'}' (${commandCount} recorded ${stepsText})`);
     log(`Initial input: ${format(initialInput)}`);
 
-    // Timings are looked up by path, whatever order branches finished in, or by position for a trace
-    // with no paths, which is how such a trace is matched anyway.
+    // By path, or by position for a trace without paths.
     const byPath = new Map(trace.filter(hasPath).map((e) => [e.path, e]));
     const timing = (/** @type {ReplayStep} */ step) => {
         const recorded = byPath.get(step.path) ?? trace[step.index];
         return typeof recorded?.durationMs === 'number' ? ` in ${recorded.durationMs}ms` : '';
     };
-    // `replayEffect` defaults the context to the trace's, and refuses a trace that lost it to redact.
+    // `replayEffect` defaults the context to the trace's.
     const replay = await replayEffect(flowFn(initialInput), traceLog, {
         context,
         onResolved: (step, outcome) => {
@@ -2231,12 +2082,10 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
 
     log(`Replay finished with state: ${result.type}`);
     log(result.type === 'Failure' ? `Error: ${format(result.error)}` : `Result: ${format(result.value)}`);
-    // After a replay error the flow never got past the divergence, and the error already names where it
-    // split. Only a flow that ended on its own terms with steps left over is worth a warning. Told by the
-    // mark rather than the name, which a flow's own error can share.
+    // A replay fault already names where the flow diverged. Told by the mark, since a flow's own error can share the
+    // name.
     const haltedByReplay = result.type === 'Failure' && hasMark(result.error, replayFault);
     if (unreached.length > 0 && !haltedByReplay) {
-        // Named, not just counted: the step a fix stopped issuing is usually the one under suspicion.
         const names = unreached.map((e) => (hasPath(e) ? `${e.command} (path '${e.path}')` : e.command));
         const count = unreached.length === 1 ? '1 recorded step was' : `${unreached.length} recorded steps were`;
         log(`Warning: ${count} never reached: ${names.join(', ')}. The flow diverged.`);
