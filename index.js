@@ -8,7 +8,8 @@
 //    steps and the `flowInputs` it records for `onRun`.
 // 3. Configuration: the hook types and their defaults, `configureEffect` and its layers, and `chainHooks`, which
 //    merges them.
-// 4. Running flows: the helpers `Retry` and `Parallel` run on, the interpreter, and `runEffect`.
+// 4. Running flows: the helpers `Retry` and `Parallel` run on; `interpret`, which builds a run's `Runtime`, then
+//    `execute` and a function for each kind of node, which each take it; and `runEffect`.
 // 5. Recording and replay: the trace format and replay errors, copying values and errors into a trace,
 //    `recorder` and `recordEffect`, then `fromTrace`, `replayEffect` and `timeTravel`.
 //
@@ -859,355 +860,375 @@ const delayFor = (ms, signal) =>
         signal.addEventListener('abort', onAbort, { once: true });
     });
 
-const interpret =
-    /**
-     * The interpreter, which `runEffect` and `replayEffect` share, so a replay cannot drift from a run. Only a
-     * replay sets `fastRetry`, which waits no time between retry attempts.
-     *
-     * @param {Effect} effect
-     * @param {any} [context]
-     * @param {CallConfiguration} [callConfig]
-     * @param {boolean} [fastRetry]
-     * @returns {Promise<SuccessState | FailureState>}
-     */
-    async function interpret(effect, context = {}, callConfig = {}, fastRetry = false) {
-        if (!isOptionsObject(callConfig)) {
-            throw new TypeError(`runEffect's callConfig must be an object, got ${describeConfiguration(callConfig)}.`);
-        }
-        checkConfiguration(callConfig, "runEffect's callConfig", 'callConfig.', [...hookNames, 'inherit']);
-        const { inherit = true, ...local } = callConfig;
-        // Not coerced, so `'false'` cannot inherit everything.
-        if (typeof inherit !== 'boolean') {
-            throw new TypeError(`callConfig.inherit must be true or false, got ${JSON.stringify(inherit)}.`);
-        }
-        const base = inherit ? globalConfig : {};
-        const resolved = Object.keys(local).length ? chainHooks(base, local) : base;
-        const localStepRunner = resolved.onStep || defaultStepRunner;
-        const localRunWrapper = resolved.onRun || defaultRunWrapper;
-        const localCommandInterceptor = resolved.onBeforeCommand || defaultCommandInterceptor;
+/**
+ * What every part of the interpreter needs from one run: the context `Ask` reads, whether retries wait, and the two
+ * hooks a step calls, resolved from the installed wiring and the call's own configuration.
+ * @typedef {{
+ *   context: any,
+ *   fastRetry: boolean,
+ *   onStep: StepRunner,
+ *   onBeforeCommand: CommandInterceptor
+ * }} Runtime
+ */
 
-        /**
-         * Walks a subtree until it reaches a Success, a Failure or an I/O fault. Every node but `Ask` runs in its
-         * own function, which returns a Success carrying the value for the node's `next`, or what stops the subtree.
-         *
-         * @param {Effect} eff
-         * @param {AbortSignal} [signal] - Cancellation for this subtree, set for `Parallel` branches.
-         * @param {string} [path] - This subtree's prefix. Each `Parallel` branch and `Retry` attempt opens its own, so
-         *        a path depends only on the tree's shape, never on the order branches finish in.
-         * @returns {Promise<SuccessState | FailureState | IoFaultState>}
-         */
-        async function execute(eff, signal, path = '') {
-            let step = 0;
-            /** @type {Effect | undefined} The node whose `next` returned `eff`, which an error names. */
-            let from;
-            while (isPending(eff)) {
-                // A Command already in flight cannot be stopped, but the next one never starts.
-                if (signal?.aborted) return cancelledBranch();
-                if (eff.type === 'Ask') {
-                    from = eff;
-                    eff = eff.next(context);
-                    continue;
-                }
-                const stepPath = `${path}${step++}`;
-                const outcome =
-                    eff.type === 'Retry'
-                        ? await runRetry(eff, signal, stepPath)
-                        : eff.type === 'Parallel'
-                          ? await runParallel(eff, signal, stepPath)
-                          : await runCommand(eff, signal, stepPath);
-                if (outcome.type !== 'Success') return outcome;
-                // Outside every catch: `next` and the pure steps it reaches are code, not I/O, so a throw there
-                // rejects the run.
-                from = eff;
-                eff = eff.next(outcome.value);
-            }
-            if (isOutcome(eff)) return eff;
-            throw effectTypeError(eff, from ? nextOf(from) : 'The flow');
-        }
-
-        /**
-         * Runs a Retry's wrapped tree until it succeeds or runs out of attempts, then its fallback if it has one.
-         * Each attempt opens its own path prefix, and so does the fallback.
-         *
-         * @param {RetryState} retry
-         * @param {AbortSignal | undefined} signal
-         * @param {string} stepPath
-         * @returns {Promise<SuccessState | FailureState | IoFaultState>}
-         */
-        async function runRetry(retry, signal, stepPath) {
-            checkOptions(retry.options, 'Retry', retryOptionRules, malformed);
-            const given = Object.entries(retry.options ?? {}).filter(([, value]) => value !== undefined);
-            const opts = /** @type {typeof defaultRetryOptions & RetryState['options']} */ ({
-                ...defaultRetryOptions,
-                ...Object.fromEntries(given)
-            });
-            const { attempts, onExhausted } = opts;
-            let lastError;
-            for (let attempt = 0; attempt <= attempts; attempt++) {
-                // `fastRetry` waits for no time rather than skipping the wait, so branches replayed by timing still
-                // interleave.
-                if (attempt > 0) {
-                    await delayFor(fastRetry ? 0 : opts.delay * Math.pow(opts.backoff, attempt - 1), signal);
-                }
-                // After the wait, so a branch cancelled mid-backoff makes no further attempt.
-                if (signal?.aborted) return cancelledBranch();
-                const result = await execute(retry.effect, signal, `${stepPath}r${attempt}/`);
-                // Only an I/O fault is retried. An abort passes through unwrapped.
-                if (result.type !== 'IoFault') return result;
-                lastError = result.error;
-            }
-            const exhausted = { retryExhausted: true, lastError, attempts };
-            // A fault too, so an enclosing Retry retries this one.
-            if (typeof onExhausted !== 'function') return IoFault(exhausted);
-            if (signal?.aborted) return cancelledBranch();
-            // A failing fallback propagates as it is, not wrapped as another exhaustion.
-            return execute(asEffect(onExhausted(exhausted), "Retry option 'onExhausted'"), signal, `${stepPath}rf/`);
-        }
-
-        /**
-         * Runs a Parallel as one step, whose `op` runs the branches and returns the decision, so the decision is
-         * recorded and a replay can hand it back.
-         *
-         * @param {ParallelState} parallel
-         * @param {AbortSignal | undefined} signal
-         * @param {string} stepPath
-         * @returns {Promise<SuccessState | FailureState | IoFaultState>}
-         */
-        async function runParallel(parallel, signal, stepPath) {
-            const branchPath = `${stepPath}p`;
-            const options = parallel.options ?? {};
-            checkOptions(options, 'Parallel', parallelOptionRules, malformed);
-            const { settled } = options;
-            // Cast rather than annotated, since only `op` assigns it.
-            let run = /** @type {BranchRun | undefined} */ (undefined);
-            // A replay passes the recorded decision, from `replayEffect`'s onStep; a live run passes nothing.
-            const op = async (/** @type {any} */ recorded) => {
-                run = await runBranches(parallel.effects, options, signal, branchPath, recorded);
-                return run.decision;
-            };
-            try {
-                await localStepRunner('Parallel', 'Parallel', op, branchPath);
-            } catch (e) {
-                // A cut from `fromTrace`: production had already stopped the branch this Parallel is in.
-                if (hasMark(e, replayCut)) return cancelledBranch();
-                throw e;
-            }
-            if (!run) {
-                throw new TypeError(
-                    `An onStep hook returned without letting op run the Parallel at path '${branchPath}'. ` +
-                        'A hook has to call op for a Parallel and pass on what it returns or throws, because op ' +
-                        'runs its branches.'
-                );
-            }
-            const { results, decision, thrown } = run;
-            // Rethrown only now, after the step has returned its decision, so the decision is recorded.
-            if (thrown) throw thrown.error;
-            if (settled) return Success(results.map(asOutcome));
-            const failure =
-                decision.cancelled && decision.branch !== null
-                    ? results[decision.branch]
-                    : results.find((r) => r.type !== 'Success');
-            if (failure) return failure;
-            return Success(results.map((r) => /** @type {SuccessState} */ (r).value));
-        }
-
-        /**
-         * Runs a Parallel's branches and decides which branch, if any, cancelled the others. Live, timing decides.
-         * A recorded cancellation is reproduced rather than recomputed: no branch cancels another, each stops where
-         * its recording stops, and the recorded branch's failure is the result.
-         *
-         * @param {Effect[]} effects
-         * @param {ParallelOptions} options
-         * @param {AbortSignal | undefined} signal - The enclosing Parallel's cancellation, if any
-         * @param {string} branchPath
-         * @param {any} recorded - The recorded decision, which `replayEffect`'s onStep passes to the Parallel's
-         *        `op`; undefined in a live run
-         * @returns {Promise<BranchRun>}
-         */
-        async function runBranches(effects, options, signal, branchPath, recorded) {
-            const { limit, settled } = options;
-            // A recorded branch past the end means the flow changed shape. A negative one is not a decision, and
-            // replays by timing.
-            const recordedBranch = recorded?.cancelled === true ? recorded.branch : undefined;
-            const pastTheEnd = Number.isInteger(recordedBranch) && recordedBranch >= effects.length;
-            if (pastTheEnd) {
-                const count = effects.length === 1 ? '1 branch' : `${effects.length} branches`;
-                throw timeParadoxAt(
-                    `path '${branchPath}'`,
-                    `the recorded run was cancelled by branch ${recordedBranch}, but this Parallel has ${count}.`,
-                    { path: branchPath, branch: recordedBranch }
-                );
-            }
-            const forced = asDecision(recorded, effects.length);
-            const reproducing = forced !== undefined && forced.cancelled;
-            // Live, a throw cancels the others, and so does a failure unless `settled`. Reproducing, nothing does,
-            // since the recording already says where each branch stops.
-            const { results, thrown, trigger, cancelled } = await settleBranches(
-                effects,
-                limit,
-                signal,
-                branchPath,
-                reproducing ? () => false : (threw, result) => threw || (!settled && result.type !== 'Success')
-            );
-            if (reproducing) {
-                // A branch that threw has no result to check, and its throw is what is rethrown.
-                const recordedTriggerSucceeded =
-                    !thrown && forced.branch !== null && results[forced.branch].type === 'Success';
-                if (recordedTriggerSucceeded) {
-                    throw timeParadoxAt(
-                        `path '${branchPath}'`,
-                        `the recorded run was cancelled by branch ${forced.branch}, which did not fail in this replay.`,
-                        { path: branchPath, branch: forced.branch }
-                    );
-                }
-                return { results, decision: forced, thrown };
-            }
-            /** @type {ParallelDecision} */
-            const decision =
-                trigger >= 0
-                    ? { cancelled: true, branch: trigger }
-                    : cancelled
-                      ? { cancelled: true, branch: null }
-                      : { cancelled: false };
-            return { results, decision, thrown };
-        }
-
-        /**
-         * Runs every branch to completion, at most `limit` at once, under one cancellation scope linked to the
-         * enclosing one. The first branch to settle in a way `cancelsOthers` accepts cancels the rest, and is the
-         * trigger.
-         *
-         * @param {Effect[]} effects
-         * @param {number | undefined} limit
-         * @param {AbortSignal | undefined} signal
-         * @param {string} branchPath
-         * @param {(threw: boolean, result: SuccessState | FailureState | IoFaultState) => boolean} cancelsOthers
-         * @returns {Promise<{
-         *   results: (SuccessState | FailureState | IoFaultState)[],
-         *   thrown: { error: unknown } | undefined,
-         *   trigger: number,
-         *   cancelled: boolean
-         * }>}
-         */
-        async function settleBranches(effects, limit, signal, branchPath, cancelsOthers) {
-            const { scope, unlink } = linkedScope(signal);
-            /** @type {(SuccessState | FailureState | IoFaultState)[]} */
-            const results = new Array(effects.length);
-            // Held rather than rethrown, so every branch still settles and no `limit` worker stops early.
-            /** @type {{ error: unknown }[]} */
-            const thrown = new Array(effects.length);
-            // Whether each branch cancelled the others itself, rather than being cancelled.
-            const triggered = new Array(effects.length).fill(false);
-            const settle = async (/** @type {Effect} */ branch, /** @type {number} */ i) => {
-                try {
-                    results[i] = await execute(branch, scope?.signal, `${branchPath}${i}/`);
-                } catch (error) {
-                    thrown[i] = { error };
-                }
-                // Read-then-abort is atomic here, so exactly one branch is the trigger.
-                if (cancelsOthers(thrown[i] !== undefined, results[i])) {
-                    if (!scope?.signal.aborted) triggered[i] = true;
-                    scope?.abort();
-                }
-            };
-            try {
-                // Awaits every branch, so no cancelled work runs on after the Parallel returns.
-                await runBounded(
-                    effects.map((branch, i) => () => settle(branch, i)),
-                    limit
-                );
-            } finally {
-                unlink();
-            }
-            return {
-                results,
-                // The first by array order, since every branch has settled by now.
-                thrown: thrown.find(Boolean),
-                trigger: triggered.indexOf(true),
-                cancelled: Boolean(scope?.signal.aborted)
-            };
-        }
-
-        /**
-         * Runs one Command. A throw from an interceptor vetoes the Command, an abort; a throw from its function is an
-         * I/O fault. A harness error is rethrown from either. DESIGN.md's "Where a throw comes from" has the rest.
-         *
-         * @param {CommandState} command
-         * @param {AbortSignal | undefined} signal
-         * @param {string} cmdPath
-         * @returns {Promise<SuccessState | FailureState | IoFaultState>}
-         */
-        async function runCommand(command, signal, cmdPath) {
-            const cmdName = commandName(command);
-            const { cmd } = command;
-            // Whether the function itself succeeded: a hook that throws after that is a bug, not an I/O fault.
-            let succeeded = false;
-            // What it returned, so a hook that loses it is caught.
-            /** @type {unknown} */
-            let value;
-            // Only inside a Parallel, and only to a function that declares a parameter. A parameter with a default
-            // value does not count toward `length`, so `nanoid(size = 21)` keeps its default; a plain first parameter
-            // the function treats as optional still takes the signal, a documented sharp edge.
-            const takesSignal = signal !== undefined && cmd.length > 0;
-            // Async, so a hook always gets a promise. The latest call is kept, with whether it is still running, to
-            // catch a hook that does not wait for it.
-            /** @type {Promise<unknown> | undefined} */
-            let call;
-            let running = false;
-            const run = async () => {
-                succeeded = false;
-                running = true;
-                try {
-                    value = await (takesSignal ? cmd(signal) : cmd());
-                    succeeded = true;
-                    return value;
-                } finally {
-                    running = false;
-                }
-            };
-            const op = () => (call = run());
-            try {
-                await localCommandInterceptor(command, context);
-            } catch (e) {
-                if (hasMark(e, harnessError)) throw e;
-                return Failure(e);
-            }
-            // Again, since an interceptor can wait (a rate limiter, say) while a sibling fails.
-            if (signal?.aborted) return cancelledBranch();
-            let returned;
-            let unwaited = false;
-            try {
-                returned = await localStepRunner(cmdName, 'Command', op, cmdPath);
-                // A hook that returned without awaiting `op` is judged as though it had awaited it.
-                if (returned === undefined && running) {
-                    unwaited = true;
-                    await call;
-                }
-            } catch (e) {
-                // A cut from `fromTrace`: production stopped this branch before this step.
-                if (hasMark(e, replayCut)) return cancelledBranch();
-                if (hasMark(e, harnessError)) throw e;
-                // After the function succeeded, a throw is a bug in a hook. From a hook that never called `op` it is a
-                // fault, which is how replay reports a recorded error.
-                if (succeeded) throw e;
-                return IoFault(e);
-            }
-            // A hook that dropped the result would hand `next` `undefined`. Only `undefined` is refused, so a hook can
-            // return a copy.
-            if (returned === undefined && succeeded && value !== undefined) {
-                throw new TypeError(
-                    `An onStep hook called op for '${cmdName}' at path '${cmdPath}' and returned undefined` +
-                        `${unwaited ? ' before op had finished' : ''}, although the Command returned a value. ` +
-                        'A hook has to await op() and return what it returns.'
-                );
-            }
-            return Success(returned);
-        }
-
-        // An I/O fault becomes a plain Failure here, where every outcome leaves.
-        const run = async () => asOutcome(await execute(effect));
-        return localRunWrapper(effect, run, context?.flowName || '', flowInputs.get(effect));
+/**
+ * The interpreter, which `runEffect` and `replayEffect` share, so a replay cannot drift from a run. Only a replay
+ * sets `fastRetry`, which waits no time between retry attempts.
+ *
+ * @param {Effect} effect
+ * @param {any} [context]
+ * @param {CallConfiguration} [callConfig]
+ * @param {boolean} [fastRetry]
+ * @returns {Promise<SuccessState | FailureState>}
+ */
+const interpret = async (effect, context = {}, callConfig = {}, fastRetry = false) => {
+    if (!isOptionsObject(callConfig)) {
+        throw new TypeError(`runEffect's callConfig must be an object, got ${describeConfiguration(callConfig)}.`);
+    }
+    checkConfiguration(callConfig, "runEffect's callConfig", 'callConfig.', [...hookNames, 'inherit']);
+    const { inherit = true, ...local } = callConfig;
+    // Not coerced, so `'false'` cannot inherit everything.
+    if (typeof inherit !== 'boolean') {
+        throw new TypeError(`callConfig.inherit must be true or false, got ${JSON.stringify(inherit)}.`);
+    }
+    const base = inherit ? globalConfig : {};
+    const resolved = Object.keys(local).length ? chainHooks(base, local) : base;
+    /** @type {Runtime} */
+    const runtime = {
+        context,
+        fastRetry,
+        onStep: resolved.onStep || defaultStepRunner,
+        onBeforeCommand: resolved.onBeforeCommand || defaultCommandInterceptor
     };
+    const onRun = resolved.onRun || defaultRunWrapper;
+    // An I/O fault becomes a plain Failure here, where every outcome leaves.
+    const op = async () => asOutcome(await execute(runtime, effect));
+    return onRun(effect, op, context?.flowName || '', flowInputs.get(effect));
+};
+
+/**
+ * Walks a subtree until it reaches a Success, a Failure or an I/O fault. Every node but `Ask` runs in its
+ * own function, which returns a Success carrying the value for the node's `next`, or what stops the subtree.
+ *
+ * @param {Runtime} runtime
+ * @param {Effect} eff
+ * @param {AbortSignal} [signal] - Cancellation for this subtree, set for `Parallel` branches.
+ * @param {string} [path] - This subtree's prefix. Each `Parallel` branch and `Retry` attempt opens its own, so
+ *        a path depends only on the tree's shape, never on the order branches finish in.
+ * @returns {Promise<SuccessState | FailureState | IoFaultState>}
+ */
+const execute = async (runtime, eff, signal, path = '') => {
+    let step = 0;
+    /** @type {Effect | undefined} The node whose `next` returned `eff`, which an error names. */
+    let from;
+    while (isPending(eff)) {
+        // A Command already in flight cannot be stopped, but the next one never starts.
+        if (signal?.aborted) return cancelledBranch();
+        if (eff.type === 'Ask') {
+            from = eff;
+            eff = eff.next(runtime.context);
+            continue;
+        }
+        const stepPath = `${path}${step++}`;
+        const outcome =
+            eff.type === 'Retry'
+                ? await runRetry(runtime, eff, signal, stepPath)
+                : eff.type === 'Parallel'
+                  ? await runParallel(runtime, eff, signal, stepPath)
+                  : await runCommand(runtime, eff, signal, stepPath);
+        if (outcome.type !== 'Success') return outcome;
+        // Outside every catch: `next` and the pure steps it reaches are code, not I/O, so a throw there
+        // rejects the run.
+        from = eff;
+        eff = eff.next(outcome.value);
+    }
+    if (isOutcome(eff)) return eff;
+    throw effectTypeError(eff, from ? nextOf(from) : 'The flow');
+};
+
+/**
+ * Runs a Retry's wrapped tree until it succeeds or runs out of attempts, then its fallback if it has one.
+ * Each attempt opens its own path prefix, and so does the fallback.
+ *
+ * @param {Runtime} runtime
+ * @param {RetryState} retry
+ * @param {AbortSignal | undefined} signal
+ * @param {string} stepPath
+ * @returns {Promise<SuccessState | FailureState | IoFaultState>}
+ */
+const runRetry = async (runtime, retry, signal, stepPath) => {
+    checkOptions(retry.options, 'Retry', retryOptionRules, malformed);
+    const given = Object.entries(retry.options ?? {}).filter(([, value]) => value !== undefined);
+    const opts = /** @type {typeof defaultRetryOptions & RetryState['options']} */ ({
+        ...defaultRetryOptions,
+        ...Object.fromEntries(given)
+    });
+    const { attempts, onExhausted } = opts;
+    let lastError;
+    for (let attempt = 0; attempt <= attempts; attempt++) {
+        // `fastRetry` waits for no time rather than skipping the wait, so branches replayed by timing still
+        // interleave.
+        if (attempt > 0) {
+            await delayFor(runtime.fastRetry ? 0 : opts.delay * Math.pow(opts.backoff, attempt - 1), signal);
+        }
+        // After the wait, so a branch cancelled mid-backoff makes no further attempt.
+        if (signal?.aborted) return cancelledBranch();
+        const result = await execute(runtime, retry.effect, signal, `${stepPath}r${attempt}/`);
+        // Only an I/O fault is retried. An abort passes through unwrapped.
+        if (result.type !== 'IoFault') return result;
+        lastError = result.error;
+    }
+    const exhausted = { retryExhausted: true, lastError, attempts };
+    // A fault too, so an enclosing Retry retries this one.
+    if (typeof onExhausted !== 'function') return IoFault(exhausted);
+    if (signal?.aborted) return cancelledBranch();
+    // A failing fallback propagates as it is, not wrapped as another exhaustion.
+    return execute(runtime, asEffect(onExhausted(exhausted), "Retry option 'onExhausted'"), signal, `${stepPath}rf/`);
+};
+
+/**
+ * Runs a Parallel as one step, whose `op` runs the branches and returns the decision, so the decision is
+ * recorded and a replay can hand it back.
+ *
+ * @param {Runtime} runtime
+ * @param {ParallelState} parallel
+ * @param {AbortSignal | undefined} signal
+ * @param {string} stepPath
+ * @returns {Promise<SuccessState | FailureState | IoFaultState>}
+ */
+const runParallel = async (runtime, parallel, signal, stepPath) => {
+    const branchPath = `${stepPath}p`;
+    const options = parallel.options ?? {};
+    checkOptions(options, 'Parallel', parallelOptionRules, malformed);
+    const { settled } = options;
+    // Cast rather than annotated, since only `op` assigns it.
+    let branchRun = /** @type {BranchRun | undefined} */ (undefined);
+    // A replay passes the recorded decision, from `replayEffect`'s onStep; a live run passes nothing.
+    const op = async (/** @type {any} */ recorded) => {
+        branchRun = await runBranches(runtime, parallel.effects, options, signal, branchPath, recorded);
+        return branchRun.decision;
+    };
+    try {
+        await runtime.onStep('Parallel', 'Parallel', op, branchPath);
+    } catch (e) {
+        // A cut from `fromTrace`: production had already stopped the branch this Parallel is in.
+        if (hasMark(e, replayCut)) return cancelledBranch();
+        throw e;
+    }
+    if (!branchRun) {
+        throw new TypeError(
+            `An onStep hook returned without letting op run the Parallel at path '${branchPath}'. ` +
+                'A hook has to call op for a Parallel and pass on what it returns or throws, because op ' +
+                'runs its branches.'
+        );
+    }
+    const { results, decision, thrown } = branchRun;
+    // Rethrown only now, after the step has returned its decision, so the decision is recorded.
+    if (thrown) throw thrown.error;
+    if (settled) return Success(results.map(asOutcome));
+    const failure =
+        decision.cancelled && decision.branch !== null
+            ? results[decision.branch]
+            : results.find((r) => r.type !== 'Success');
+    if (failure) return failure;
+    return Success(results.map((r) => /** @type {SuccessState} */ (r).value));
+};
+
+/**
+ * Runs a Parallel's branches and decides which branch, if any, cancelled the others. Live, timing decides.
+ * A recorded cancellation is reproduced rather than recomputed: no branch cancels another, each stops where
+ * its recording stops, and the recorded branch's failure is the result.
+ *
+ * @param {Runtime} runtime
+ * @param {Effect[]} effects
+ * @param {ParallelOptions} options
+ * @param {AbortSignal | undefined} signal - The enclosing Parallel's cancellation, if any
+ * @param {string} branchPath
+ * @param {any} recorded - The recorded decision, which `replayEffect`'s onStep passes to the Parallel's
+ *        `op`; undefined in a live run
+ * @returns {Promise<BranchRun>}
+ */
+const runBranches = async (runtime, effects, options, signal, branchPath, recorded) => {
+    const { limit, settled } = options;
+    // A recorded branch past the end means the flow changed shape. A negative one is not a decision, and
+    // replays by timing.
+    const recordedBranch = recorded?.cancelled === true ? recorded.branch : undefined;
+    const pastTheEnd = Number.isInteger(recordedBranch) && recordedBranch >= effects.length;
+    if (pastTheEnd) {
+        const count = effects.length === 1 ? '1 branch' : `${effects.length} branches`;
+        throw timeParadoxAt(
+            `path '${branchPath}'`,
+            `the recorded run was cancelled by branch ${recordedBranch}, but this Parallel has ${count}.`,
+            { path: branchPath, branch: recordedBranch }
+        );
+    }
+    const forced = asDecision(recorded, effects.length);
+    const reproducing = forced !== undefined && forced.cancelled;
+    // Live, a throw cancels the others, and so does a failure unless `settled`. Reproducing, nothing does,
+    // since the recording already says where each branch stops.
+    const { results, thrown, trigger, cancelled } = await settleBranches(
+        runtime,
+        effects,
+        limit,
+        signal,
+        branchPath,
+        reproducing ? () => false : (threw, result) => threw || (!settled && result.type !== 'Success')
+    );
+    if (reproducing) {
+        // A branch that threw has no result to check, and its throw is what is rethrown.
+        const recordedTriggerSucceeded = !thrown && forced.branch !== null && results[forced.branch].type === 'Success';
+        if (recordedTriggerSucceeded) {
+            throw timeParadoxAt(
+                `path '${branchPath}'`,
+                `the recorded run was cancelled by branch ${forced.branch}, which did not fail in this replay.`,
+                { path: branchPath, branch: forced.branch }
+            );
+        }
+        return { results, decision: forced, thrown };
+    }
+    /** @type {ParallelDecision} */
+    const decision =
+        trigger >= 0
+            ? { cancelled: true, branch: trigger }
+            : cancelled
+              ? { cancelled: true, branch: null }
+              : { cancelled: false };
+    return { results, decision, thrown };
+};
+
+/**
+ * Runs every branch to completion, at most `limit` at once, under one cancellation scope linked to the
+ * enclosing one. The first branch to settle in a way `cancelsOthers` accepts cancels the rest, and is the
+ * trigger.
+ *
+ * @param {Runtime} runtime
+ * @param {Effect[]} effects
+ * @param {number | undefined} limit
+ * @param {AbortSignal | undefined} signal
+ * @param {string} branchPath
+ * @param {(threw: boolean, result: SuccessState | FailureState | IoFaultState) => boolean} cancelsOthers
+ * @returns {Promise<{
+ *   results: (SuccessState | FailureState | IoFaultState)[],
+ *   thrown: { error: unknown } | undefined,
+ *   trigger: number,
+ *   cancelled: boolean
+ * }>}
+ */
+const settleBranches = async (runtime, effects, limit, signal, branchPath, cancelsOthers) => {
+    const { scope, unlink } = linkedScope(signal);
+    /** @type {(SuccessState | FailureState | IoFaultState)[]} */
+    const results = new Array(effects.length);
+    // Held rather than rethrown, so every branch still settles and no `limit` worker stops early.
+    /** @type {{ error: unknown }[]} */
+    const thrown = new Array(effects.length);
+    // Whether each branch cancelled the others itself, rather than being cancelled.
+    const triggered = new Array(effects.length).fill(false);
+    const settle = async (/** @type {Effect} */ branch, /** @type {number} */ i) => {
+        try {
+            results[i] = await execute(runtime, branch, scope?.signal, `${branchPath}${i}/`);
+        } catch (error) {
+            thrown[i] = { error };
+        }
+        // Read-then-abort is atomic here, so exactly one branch is the trigger.
+        if (cancelsOthers(thrown[i] !== undefined, results[i])) {
+            if (!scope?.signal.aborted) triggered[i] = true;
+            scope?.abort();
+        }
+    };
+    try {
+        // Awaits every branch, so no cancelled work runs on after the Parallel returns.
+        await runBounded(
+            effects.map((branch, i) => () => settle(branch, i)),
+            limit
+        );
+    } finally {
+        unlink();
+    }
+    return {
+        results,
+        // The first by array order, since every branch has settled by now.
+        thrown: thrown.find(Boolean),
+        trigger: triggered.indexOf(true),
+        cancelled: Boolean(scope?.signal.aborted)
+    };
+};
+
+/**
+ * Runs one Command. A throw from an interceptor vetoes the Command, an abort; a throw from its function is an
+ * I/O fault. A harness error is rethrown from either. DESIGN.md's "Where a throw comes from" has the rest.
+ *
+ * @param {Runtime} runtime
+ * @param {CommandState} command
+ * @param {AbortSignal | undefined} signal
+ * @param {string} cmdPath
+ * @returns {Promise<SuccessState | FailureState | IoFaultState>}
+ */
+const runCommand = async (runtime, command, signal, cmdPath) => {
+    const cmdName = commandName(command);
+    const { cmd } = command;
+    // Whether the function itself succeeded: a hook that throws after that is a bug, not an I/O fault.
+    let succeeded = false;
+    // What it returned, so a hook that loses it is caught.
+    /** @type {unknown} */
+    let value;
+    // Only inside a Parallel, and only to a function that declares a parameter. A parameter with a default
+    // value does not count toward `length`, so `nanoid(size = 21)` keeps its default; a plain first parameter
+    // the function treats as optional still takes the signal, a documented sharp edge.
+    const takesSignal = signal !== undefined && cmd.length > 0;
+    // Async, so a hook always gets a promise. The latest call is kept, with whether it is still running, to
+    // catch a hook that does not wait for it.
+    /** @type {Promise<unknown> | undefined} */
+    let latestCall;
+    let running = false;
+    const callCmd = async () => {
+        succeeded = false;
+        running = true;
+        try {
+            value = await (takesSignal ? cmd(signal) : cmd());
+            succeeded = true;
+            return value;
+        } finally {
+            running = false;
+        }
+    };
+    const op = () => (latestCall = callCmd());
+    try {
+        await runtime.onBeforeCommand(command, runtime.context);
+    } catch (e) {
+        if (hasMark(e, harnessError)) throw e;
+        return Failure(e);
+    }
+    // Again, since an interceptor can wait (a rate limiter, say) while a sibling fails.
+    if (signal?.aborted) return cancelledBranch();
+    let returned;
+    let unwaited = false;
+    try {
+        returned = await runtime.onStep(cmdName, 'Command', op, cmdPath);
+        // A hook that returned without awaiting `op` is judged as though it had awaited it.
+        if (returned === undefined && running) {
+            unwaited = true;
+            await latestCall;
+        }
+    } catch (e) {
+        // A cut from `fromTrace`: production stopped this branch before this step.
+        if (hasMark(e, replayCut)) return cancelledBranch();
+        if (hasMark(e, harnessError)) throw e;
+        // After the function succeeded, a throw is a bug in a hook. From a hook that never called `op` it is a
+        // fault, which is how replay reports a recorded error.
+        if (succeeded) throw e;
+        return IoFault(e);
+    }
+    // A hook that dropped the result would hand `next` `undefined`. Only `undefined` is refused, so a hook can
+    // return a copy.
+    if (returned === undefined && succeeded && value !== undefined) {
+        throw new TypeError(
+            `An onStep hook called op for '${cmdName}' at path '${cmdPath}' and returned undefined` +
+                `${unwaited ? ' before op had finished' : ''}, although the Command returned a value. ` +
+                'A hook has to await op() and return what it returns.'
+        );
+    }
+    return Success(returned);
+};
 
 /**
  * Runs a flow: executes its Commands, resolving `Ask` with the context and running `Retry` and `Parallel`. `onRun`

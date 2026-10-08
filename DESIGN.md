@@ -97,7 +97,9 @@ PII control is split. `redact` is the single mechanism for a trace, and the shel
 
 `runEffect` is a thin public wrapper over the private `interpret`, which `replayEffect` also calls.
 
-Inside it, `execute` walks a subtree in a `while` loop. It resolves `Ask` itself and hands every other node to `runRetry`, `runParallel` or `runCommand`. Each returns a `Success` carrying the value for the node's `next`, or the `Failure` or I/O fault that stops the subtree. `onRun` wraps the whole run once, `Retry` attempts included.
+`interpret` resolves the hooks for the run and builds its `Runtime`: the context `Ask` reads, `fastRetry`, and the two hooks a step calls, `onStep` and `onBeforeCommand`. `execute` walks a subtree in a `while` loop. It resolves `Ask` itself and hands every other node to `runRetry`, `runParallel` or `runCommand`. Each returns a `Success` carrying the value for the node's `next`, or the `Failure` or I/O fault that stops the subtree. `onRun` wraps the whole run once, `Retry` attempts included.
+
+Each of those functions stands on its own and takes the `Runtime` as its first argument. Until October 2026 they were nested inside `interpret`, which made it a 370-line closure whose six functions could be read only together, and in which three different things were named `run`. What they shared from the closure was only those four values, so passing them in costs one argument and shows each function's whole input.
 
 The loop's condition, `isPending`, reads the type as `value?.type`. So a continuation that returned `undefined` reaches the `EffectTypeError` at the end of `execute` instead of throwing from the condition.
 
@@ -279,7 +281,7 @@ Seven invariants hold replay together. Breaking one breaks replay in ways tests 
 - I/O, through an `onStep` that answers from the trace instead of calling `op`.
 - Waiting, through `fastRetry`, which waits no time between retry attempts. It is still a wait, so branches replayed by timing interleave as they would with a delay.
 
-The interpreter's only execution point is `await localStepRunner(cmdName, 'Command', op, cmdPath)`, and replay's `onStep` never calls `op` unless `onMissing: 'execute'`. So **no side effect can occur by default**. A Command executed anywhere else would be invisible to recording and replay alike.
+The interpreter's only execution point is `await runtime.onStep(cmdName, 'Command', op, cmdPath)`, and replay's `onStep` never calls `op` unless `onMissing: 'execute'`. So **no side effect can occur by default**. A Command executed anywhere else would be invisible to recording and replay alike.
 
 `hooks` defaults to `false`, so a replay cannot reach a telemetry backend or a guardrail that performs I/O. Under `hooks: true`, the hooks see the flow's own nodes.
 
