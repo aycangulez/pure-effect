@@ -8,8 +8,8 @@
 //    steps and the `flowInputs` it records for `onRun`.
 // 3. Configuration: the hook types and their defaults, `configureEffect` and its layers, and `chainHooks`, which
 //    merges them.
-// 4. Running flows: the helpers `Retry` and `Parallel` run on; `interpret`, which builds a run's `Runtime`, then
-//    `execute` and a function for each kind of node, which each take it; and `runEffect`.
+// 4. Running flows: the helpers `Retry`, `Parallel` and Commands run on; `interpret`, which builds a run's
+//    `Runtime`, then `execute` and a function for each kind of node, which each take it; and `runEffect`.
 // 5. Recording and replay: the trace format and replay errors, copying values and errors into a trace,
 //    `recorder` and `recordEffect`, then `fromTrace`, `replayEffect` and `timeTravel`.
 //
@@ -1154,8 +1154,50 @@ const settleBranches = async (runtime, effects, limit, signal, branchPath, cance
 };
 
 /**
- * Runs one Command. A throw from an interceptor vetoes the Command, an abort; a throw from its function is an
- * I/O fault. A harness error is rethrown from either. DESIGN.md's "Where a throw comes from" has the rest.
+ * A Command's function wrapped as the `op` a hook is handed, with what its calls did, so `runCommand` can tell a hook
+ * that lost the result, or did not wait for it, from one that answered without calling `op`. `running` and
+ * `succeeded` describe the latest call, which resets them as it starts, and `value` is the last value a call returned.
+ * @typedef {{
+ *   op: () => Promise<unknown>,
+ *   latest: Promise<unknown> | undefined,
+ *   running: boolean,
+ *   succeeded: boolean,
+ *   value: unknown
+ * }} TrackedCalls
+ */
+
+/**
+ * @param {() => unknown} call - Calls the Command's function
+ * @returns {TrackedCalls}
+ */
+const trackCalls = (call) => {
+    /** @type {TrackedCalls} */
+    const calls = {
+        // Async, so a hook always gets a promise, even from a synchronous function.
+        op: () => (calls.latest = invoke()),
+        latest: undefined,
+        running: false,
+        succeeded: false,
+        value: undefined
+    };
+    const invoke = async () => {
+        calls.succeeded = false;
+        calls.running = true;
+        try {
+            calls.value = await call();
+            calls.succeeded = true;
+            return calls.value;
+        } finally {
+            calls.running = false;
+        }
+    };
+    return calls;
+};
+
+/**
+ * Runs one Command. A throw from an interceptor vetoes the Command, an abort. A throw from the step runner is an I/O
+ * fault, unless the function had already succeeded, when it is a bug in a hook and rejects the run. A harness error
+ * is rethrown from either. DESIGN.md's "Where a throw comes from" has the rest.
  *
  * @param {Runtime} runtime
  * @param {CommandState} command
@@ -1166,32 +1208,11 @@ const settleBranches = async (runtime, effects, limit, signal, branchPath, cance
 const runCommand = async (runtime, command, signal, cmdPath) => {
     const cmdName = commandName(command);
     const { cmd } = command;
-    // Whether the function itself succeeded: a hook that throws after that is a bug, not an I/O fault.
-    let succeeded = false;
-    // What it returned, so a hook that loses it is caught.
-    /** @type {unknown} */
-    let value;
     // Only inside a Parallel, and only to a function that declares a parameter. A parameter with a default
     // value does not count toward `length`, so `nanoid(size = 21)` keeps its default; a plain first parameter
     // the function treats as optional still takes the signal, a documented sharp edge.
     const takesSignal = signal !== undefined && cmd.length > 0;
-    // Async, so a hook always gets a promise. The latest call is kept, with whether it is still running, to
-    // catch a hook that does not wait for it.
-    /** @type {Promise<unknown> | undefined} */
-    let latestCall;
-    let running = false;
-    const callCmd = async () => {
-        succeeded = false;
-        running = true;
-        try {
-            value = await (takesSignal ? cmd(signal) : cmd());
-            succeeded = true;
-            return value;
-        } finally {
-            running = false;
-        }
-    };
-    const op = () => (latestCall = callCmd());
+    const calls = trackCalls(() => (takesSignal ? cmd(signal) : cmd()));
     try {
         await runtime.onBeforeCommand(command, runtime.context);
     } catch (e) {
@@ -1200,34 +1221,30 @@ const runCommand = async (runtime, command, signal, cmdPath) => {
     }
     // Again, since an interceptor can wait (a rate limiter, say) while a sibling fails.
     if (signal?.aborted) return cancelledBranch();
-    let returned;
-    let unwaited = false;
     try {
-        returned = await runtime.onStep(cmdName, 'Command', op, cmdPath);
+        const returned = await runtime.onStep(cmdName, 'Command', calls.op, cmdPath);
         // A hook that returned without awaiting `op` is judged as though it had awaited it.
-        if (returned === undefined && running) {
-            unwaited = true;
-            await latestCall;
+        const unwaited = returned === undefined && calls.running;
+        if (unwaited) await calls.latest;
+        // A hook that dropped the result would hand `next` `undefined`. Only `undefined` is refused, so a hook can
+        // return a copy.
+        if (returned === undefined && calls.succeeded && calls.value !== undefined) {
+            throw new TypeError(
+                `An onStep hook called op for '${cmdName}' at path '${cmdPath}' and returned undefined` +
+                    `${unwaited ? ' before op had finished' : ''}, although the Command returned a value. ` +
+                    'A hook has to await op() and return what it returns.'
+            );
         }
+        return Success(returned);
     } catch (e) {
         // A cut from `fromTrace`: production stopped this branch before this step.
         if (hasMark(e, replayCut)) return cancelledBranch();
         if (hasMark(e, harnessError)) throw e;
-        // After the function succeeded, a throw is a bug in a hook. From a hook that never called `op` it is a
-        // fault, which is how replay reports a recorded error.
-        if (succeeded) throw e;
+        // After the function succeeded, a throw is a bug in a hook, the lost result above included. From a hook that
+        // never called `op` it is a fault, which is how replay reports a recorded error.
+        if (calls.succeeded) throw e;
         return IoFault(e);
     }
-    // A hook that dropped the result would hand `next` `undefined`. Only `undefined` is refused, so a hook can
-    // return a copy.
-    if (returned === undefined && succeeded && value !== undefined) {
-        throw new TypeError(
-            `An onStep hook called op for '${cmdName}' at path '${cmdPath}' and returned undefined` +
-                `${unwaited ? ' before op had finished' : ''}, although the Command returned a value. ` +
-                'A hook has to await op() and return what it returns.'
-        );
-    }
-    return Success(returned);
 };
 
 /**

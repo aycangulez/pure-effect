@@ -145,6 +145,8 @@ Two details hold the regions apart:
 - A harness error carries the `harnessError` symbol, always on an `Error` the library created and never on flow data, so both catches rethrow it.
 - `op` is async, so a hook always gets a promise, even for a synchronous function, as the `StepRunner` type and the README's "must `await op()`" promise.
 
+`trackCalls` builds `op` and keeps what its calls did: the latest call, whether it is still running and whether it succeeded, and the last value a call returned. The check for a lost result runs inside the step runner's region, where the function has already succeeded, so the `TypeError` rejects the run as any hook bug there does. Until October 2026 `runCommand` kept that record in six mutable variables of its own, with the check after both regions, and its three regions could not be read apart from the bookkeeping.
+
 ### Malformed flows
 
 A malformed flow is a bug and throws. A Command that rejects is a domain outcome.
