@@ -867,7 +867,7 @@ const interpret = async (effect, context = {}, callConfig = {}, fastRetry = fals
     const { inherit = true, ...local } = callConfig;
     // Not coerced, so `'false'` cannot inherit everything.
     if (typeof inherit !== 'boolean') {
-        throw new TypeError(`callConfig.inherit must be true or false, got ${JSON.stringify(inherit)}.`);
+        throw new TypeError(`callConfig.inherit must be true or false, got ${describeArgument(inherit)}.`);
     }
     const base = inherit ? globalConfig : {};
     const resolved = Object.keys(local).length ? chainHooks(base, local) : base;
@@ -1612,7 +1612,7 @@ const recordEffect = async (flowFn, initialInput, options = {}) => {
     const { context = {}, version, ...recorderOptions } = options;
     const rec = recorder(recorderOptions);
     // Before the run, so a Command that writes to the input or the context cannot rewrite what the trace received.
-    const head = rec.toTrace({ initialInput, flowName: context.flowName, context, version });
+    const head = rec.toTrace({ initialInput, flowName: context?.flowName, context, version });
     // Merged over the global wiring, so recording inside an instrumented application keeps its spans.
     const result = await runEffect(flowFn(initialInput), context, { onStep: rec.onStep });
     const { dropped, trace } = rec.toTrace();
@@ -1934,7 +1934,9 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
             { field: 'context' }
         );
     }
-    const context = options.context ?? traceLog?.context ?? {};
+    // A recorded `null` is what production ran with, so only a trace that holds no context gets `{}`.
+    const recordedContext = traceLog?.context === undefined ? {} : traceLog.context;
+    const context = options.context ?? recordedContext;
     // A capped trace lacks steps production ran, so running a missing one live could repeat production's I/O.
     const droppedEntries = Number(traceLog?.dropped) || 0;
     const capped = droppedEntries > 0;
@@ -2037,6 +2039,16 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
 const timeTravel = async (flowFn, traceLog, options = {}) => {
     checkOptions(options, 'timeTravel', { log: [isFunction, 'a function'], context: null, version: null });
     const { log = console.log, context, version } = options;
+    // Checked here, since timeTravel reads the trace's own fields before `replayEffect` checks its shape.
+    if (!isObject(traceLog) || Array.isArray(traceLog) || !Array.isArray(traceLog.trace)) {
+        const got = Array.isArray(traceLog)
+            ? 'an array of entries, which holds no initialInput to rebuild the flow from; pass the whole trace, or ' +
+              'replay the entries with replayEffect'
+            : isObject(traceLog)
+              ? 'an object with no `trace` array'
+              : describeArgument(traceLog);
+        throw replayError(`timeTravel expects a trace from recordEffect or a recorder's toTrace, got ${got}.`);
+    }
     const { initialInput, trace, flowName, version: traceVersion } = traceLog;
     const inputCause = unrecordedCause(traceLog, 'initialInput');
     if (inputCause !== undefined) {

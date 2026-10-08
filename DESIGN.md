@@ -262,7 +262,7 @@ The four are a 2x2. `recorder` and `replayEffect` are the capabilities, at the h
 
 That metadata is why the conveniences exist: `initialInput` rebuilds the flow, `context` lets `Ask` resolve on replay, and `version` flags a stale trace.
 
-- `replayEffect` defaults its `context` to the trace's, since an `Ask` gate replayed with another context takes another branch and nothing flags it. An explicit `context` wins, a `Resolver` has none to offer, and a trace assembled by hand without one replays against an empty context.
+- `replayEffect` defaults its `context` to the trace's, since an `Ask` gate replayed with another context takes another branch and nothing flags it. An explicit `context` wins, a `Resolver` has none to offer, and a trace assembled by hand without one replays against an empty context. A recorded `null` is a context like any other and replays as `null`; it once became `{}`, so `Ask` got a context production never had.
 - `fromTrace` (internal) turns a reference-format trace into a `Resolver`, and reports each entry it hands out, which is how `replayEffect` computes `unreached`.
 - `TraceLog` is the reference format, not a contract, since a `Resolver` supports any storage shape.
 

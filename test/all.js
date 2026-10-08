@@ -2429,6 +2429,42 @@ describe('Recording and replay', function () {
         assert.ok(!lines.some((l) => /no initial input/.test(l)));
     });
 
+    it('should reject a trace timeTravel cannot read with a ReplayError, as replayEffect does', async function () {
+        // timeTravel read the trace's own fields before replayEffect checked its shape, so a malformed trace failed
+        // with a bare TypeError from inside timeTravel.
+        const { flow } = makeFlow();
+        const cases = /** @type {[any, RegExp][]} */ ([
+            [{}, /got an object with no `trace` array\.$/],
+            [[], /got an array of entries, which holds no initialInput.*replay the entries with replayEffect\.$/],
+            [null, /got null\.$/]
+        ]);
+        for (const [traceLog, named] of cases) {
+            await assert.rejects(timeTravel(flow, traceLog, { log: () => {} }), (/** @type {any} */ e) =>
+                e.name === 'ReplayError' && /^timeTravel expects a trace from recordEffect/.test(e.message)
+                    ? named.test(e.message) || assert.fail(e.message)
+                    : assert.fail(`${e.name}: ${e.message}`)
+            );
+        }
+    });
+
+    it('should record and replay a run whose context is null, as runEffect runs one', async function () {
+        // recordEffect read the context's flowName and threw a bare TypeError on null, which runEffect accepts; and a
+        // replay defaulted a recorded null to {}, so Ask got a context production never had.
+        const flow = () =>
+            Ask((/** @type {any} */ ctx) =>
+                Command(
+                    function cmdLoad() {
+                        return 1;
+                    },
+                    () => Success(ctx)
+                )
+            );
+        const { result, trace } = await recordEffect(flow, undefined, { context: null });
+        assert.deepEqual(result, Success(null));
+        assert.equal(trace.context, null);
+        assert.deepEqual((await replayEffect(flow(), trace)).result, Success(null));
+    });
+
     it('should give Ask the recorded context in timeTravel, or the one it is handed', async function () {
         const flow = (/** @type {any} */ input) =>
             Ask((/** @type {any} */ ctx) =>
@@ -3089,6 +3125,24 @@ describe('Per-call inherit', function () {
         assert.equal(result.type, 'Success');
         assert.deepEqual(log, ['run', 'global-intercept', 'global:before', 'global:after']);
         assert.equal(ran, 1, 'the global onStep observed the replayed step, and the Command still did not run');
+    });
+
+    it('should name what an inherit that is not a boolean holds', async function () {
+        // The message printed it with JSON.stringify, which gives undefined for a function or a symbol and throws its
+        // own TypeError for a BigInt, so the message said nothing, or the wrong thing.
+        const cases = /** @type {[any, RegExp][]} */ ([
+            ['false', /got the string "false"\.$/],
+            [Symbol('on'), /got the symbol Symbol\(on\)\.$/],
+            [1n, /got the bigint 1\.$/],
+            [() => true, /got a function/]
+        ]);
+        for (const [inherit, named] of cases) {
+            await assert.rejects(runEffect(cmd('a'), {}, { inherit }), (/** @type {any} */ e) =>
+                e instanceof TypeError && /^callConfig\.inherit must be true or false, got /.test(e.message)
+                    ? named.test(e.message) || assert.fail(e.message)
+                    : assert.fail(e.message)
+            );
+        }
     });
 });
 
