@@ -9,5 +9,5 @@
         "moduleResolution": "nodenext",
         "lib": ["es2022", "dom"]
     },
-    "include": ["index.js", "test/all.js", "test/types.test-d.ts", "examples/*.js", "scripts/*.js"]
+    "include": ["index.js", "test/*.js", "test/types.test-d.ts", "examples/*.js", "scripts/*.js"]
 }

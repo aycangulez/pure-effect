@@ -3,7 +3,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { configureEffect, recorder, Failure } from 'pure-effect';
 
-/** @import { Effect, EffectConfiguration, RunWrapper, StepRunner, CommandInterceptor, TraceEntry, TraceLog, SuccessState, FailureState } from "pure-effect" */
+/** @import { EffectConfiguration, RunWrapper, StepRunner, CommandInterceptor, TraceEntry, TraceLog, SuccessState, FailureState } from "pure-effect" */
 
 /**
  * Records every run of an application without touching any call site, one trace per run. `recordEffect` covers
@@ -23,7 +23,8 @@ import { configureEffect, recorder, Failure } from 'pure-effect';
  *           database. Hand slow writes to a queue rather than awaiting them inside a request.
  * @property {(value: any, name: string, kind: string) => any} [redact] - Scrubs every value before it enters the
  *           trace: results, serialized errors, and the stored `initialInput` and `context`, told apart by `kind`.
- *           It receives a copy, so changing it in place never reaches the run.
+ *           It receives a copy, so changing it in place never reaches the run. A value it throws on is left out of
+ *           the trace, which marks where, as is one the recorder cannot copy.
  * @property {number} [maxEntries] - Caps trace length, 500 by default; the overflow is reported as `dropped`.
  * @property {boolean} [stack] - Records stack traces for thrown errors.
  * @property {(result: SuccessState<any> | FailureState<any>) => boolean} [keep] - Decides which runs reach the sink:
@@ -32,8 +33,8 @@ import { configureEffect, recorder, Failure } from 'pure-effect';
  * @property {(error: unknown, flowName?: string) => void} [onSinkError] - Receives an error thrown by `keep` or
  *           `sink`. Defaults to `console.error`.
  * @property {(message: string, flowName?: string) => void} [onWarning] - Receives a warning, once per flow, about a
- *           kept trace that will not replay as recorded: it has no input, `maxEntries` cut it short, or some of its
- *           steps are named 'anonymous'. Defaults to `console.warn`.
+ *           kept trace that will not replay as recorded: it has no input, `maxEntries` cut it short, some of its values
+ *           could not be recorded, or some of its steps are named 'anonymous'. Defaults to `console.warn`.
  */
 
 /**
@@ -60,10 +61,12 @@ export function recordingHooks(options = {}) {
     const warned = new Set();
 
     /** @type {RunWrapper} */
-    const onRun = async (effect, pipeline, flowName) => {
+    const onRun = async (effect, pipeline, flowName, initialInput) => {
         const rec = recorder({ redact, maxEntries, stack });
         // Packaged before the run, so a Command that changes its input cannot rewrite what the trace says it received.
-        const head = rec.toTrace({ flowName, initialInput: effect.initialInput });
+        // `toTrace` never throws, which matters here, where a throw would stop the run before it started: an input it
+        // cannot record is left out and named in the trace's `unrecorded`.
+        const head = rec.toTrace({ flowName, initialInput });
         return scope.run({ rec, head, contextCaptured: false }, async () => {
             /** @type {{ result: SuccessState<any> | FailureState<any> } | { error: unknown }} */
             let outcome;
@@ -78,7 +81,10 @@ export function recordingHooks(options = {}) {
             try {
                 if (keep(result)) {
                     const { dropped = 0, trace } = rec.toTrace();
-                    warnAboutReplay(flowName, effect, dropped, trace);
+                    const unrecorded =
+                        Object.keys(head.unrecorded ?? {}).length +
+                        trace.filter((e) => e.unrecorded !== undefined).length;
+                    warnAboutReplay(flowName, initialInput, dropped, trace, unrecorded);
                     await sink({ ...head, dropped, trace });
                 }
             } catch (error) {
@@ -92,17 +98,18 @@ export function recordingHooks(options = {}) {
     /**
      * Warns, once per flow, about a kept trace that will not replay as recorded.
      * @param {string} flowName
-     * @param {Effect<any, any, any>} effect
+     * @param {unknown} initialInput
      * @param {number} dropped
      * @param {TraceEntry[]} trace
+     * @param {number} unrecorded - How many values the trace leaves out because they could not be recorded
      */
-    const warnAboutReplay = (flowName, effect, dropped, trace) => {
+    const warnAboutReplay = (flowName, initialInput, dropped, trace, unrecorded) => {
         const warnOnce = (/** @type {string} */ kind, /** @type {string} */ message) => {
             if (warned.has(`${kind}:${flowName}`)) return;
             warned.add(`${kind}:${flowName}`);
             onWarning(`Recording '${flowName || 'flow'}': ${message}`, flowName);
         };
-        if (effect.initialInput === undefined) {
+        if (initialInput === undefined) {
             warnOnce(
                 'input',
                 'the flow carries no input, so its traces hold none and timeTravel rebuilds it from undefined. ' +
@@ -114,6 +121,14 @@ export function recordingHooks(options = {}) {
                 'capped',
                 `a kept trace dropped ${dropped} entries under maxEntries (${maxEntries}), so it replays only up to ` +
                     'the first step it lacks. Raise maxEntries for this flow to replay whole runs.'
+            );
+        }
+        if (unrecorded > 0) {
+            warnOnce(
+                'unrecorded',
+                `${unrecorded} of the values a kept trace holds could not be recorded, because redact threw on them or ` +
+                    'they could not be copied, so it replays only up to the first of them. Make redact handle every ' +
+                    "value it is given, null included, and keep Commands' results to plain data."
             );
         }
         const anonymous = trace.filter((entry) => entry.command === 'anonymous').length;
@@ -146,14 +161,18 @@ export function recordingHooks(options = {}) {
 
     /**
      * `onRun` never sees the context, so it is copied from the run's first Command, before that Command can change
-     * it. A run that stops before any Command records none.
+     * it. A run that stops before any Command records none. `toTrace` never throws, which matters here, where a throw
+     * would veto the Command.
      * @type {CommandInterceptor}
      */
     const onBeforeCommand = async (command, context) => {
         const store = scope.getStore();
         if (!store || store.contextCaptured) return;
         store.contextCaptured = true;
-        store.head.context = store.rec.toTrace({ context }).context;
+        const withContext = store.rec.toTrace({ context });
+        store.head.context = withContext.context;
+        // A context it could not record is left out, and the trace the run started with has to say so too.
+        if (withContext.unrecorded) store.head.unrecorded = { ...store.head.unrecorded, ...withContext.unrecorded };
     };
 
     return { onRun, onStep, onBeforeCommand };

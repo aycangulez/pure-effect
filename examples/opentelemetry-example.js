@@ -72,7 +72,11 @@ export function telemetryHooks(options = {}) {
             try {
                 const result = await pipeline();
                 if (result.type === 'Failure') {
-                    rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: statusMessage(result.error) });
+                    // Left out rather than set to undefined, which a project with exactOptionalPropertyTypes refuses.
+                    const message = statusMessage(result.error);
+                    rootSpan.setStatus(
+                        message === undefined ? { code: SpanStatusCode.ERROR } : { code: SpanStatusCode.ERROR, message }
+                    );
                 } else {
                     rootSpan.setStatus({ code: SpanStatusCode.OK });
                 }

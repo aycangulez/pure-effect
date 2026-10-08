@@ -1,6 +1,6 @@
 {
     "name": "pure-effect",
-    "version": "0.17.0",
+    "version": "0.18.0",
     "description": "Records what your business logic did in production and replays it anywhere: time-travel debugging for JavaScript and TypeScript, with zero dependencies. Business logic is plain data you can test without mocks.",
     "keywords": [
         "effect",
@@ -31,10 +31,13 @@
         "test": "mocha && tsd && tsc -p jsconfig.json",
         "test:ts-minimum": "npx --yes -p typescript@5.1 tsc -p test/tsconfig.minimum.json",
         "generate": "node scripts/effect-pipe-overloads.js",
-        "format": "prettier --write index.js index.d.ts examples/*.js scripts/*.js test/all.js test/types.test-d.ts README.md CLAUDE.md DESIGN.md CHANGELOG.md CONTRIBUTING.md"
+        "format": "prettier --write index.js index.d.ts examples/*.js scripts/*.js test/*.js test/types.test-d.ts README.md CLAUDE.md DESIGN.md CHANGELOG.md CONTRIBUTING.md"
     },
     "tsd": {
-        "directory": "test"
+        "directory": "test",
+        "compilerOptions": {
+            "exactOptionalPropertyTypes": true
+        }
     },
     "author": "Aycan Gulez",
     "homepage": "https://pure-effect.org",
