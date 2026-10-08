@@ -303,11 +303,12 @@ A step's `path` is its position in the tree, numbered within a subtree, with eac
 
 - `fromTrace` matches by path whenever every entry has one, and refuses duplicate paths.
 - A step the trace lacks is a `TimeParadox`, not a missing step, when the trace recorded another kind of node at a position on its path (`nodesAlong`). A Command added in front of a recorded `Retry` asks for path `1` while the trace holds `1r0/0`, so it was reported as missing and ran live under `onMissing: 'execute'`, and the README's promise that a changed flow stops at a `TimeParadox` held only where the next step was a plain Command. A step past the end of the recording, where nothing was recorded, is still missing.
+- A `Parallel`'s decision records how many branches it had, and a replay refuses a different count as a `TimeParadox` at the `Parallel`, before any branch runs. A branch added to a `Parallel` asks for paths the trace never had, with nothing recorded along them to conflict, so `nodesAlong` cannot see it: a DX experiment that moved a stock reservation into a `Parallel` got a missing step, and under `onMissing: 'execute'` the reservation ran live before the step after the `Parallel` showed the change. A branch removed from the end replayed as a `Success` with its steps unreached. The count is checked at the `Parallel` rather than at each step, because a branch that runs no Commands asks for no step. A decision recorded without a count, as every trace from before 0.18.0 holds and a `Resolver` may answer, is not judged by one.
 - A trace without paths, recorded before they existed or written by hand, is matched in order, each entry checked against the Command the flow asks for. That is exact for sequential flows. A step inside a `Parallel` is refused, since an answer by position there is right only when the replay happens to finish in production's order.
 
 #### 3. A cancelled `Parallel` replays its recorded decision
 
-Timing decides which branch cancels a `Parallel`, so the decision is recorded as the `Parallel`'s own entry at its path (`0p`): `{ cancelled: false }`, `{ cancelled: true, branch: i }`, or `branch: null` when an enclosing `Parallel` cancelled it.
+Timing decides which branch cancels a `Parallel`, so the decision is recorded as the `Parallel`'s own entry at its path (`0p`): `{ cancelled: false }`, `{ cancelled: true, branch: i }`, or `branch: null` when an enclosing `Parallel` cancelled it, each with `branches`, the number of branches (see invariant 2).
 
 A replay reproduces a cancellation rather than recomputing it:
 
@@ -453,7 +454,8 @@ Deliberate type errors in `test/types.test-d.ts` are `// @ts-expect-error` direc
 `Effect<T, E, Ctx>` carries the value, the error union and the context.
 
 - Each `effectPipe` step has its own context type, and the pipeline's is their intersection. One shared `Ctx` was inferred as `unknown` whenever a step declared none, which switched context checking off for the whole pipeline. `unknown & AppCtx` is `AppCtx`, so a step that reads no context costs nothing.
-- `runEffect` and `recordEffect` require the context when the flow's context type is not `unknown`, since the runtime would hand `Ask` an empty object.
+- `runEffect` and `recordEffect` require the context when the flow's context type is not `unknown`, since the runtime would hand `Ask` an empty object. So does `replayEffect` given a `Resolver`, which holds no context; a trace carries its own.
+- The context's type comes from the flow alone; see [A run's context is never inferred from](#a-runs-context-is-never-inferred-from).
 - An error union survives without return annotations. Every function a flow is built from is typed from its whole return, so its `Failure`s join into a union, and a step that cannot return one contributes `never` (see below). `Failure` takes a `const` type parameter, so a string passed to it keeps its literal type with no `as const`.
 - The declared union leaves out what a Command's function throws, which `runEffect` returns as a `Failure` all the same. So the code handling a result needs one fallback, as the settled decision on thrown errors says.
 
@@ -539,6 +541,15 @@ What it buys, and what it costs:
 #### `commandName` takes a `CommandState`
 
 It takes a `CommandState`, not an `Effect`, since the runtime throws for anything else. So a TypeScript walk narrows each step first, as the README's `assertCommand` does.
+
+#### A run's context is never inferred from
+
+`runEffect`, `recordEffect`, `replayEffect` and `timeTravel` read the context's type from the flow, and wrap the parameter that takes the context in `CheckedContext`, so TypeScript infers nothing from it.
+
+- Inferred from both, a variable typed with fewer fields than the flow reads widened the context to its own type, and the flow still matched, since every `next` is a method signature and so takes a wider context bivariantly. A DX experiment passed a shell's typed context that lacked a field the flow read: it compiled, and the run returned `'start+undefined'` where the type said `string`. A fresh literal was already refused, by the excess property check, which is why it went unnoticed.
+- `CheckedContext<T>` is `[T][T extends any ? 0 : never]`, an indexed access TypeScript defers, the usual stand-in for `NoInfer`, which arrived in 5.4, after the 5.1 minimum.
+- It wraps the bare `Ctx`, as in `ReplayOptions<CheckedContext<Ctx>>`, never a whole options type. `T extends any` resolves at once when `T` is an object type such as `ReplayOptions<Ctx>`, so wrapping the options let the context be inferred through them as before.
+- A `Resolver` passed with no context, for a flow that reads one, reports that a `Resolver` is not a trace, since the trace overload is the only one whose argument count fits. The overloads cannot steer that message, so `replayEffect`'s doc comment says a `Resolver` needs the context passed.
 
 #### `RunContext` adds `flowName`
 

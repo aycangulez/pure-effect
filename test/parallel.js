@@ -332,7 +332,7 @@ describe('Parallel limit and settled', function () {
             [
                 ['0p1/0', 'b'],
                 ['0p0/0', 'a'],
-                ['0p', { cancelled: false }]
+                ['0p', { cancelled: false, branches: 2 }]
             ]
         );
     });

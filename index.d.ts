@@ -1255,8 +1255,13 @@ export type StepRunner = (
     path: string
 ) => Promise<unknown>;
 
-/** Which branch, if any, cancelled a `Parallel`; `branch: null` means an enclosing one did. */
-export type ParallelDecision = { cancelled: false } | { cancelled: true; branch: number | null };
+/**
+ * Which branch, if any, cancelled a `Parallel`, and how many branches it had; `branch: null` means an enclosing one
+ * did. A replay refuses a `Parallel` whose count differs, and a decision without one is not checked.
+ */
+export type ParallelDecision =
+    | { cancelled: false; branches?: number | undefined }
+    | { cancelled: true; branch: number | null; branches?: number | undefined };
 
 /**
  * `flowName` is `context.flowName`, or `''` when the context has none. `initialInput` is what the flow was called with
@@ -1294,12 +1299,16 @@ export type RunContext<Ctx> = unknown extends Ctx
       ? Ctx & { flowName?: string | undefined }
       : Ctx;
 
+// TypeScript 5.1's stand-in for NoInfer: it defers this indexed access, so it infers nothing from it.
+/** A context checked against the one the flow reads, and never inferred from. */
+type CheckedContext<T> = [T][T extends any ? 0 : never];
+
 /** Runs a flow and returns its `Success` or `Failure`. A flow that reads a context requires one. */
 export declare function runEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     ...args: unknown extends Ctx
-        ? [context?: Ctx, callConfig?: CallConfiguration]
-        : [context: RunContext<Ctx>, callConfig?: CallConfiguration]
+        ? [context?: CheckedContext<Ctx>, callConfig?: CallConfiguration]
+        : [context: RunContext<CheckedContext<Ctx>>, callConfig?: CallConfiguration]
 ): Promise<SuccessState<T> | FailureState<E>>;
 
 export type ReplayStep = {
@@ -1390,8 +1399,8 @@ export declare function recordEffect<I, T, E = unknown, Ctx = unknown>(
     flowFn: (input: I) => Effect<T, E, Ctx>,
     initialInput: I,
     ...options: unknown extends Ctx
-        ? [options?: RecordOptions<Ctx>]
-        : [options: RecordOptions<Ctx> & { context: RunContext<Ctx> }]
+        ? [options?: RecordOptions<CheckedContext<Ctx>>]
+        : [options: RecordOptions<CheckedContext<Ctx>> & { context: RunContext<CheckedContext<Ctx>> }]
 ): Promise<{ result: SuccessState<T> | FailureState<E>; trace: TraceLog<I, Ctx> & { initialInput: I } }>;
 
 export interface ReplayOptions<Ctx = unknown> {
@@ -1415,21 +1424,28 @@ export interface Replay<T, E = unknown> {
     unreached: TraceEntry[];
 }
 
-/** Replays a flow from a trace, or from a Resolver for other storage, with no I/O. */
+/**
+ * Replays a flow from a trace, or from a Resolver for other storage, with no I/O. A Resolver holds no context, so a
+ * flow that reads one needs `context` passed.
+ */
 export declare function replayEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     trace: TraceLog | TraceEntry[],
-    options?: ReplayOptions<Ctx>
+    options?: ReplayOptions<CheckedContext<Ctx>>
 ): Promise<Replay<T, E>>;
 export declare function replayEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     resolver: Resolver,
-    options?: ReplayOptions<Ctx>
+    ...options: unknown extends Ctx
+        ? [options?: ReplayOptions<CheckedContext<Ctx>>]
+        : [options: ReplayOptions<CheckedContext<Ctx>> & { context: RunContext<CheckedContext<Ctx>> }]
 ): Promise<Omit<Replay<T, E>, 'unreached'>>;
 export declare function replayEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     traceOrResolver: Resolver | TraceLog | TraceEntry[],
-    options?: ReplayOptions<Ctx>
+    ...options: unknown extends Ctx
+        ? [options?: ReplayOptions<CheckedContext<Ctx>>]
+        : [options: ReplayOptions<CheckedContext<Ctx>> & { context: RunContext<CheckedContext<Ctx>> }]
 ): Promise<Omit<Replay<T, E>, 'unreached'> & { unreached?: TraceEntry[] }>;
 
 /** Replays a trace and logs each step with its recorded timing, warning about what will not replay as recorded. */
@@ -1438,7 +1454,7 @@ export declare function timeTravel<T, E = unknown, Ctx = unknown>(
     traceLog: TraceLog,
     options?: {
         log?: ((...args: any[]) => void) | undefined;
-        context?: RunContext<Ctx> | undefined;
+        context?: RunContext<CheckedContext<Ctx>> | undefined;
         version?: string | undefined;
     }
 ): Promise<SuccessState<T> | FailureState<E>>;

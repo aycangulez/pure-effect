@@ -710,6 +710,35 @@ runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { db: 'conn', fl
 runEffect(Success(1), { tenant: 'acme' });
 runEffect(Success(1), undefined, {});
 
+// The context is checked against what the flow reads, never inferred from: a variable typed with fewer fields once
+// widened the flow's context to match, and Ask got undefined for the rest.
+interface DbAndTenantCtx {
+    db: string;
+    tenant: string;
+}
+const readsDbAndTenant = effectPipe((id: string) => Ask((ctx: DbAndTenantCtx) => Success(ctx.db + ctx.tenant + id)));
+const dbOnly: AppCtx = { db: 'conn' };
+// @ts-expect-error the variable's type lacks the tenant the flow reads
+runEffect(readsDbAndTenant('1'), dbOnly);
+// @ts-expect-error recordEffect checks its context the same way
+recordEffect(readsDbAndTenant, '1', { context: dbOnly });
+// @ts-expect-error so does a replay from a trace
+replayEffect(readsDbAndTenant('1'), [], { context: dbOnly });
+// @ts-expect-error and timeTravel
+timeTravel(readsDbAndTenant, { trace: [] }, { context: dbOnly });
+// a variable with more than the flow reads still passes, as any object of a wider type does
+const dbTenantAndRegion = { db: 'conn', tenant: 'acme', region: 'eu' };
+runEffect(readsDbAndTenant('1'), dbTenantAndRegion);
+recordEffect(readsDbAndTenant, '1', { context: dbTenantAndRegion });
+// A Resolver holds no context, so a replay from one needs it passed, as runEffect does; a trace carries its own.
+const answersNothing: Resolver = () => undefined;
+// @ts-expect-error the flow reads a context, and a Resolver has none to give it
+replayEffect(readsDbAndTenant('1'), answersNothing);
+replayEffect(readsDbAndTenant('1'), answersNothing, { context: dbTenantAndRegion });
+replayEffect(readsDbAndTenant('1'), { trace: [] });
+// a flow that reads none still replays from a Resolver alone
+replayEffect(Success(1), answersNothing);
+
 // each step contributes its own context, so a step that reads none does not erase a later step's
 const parseConnId = (raw: string): Effect<string, 'bad_id'> => (raw ? Success(raw) : Failure('bad_id'));
 const findConn = (id: string): Effect<string, 'not_found', AppCtx> =>

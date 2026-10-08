@@ -706,9 +706,10 @@ const cancelledBranch = () =>
     Failure(Object.assign(new Error('Parallel branch cancelled.'), { name: 'ParallelCancelled' }));
 
 /**
- * Which branch, if any, cancelled a Parallel; `branch: null` means an enclosing Parallel did. Timing decides it, so
- * it is recorded as the Parallel's own step for a replay to hand back.
- * @typedef {{ cancelled: false } | { cancelled: true, branch: number | null }} ParallelDecision
+ * Which branch, if any, cancelled a Parallel, and how many branches it had; `branch: null` means an enclosing Parallel
+ * did. Timing decides it, so it is recorded as the Parallel's own step for a replay to hand back, and the count lets a
+ * replay see a branch added or removed.
+ * @typedef {{ cancelled: false, branches: number } | { cancelled: true, branch: number | null, branches: number }} ParallelDecision
  */
 
 /**
@@ -729,6 +730,13 @@ const cancelledBranch = () =>
 const isBranchIndex = (branch, count) => Number.isInteger(branch) && branch >= 0 && branch < count;
 
 /**
+ * Names a number of branches, for a message.
+ * @param {number} count
+ * @returns {string}
+ */
+const branchCount = (count) => (count === 1 ? '1 branch' : `${count} branches`);
+
+/**
  * Reads a recorded decision, or `undefined` for anything that is not one, which replays the Parallel by timing.
  * @param {any} value
  * @param {number} branches - How many branches the Parallel has, so a stale branch index is refused too
@@ -736,11 +744,11 @@ const isBranchIndex = (branch, count) => Number.isInteger(branch) && branch >= 0
  */
 const asDecision = (value, branches) => {
     if (!isObject(value)) return undefined;
-    if (value.cancelled === false) return { cancelled: false };
+    if (value.cancelled === false) return { cancelled: false, branches };
     if (value.cancelled !== true) return undefined;
     const { branch } = value;
-    if (branch === null) return { cancelled: true, branch: null };
-    return isBranchIndex(branch, branches) ? { cancelled: true, branch } : undefined;
+    if (branch === null) return { cancelled: true, branch: null, branches };
+    return isBranchIndex(branch, branches) ? { cancelled: true, branch, branches } : undefined;
 };
 
 /**
@@ -1021,11 +1029,22 @@ const runBranches = async (runtime, effects, options, signal, branchPath, record
     const recordedBranch = recorded?.cancelled === true ? recorded.branch : undefined;
     const pastTheEnd = Number.isInteger(recordedBranch) && recordedBranch >= effects.length;
     if (pastTheEnd) {
-        const count = effects.length === 1 ? '1 branch' : `${effects.length} branches`;
         throw timeParadoxAt(
             `path '${branchPath}'`,
-            `the recorded run was cancelled by branch ${recordedBranch}, but this Parallel has ${count}.`,
+            `the recorded run was cancelled by branch ${recordedBranch}, but this Parallel has ` +
+                `${branchCount(effects.length)}.`,
             { path: branchPath, branch: recordedBranch }
+        );
+    }
+    // So does a different number of branches, checked before any branch runs, since a new branch's steps are ones
+    // the trace lacks and would run live under onMissing: 'execute'. A decision recorded without a count is not
+    // judged by one.
+    const recordedBranches = recorded?.branches;
+    if (Number.isInteger(recordedBranches) && recordedBranches !== effects.length) {
+        throw timeParadoxAt(
+            `path '${branchPath}'`,
+            `this Parallel has ${branchCount(effects.length)}, and the trace recorded ${recordedBranches}.`,
+            { path: branchPath, expected: recordedBranches, actual: effects.length }
         );
     }
     const forced = asDecision(recorded, effects.length);
@@ -1052,13 +1071,14 @@ const runBranches = async (runtime, effects, options, signal, branchPath, record
         }
         return { results, decision: forced, thrown };
     }
+    const branches = effects.length;
     /** @type {ParallelDecision} */
     const decision =
         trigger >= 0
-            ? { cancelled: true, branch: trigger }
+            ? { cancelled: true, branch: trigger, branches }
             : cancelled
-              ? { cancelled: true, branch: null }
-              : { cancelled: false };
+              ? { cancelled: true, branch: null, branches }
+              : { cancelled: false, branches };
     return { results, decision, thrown };
 };
 
