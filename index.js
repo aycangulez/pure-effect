@@ -555,18 +555,6 @@ const defaultRunWrapper = async (effect, op, flowName, initialInput) => await op
 /** @type CommandInterceptor */
 const defaultCommandInterceptor = async (command, context) => {};
 
-/**
- * Refuses the removed `retry` key rather than ignoring it. Migration scaffolding: remove at 1.0.
- * @param {any} config
- * @param {string} source
- */
-const rejectRetryKey = (config, source) => {
-    if (isObject(config) && 'retry' in config)
-        throw new TypeError(
-            `${source} no longer takes 'retry'. Retry options are per-use: pass them to Retry(effect, options).`
-        );
-};
-
 /** The hooks a configuration can set. */
 const hookNames = ['onStep', 'onRun', 'onBeforeCommand'];
 
@@ -590,7 +578,6 @@ const describeConfiguration = (value) =>
  * @param {string[]} known - The keys it may hold
  */
 const checkConfiguration = (config, source, prefix, known) => {
-    rejectRetryKey(config, source);
     rejectUnknownOptions(config, source, known);
     for (const name of hookNames) {
         const hook = config[name];
@@ -774,20 +761,19 @@ const replayCutError = (path) =>
     );
 
 /**
- * A cancellation scope for one Parallel, linked to the enclosing one so cancellation nests. Without an
- * `AbortController` there is no scope, and every branch runs to completion.
+ * A cancellation scope for one Parallel, linked to the enclosing one so cancellation nests.
  * @param {AbortSignal} [signal] - The enclosing Parallel's signal, if any
- * @returns {{ scope: AbortController | undefined, unlink: () => void }}
+ * @returns {{ scope: AbortController, unlink: () => void }}
  */
 const linkedScope = (signal) => {
-    const scope = typeof AbortController === 'function' ? new AbortController() : undefined;
-    const relay = () => scope?.abort();
-    if (signal && scope) {
+    const scope = new AbortController();
+    const relay = () => scope.abort();
+    if (signal) {
         if (signal.aborted) scope.abort();
         else signal.addEventListener('abort', relay, { once: true });
     }
     const unlink = () => {
-        if (signal && scope) signal.removeEventListener('abort', relay);
+        if (signal) signal.removeEventListener('abort', relay);
     };
     return { scope, unlink };
 };
@@ -1107,14 +1093,14 @@ const settleBranches = async (runtime, effects, limit, signal, branchPath, cance
     const triggered = new Array(effects.length).fill(false);
     const settle = async (/** @type {Effect} */ branch, /** @type {number} */ i) => {
         try {
-            results[i] = await execute(runtime, branch, scope?.signal, `${branchPath}${i}/`);
+            results[i] = await execute(runtime, branch, scope.signal, `${branchPath}${i}/`);
         } catch (error) {
             thrown[i] = { error };
         }
         // Read-then-abort is atomic here, so exactly one branch is the trigger.
         if (cancelsOthers(thrown[i] !== undefined, results[i])) {
-            if (!scope?.signal.aborted) triggered[i] = true;
-            scope?.abort();
+            if (!scope.signal.aborted) triggered[i] = true;
+            scope.abort();
         }
     };
     try {
@@ -1131,7 +1117,7 @@ const settleBranches = async (runtime, effects, limit, signal, branchPath, cance
         // The first by array order, since every branch has settled by now.
         thrown: thrown.find(Boolean),
         trigger: triggered.indexOf(true),
-        cancelled: Boolean(scope?.signal.aborted)
+        cancelled: scope.signal.aborted
     };
 };
 
@@ -1482,8 +1468,6 @@ const snapshot = (value) => {
     return json === undefined ? undefined : JSON.parse(json);
 };
 
-const now = () => (typeof performance === 'object' ? performance.now() : Date.now());
-
 /**
  * Builds an `onStep` hook that records every Command's result or error and every Parallel's decision, and `toTrace`,
  * which packages them. Give each run its own recorder: one installed for a whole application mixes runs into a trace
@@ -1507,9 +1491,9 @@ const recorder = (options = {}) => {
      * @type {StepRunner}
      */
     const onStep = async (name, type, op, path) => {
-        const started = now();
+        const started = performance.now();
         const keep = (/** @type {boolean} */ threw, /** @type {any} */ outcome) => {
-            const durationMs = Math.round((now() - started) * 1000) / 1000;
+            const durationMs = Math.round((performance.now() - started) * 1000) / 1000;
             const entry = traceEntry(settings, { name, type, path, durationMs }, threw, outcome);
             if (entries.length < maxEntries) entries.push(entry);
             else dropped++;

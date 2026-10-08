@@ -6860,16 +6860,19 @@ describe('Retry attempts and the removed global retry', function () {
         assert.throws(() => Retry(failing(), { delay: NaN }), /Retry 'delay' .*the number NaN/);
     });
 
-    it('should refuse a retry key in configureEffect', function () {
-        assert.throws(() => configureEffect(/** @type {any} */ ({ retry: { attempts: 5 } })), TypeError);
-        assert.throws(() => configureEffect(/** @type {any} */ ({ retry: { attempts: 5 } })), /per-use|Retry\(/);
+    it('should refuse a retry key in configureEffect, as any key no hook has', function () {
+        assert.throws(() => configureEffect(/** @type {any} */ ({ retry: { attempts: 5 } })), {
+            name: 'TypeError',
+            message: "configureEffect has no option named 'retry'; its options are onStep, onRun and onBeforeCommand."
+        });
     });
 
-    it('should refuse a retry key in a per-call config', async function () {
-        await assert.rejects(
-            () => runEffect(Success(1), undefined, /** @type {any} */ ({ retry: { attempts: 5 } })),
-            TypeError
-        );
+    it('should refuse a retry key in a per-call config, as any key no hook has', async function () {
+        await assert.rejects(() => runEffect(Success(1), undefined, /** @type {any} */ ({ retry: { attempts: 5 } })), {
+            name: 'TypeError',
+            message:
+                "runEffect's callConfig has no option named 'retry'; its options are onStep, onRun, onBeforeCommand and inherit."
+        });
     });
 
     it('should refuse a hook name configureEffect does not read', function () {

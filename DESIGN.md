@@ -202,7 +202,7 @@ Undoing work: a fail-fast `Parallel` drops the values of the branches that succe
 
 ### Cancellation is a request
 
-- Cancellation nests. Each `Parallel` has an `AbortController` linked to the enclosing one by `linkedScope`.
+- Cancellation nests. Each `Parallel` has an `AbortController` linked to the enclosing one by `linkedScope`. Every runtime the library supports has `AbortController`, so nothing checks for it; a check that fell back to running every branch to completion could never fire, and mutation testing reported its optional chaining as equivalent mutants on every run.
 - A cancelled branch starts no further Commands, checked in three places: at the top of `execute`'s loop; again once `onBeforeCommand` returns, since an interceptor such as a rate limiter can wait while a sibling fails (a charge once started 40ms after its branch was cancelled); and again before a `Retry` fallback.
 - A retry backoff ends at once when its branch is cancelled, including one that starts on a signal that has already fired. That is the usual case, since a Command that honours the signal rejects the moment a sibling fails. `delayFor` checks `aborted` first, because a listener added to an aborted signal never runs.
 - Stopping the Command already in flight needs its function to pass on the `AbortSignal` it is handed. That is why `cmd` receives the signal inside a `Parallel`, and no argument anywhere else.
@@ -225,7 +225,7 @@ Undoing work: a fail-fast `Parallel` drops the values of the branches that succe
 - A call with no arguments at all removes every layer, which is how the suites reset. A call whose arguments are all `undefined`, such as `configureEffect(flag ? hooks : undefined)`, is a conditional install that adds and removes nothing.
 - `chainHooks` merges the layers into `globalConfig`, earliest outermost. `onStep` and `onRun` are wrappers that nest, so a thrown Command unwinds from the innermost hook back out, and `onBeforeCommand` interceptors run in order. Keep those semantics if the hook shapes change.
 - A slot no layer defines is absent, and `interpret` picks the library default where it reads the slot.
-- A leftover `retry` key throws from `configureEffect` and from `callConfig`, checked before any layer is installed. It is migration scaffolding and comes out at 1.0.
+- A `retry` key throws from `configureEffect` and from `callConfig` as any key no hook has, before any layer is installed. It had a check of its own, whose message pointed to `Retry(effect, options)`, as migration scaffolding meant to come out at 1.0; it came out in October 2026, since the check on unknown keys already refused it.
 - `checkConfiguration` refuses a key no hook is named, a hook that is not a function, and a configuration that is not an object, from `configureEffect` before any layer is installed and from `callConfig` before the run. A misspelt `onstep` was ignored, so telemetry or recording switched off with nothing to say so, and `onStep: 42` made every Command an I/O fault, so `Retry` retried a configuration mistake and reported an exhausted outage for a Command that never ran. Only `undefined` leaves a configuration or a hook out, as in `configureEffect(flag ? hooks : undefined)`. `null` and the other falsy values were skipped too, which the types never allowed, so a kill switch wired as `killSwitch ?? null` switched itself off with nothing to say so.
 
 ### Per-call configuration
@@ -245,7 +245,7 @@ The recorder's `onStep` runs `op`, returns its result and lets its error propaga
 
 - There is no catch-all. The raw hooks once let a throwing `redact` turn a successful run into a `Failure`, and `observeSteps`, a wrapper that dropped anything the observer threw, was the answer. Once `redact` and the copy were caught where they run, nothing else in the recorder could throw, so `observeSteps`' catches could not be reached from its only caller, and it was folded into the recorder.
 - A catch-all would hide a bug in the recorder as a value it could not record, blamed on the caller's `redact` or data. Without one, nothing else in the recorder may throw, and that has to hold by construction: a throw that escaped while a Command's error was being recorded would take that error's place, and `Retry` would retry it as an I/O fault. That happened once, after the catch-all went: `recordError` read the copy of a thrown value outside `recordPart`, and the copy keeps a getter that throws as it is, so a thrown object with one lost both its attempts from the trace and had its error replaced. So every read of the caller's value, and of what `redact` returns, happens inside `recordPart`, and a new part that runs the caller's code goes through it too. A copy is plain JSON data now, so reading it is safe.
-- The `durationMs` on each trace entry is measured around `op`, and rounded to microseconds.
+- The `durationMs` on each trace entry is measured around `op` with `performance.now()`, which every supported runtime has, and rounded to microseconds. A fallback to `Date.now()` could never run, and was dropped with the `AbortController` check.
 
 ## Recording and replay
 
@@ -928,7 +928,7 @@ Mutation testing stays out of CI. Its survivors need reading rather than countin
 
 Its survivors are not a to-do list:
 
-- Most are equivalent mutants that change nothing observable: optional chaining on an `AbortController` that always exists, arrays sized in advance and then filled, `performance.now()` against `Date.now()`, and a check after a retry backoff that the loop repeats. Others change only message wording.
+- Most are equivalent mutants that change nothing observable: arrays sized in advance and then filled, and a check after a retry backoff that the loop repeats. Others change only message wording.
 - A few flip between runs, because some tests depend on timing.
 - Two gaps are left on purpose: whether each nested `Parallel` removes its listener from the enclosing signal, and the exact wording of `timeTravel`'s narration.
 
