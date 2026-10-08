@@ -1504,9 +1504,9 @@ const recorderOptionRules = {
 /**
  * Runs one of the two parts of recording a value that can throw, and names it when it does. They are the only parts
  * caught, since each runs the caller's code or reads the caller's value, and a throw from either must not reach the
- * run. Every read of the caller's value, or of a copy of it, happens inside one, since a copy keeps a getter that
- * throws as it is. Nothing else in the recorder throws, and nothing else may: a throw that escaped while a Command's
- * error was being recorded would take that error's place, and `Retry` would retry it.
+ * run. Every read of the caller's value, and of what `redact` returns, which is the caller's too, happens inside one.
+ * Nothing else in the recorder throws, and nothing else may: a throw that escaped while a Command's error was being
+ * recorded would take that error's place, and `Retry` would retry it.
  * @param {UnrecordedCause} cause
  * @param {() => any} compute
  * @returns {Recorded}
@@ -1528,77 +1528,28 @@ const recordPart = (cause, compute) => {
  */
 
 /**
- * An array, a plain object, or an object with no prototype: the shapes `copyAround` rebuilds with their prototype
- * rather than first handing to `structuredClone`.
- * @param {object} value
- * @returns {boolean}
- */
-const isPlainContainer = (value) => {
-    if (Array.isArray(value)) return true;
-    const proto = Object.getPrototypeOf(value);
-    return proto === Object.prototype || proto === null;
-};
-
-/**
- * Copies what `structuredClone` refused. Arrays and objects are rebuilt and everything inside them is copied in
- * turn, so only a function, and a getter that throws, are kept as they are. A context holding a logger is the usual
- * case. An object `structuredClone` cannot copy on its own either, such as an instance of a class with an
- * arrow-function field, is rebuilt as plain data, as `structuredClone` rebuilds an instance it can copy. It was kept
- * as it was, so `redact` was handed the object the run held, and a redact that deleted a field in place changed
- * the run.
- *
- * @param {any} value
- * @param {Map<object, any>} seen - Copies made so far, so a cycle is copied as a cycle
- * @returns {any}
- */
-const copyAround = (value, seen) => {
-    if (!isObject(value)) return value;
-    if (seen.has(value)) return seen.get(value);
-    const plain = isPlainContainer(value);
-    // Tried on its own first, so an instance it can copy keeps what only `structuredClone` keeps, such as a Date's
-    // time; one it refuses is rebuilt below as plain data.
-    if (!plain) {
-        try {
-            return structuredClone(value);
-        } catch {}
-    }
-    /** @type {any} */
-    const copy = Array.isArray(value) ? [] : Object.create(plain ? Object.getPrototypeOf(value) : Object.prototype);
-    seen.set(value, copy);
-    for (const key of Object.keys(value)) {
-        let item;
-        try {
-            item = value[key];
-        } catch {
-            // A getter that throws when read, as a lazy client's does, cannot be copied either, so it is kept too.
-            Object.defineProperty(
-                copy,
-                key,
-                /** @type {PropertyDescriptor} */ (Object.getOwnPropertyDescriptor(value, key))
-            );
-            continue;
-        }
-        copy[key] = copyAround(item, seen);
-    }
-    return copy;
-};
-
-/**
- * Snapshots a value on its way into a trace, and on its way out of one in a replay, so a later mutation
- * cannot rewrite what the trace says a step returned. The copy is also what `redact` is handed, so it has
- * to be one the flow never sees. A value that cannot be cloned whole is copied around the functions and
- * throwing getters in it, the only parts it keeps as they are.
+ * Copies a value into the one form a trace has, the JSON it is stored as, on its way into a trace and again on its way
+ * out in a replay. So a later mutation cannot rewrite what the trace says a step returned, `redact` is handed a copy
+ * the flow never sees, and a replay from memory hands the flow what a replay from storage does. A value JSON cannot
+ * encode, such as a BigInt or a getter that throws, throws here, and the recorder marks it unrecorded.
+ * `undefined`, and a function, which JSON leaves out, come back as `undefined`.
  *
  * @param {any} value
  * @returns {any}
  */
 const snapshot = (value) => {
-    if (!isObject(value)) return value;
-    try {
-        return typeof structuredClone === 'function' ? structuredClone(value) : JSON.parse(JSON.stringify(value));
-    } catch {
-        return copyAround(value, new Map());
-    }
+    // A reference back to an object the copy is inside of is cut, as `serializeError` cuts an error chain, so an HTTP
+    // client's request and response that point at each other still reach `redact`. One shared without a loop is kept.
+    /** @type {object[]} */
+    const ancestors = [];
+    const json = JSON.stringify(value, function (key, item) {
+        if (!isObject(item)) return item;
+        while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) ancestors.pop();
+        if (ancestors.includes(item)) return undefined;
+        ancestors.push(item);
+        return item;
+    });
+    return json === undefined ? undefined : JSON.parse(json);
 };
 
 const now = () => (typeof performance === 'object' ? performance.now() : Date.now());
@@ -1632,7 +1583,8 @@ const recorder = (options = {}) => {
     const copyAndRedact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
         const copied = recordPart('copy', () => snapshot(value));
         if ('unrecorded' in copied) return copied;
-        return recordPart('redact', () => redact(copied.value, name, kind));
+        // What redact returns is stored in the same form, so it reads the same from memory as from storage.
+        return recordPart('redact', () => snapshot(redact(copied.value, name, kind)));
     };
 
     /**
@@ -1652,13 +1604,9 @@ const recorder = (options = {}) => {
         const { copy: serialized, wasError } = copied.value;
         // Reading what redact returned is part of redacting, since that value is the caller's.
         return recordPart('redact', () => {
-            const redacted = redact(serialized, name, 'error');
+            const redacted = snapshot(redact(serialized, name, 'error'));
             const rebuilt = wasError && isObject(redacted) && !Array.isArray(redacted) && redacted.__error !== true;
-            if (!rebuilt) return redacted;
-            // A field it left undefined, as `{ status: value.status }` leaves one the error did not have, is dropped
-            // as JSON drops it, so a replay from memory matches one from storage, and production.
-            const fields = Object.entries(redacted).filter(([, field]) => field !== undefined);
-            return { __error: true, ...Object.fromEntries(fields) };
+            return rebuilt ? { __error: true, ...redacted } : redacted;
         });
     };
 
@@ -1853,7 +1801,16 @@ const fromTrace = (traceLog, options = {}) => {
                 { command: step.name, index: step.index, path: step.path }
             );
         }
-        return entryToOutcome(entry);
+        // A recorded trace is JSON, so a value the copy cannot encode, such as a BigInt, comes from one built by hand.
+        try {
+            return entryToOutcome(entry);
+        } catch {
+            throw replayError(
+                `Trace entry for '${step.name}' at path '${step.path}' holds a value JSON cannot encode, such as a ` +
+                    'BigInt. A recorded trace never does, so write the entry as JSON would store it.',
+                { command: step.name, index: step.index, path: step.path }
+            );
+        }
     };
 
     if (entries.length > 0 && entries.every(hasPath)) {
@@ -1986,7 +1943,7 @@ const missingStepError = (step, describe, droppedEntries) => {
 /** What each cause the recorder writes means, and what fixes it, for a replay error. */
 const unrecordedReasons = new Map([
     ['redact', ['redact threw on it', 'make redact handle every value it is given, null included']],
-    ['copy', ['it could not be copied, as when a getter on it throws', 'keep it to plain data']]
+    ['copy', ['it could not be copied, as when it holds a BigInt or a getter that throws', 'keep it to plain data']]
 ]);
 
 /**

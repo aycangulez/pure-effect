@@ -1471,6 +1471,19 @@ describe('Recording and replay', function () {
         }
     });
 
+    it('should stop at a hand-built entry JSON cannot encode with a ReplayError naming it', async function () {
+        // A replay copies each outcome the way a trace is stored, so a BigInt, which no recorded trace holds, threw a
+        // bare TypeError naming no step.
+        const flow = Command(function cmdCount() {
+            return 0;
+        });
+        const { result } = await replayEffect(flow, [{ command: 'cmdCount', path: '0', result: 1n }]);
+        const error = /** @type {any} */ (errorOf(result));
+        assert.equal(error.name, 'ReplayError');
+        assert.match(error.message, /'cmdCount' at path '0' holds a value JSON cannot encode/);
+        assert.deepEqual([error.command, error.path], ['cmdCount', '0']);
+    });
+
     it('should detect a trace recorded from a different flow', async function () {
         const flowA = () =>
             Command(
@@ -1904,7 +1917,7 @@ describe('Recording and replay', function () {
         const { result: replayed } = await replayEffect(flow(), trace, { onMissing: 'execute' });
         assert.match(
             /** @type {any} */ (errorOf(replayed)).message,
-            /no outcome for 'cmdCharge' at path '0r0\/0': it could not be copied, as when a getter on it throws/
+            /no outcome for 'cmdCharge' at path '0r0\/0': it could not be copied, as when it holds a BigInt or a getter that throws/
         );
         assert.equal(charges, 2, 'the replay charged nothing');
 
@@ -2157,19 +2170,18 @@ describe('Recording and replay', function () {
         assert.deepEqual(fromJson, result);
     });
 
-    it('should keep an undefined field on an error redact passed through, as production had it', async function () {
-        // Only an error redact rebuilt loses its undefined fields: one it returns as it was handed keeps them, so a
-        // replay from memory still deep-equals what production threw.
+    it('should drop an undefined field on an error as storage does, so memory and storage replay alike', async function () {
         const flow = (/** @type {any} */ input) =>
             effectPipe(() =>
                 Command(function cmdCall() {
                     throw Object.assign(new Error('down'), { code: undefined });
                 })
             )(input);
-        const { result, trace } = await recordEffect(flow, 'in');
+        const { trace } = await recordEffect(flow, 'in');
         const { result: fromMemory } = await replayEffect(flow('in'), trace);
-        assert.deepEqual(fromMemory, result);
-        assert.ok(Object.hasOwn(/** @type {any} */ (errorOf(fromMemory)), 'code'));
+        const { result: fromJson } = await replayEffect(flow('in'), JSON.parse(JSON.stringify(trace)));
+        assert.deepEqual(fromMemory, fromJson);
+        assert.ok(!Object.hasOwn(/** @type {any} */ (errorOf(fromMemory)), 'code'));
     });
 
     it('should leave an error redact replaced with a value that is not an object as that value', async function () {
@@ -2186,9 +2198,8 @@ describe('Recording and replay', function () {
         assert.equal(errorOf(replayed), '[redacted]');
     });
 
-    it('should keep a property whose getter throws as it is, rather than failing the copy', async function () {
-        // A lazy client in the context threw when the copy read it, so `toTrace` threw, and `recordEffect` rejected
-        // before running the flow, although a part that cannot be copied is documented as kept as it is.
+    it('should leave out a context whose getter throws, and still run the flow', async function () {
+        // JSON cannot read the getter, so the copy fails before redact runs, and the whole context is left out.
         const context = {
             tenant: 'acme',
             services: {
@@ -2197,9 +2208,9 @@ describe('Recording and replay', function () {
                 }
             }
         };
-        const stored = /** @type {any} */ (recorder().toTrace({ context }).context);
-        assert.equal(typeof Object.getOwnPropertyDescriptor(stored.services, 'client')?.get, 'function');
-        assert.equal(stored.tenant, 'acme');
+        const packaged = recorder().toTrace({ context });
+        assert.equal(packaged.context, undefined);
+        assert.deepEqual(packaged.unrecorded, { context: 'copy' });
         let calls = 0;
         const flow = effectPipe(() =>
             Command(function cmdCharge() {
@@ -2207,13 +2218,14 @@ describe('Recording and replay', function () {
                 return 'ch_1';
             })
         );
-        const { result } = await recordEffect(flow, 'in', {
+        const { result, trace } = await recordEffect(flow, 'in', {
             context,
             redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
                 kind === 'context' ? { tenant: value.tenant } : value
         });
         assert.deepEqual(result, Success('ch_1'));
         assert.equal(calls, 1);
+        assert.deepEqual(trace.unrecorded, { context: 'copy' }, 'a redact that would drop the client cannot rescue it');
     });
 
     it('should leave an absent initialInput or context undefined rather than redacting nothing into an object', function () {
@@ -2583,9 +2595,7 @@ describe('Recording and replay', function () {
         assert.deepEqual(result, Success([1]));
     });
 
-    it('should narrate a result JSON cannot print without changing the replay', async function () {
-        // timeTravel narrated each step with JSON.stringify, which throws on a BigInt and on a cycle, and that
-        // throw turned a run that succeeded into a Failure.
+    it('should mark a result JSON cannot encode, and cut a loop in one it can', async function () {
         const flow = (/** @type {any} */ input) =>
             effectPipe(
                 () =>
@@ -2604,11 +2614,11 @@ describe('Recording and replay', function () {
                     )
             )(input);
         const { result, trace } = await recordEffect(flow, null);
-        /** @type {string[]} */
-        const lines = [];
-        const replayed = await timeTravel(flow, trace, { log: (l) => lines.push(l) });
-        assert.deepEqual(replayed, result);
-        assert.equal(lines.filter((l) => l.startsWith('Step ')).length, 2, 'both steps were narrated');
+        assert.deepEqual(result, Success(100), 'recording does not change the run');
+        assert.equal(trace.trace[0].unrecorded, 'copy', 'a BigInt cannot be stored');
+        assert.deepEqual(trace.trace[1].result, { total: 100 }, 'the loop back is cut');
+        const { result: replayed } = await replayEffect(flow(null), trace);
+        assert.equal(/** @type {any} */ (errorOf(replayed)).name, 'ReplayError');
     });
 
     it('should not execute any Command across every primitive during replay', async function () {
@@ -4139,7 +4149,7 @@ describe('Recorded values are snapshots', function () {
         assert.deepEqual(rec.entries[0].result, { id: 1, tags: ['a'] }, 'nested values are snapshotted too');
     });
 
-    it('should copy around the parts of a value that cannot be cloned', async function () {
+    it('should copy a value as storage holds it', async function () {
         const callback = () => 'not cloneable';
         const logger = new (class Logger {
             write = () => {};
@@ -4148,9 +4158,7 @@ describe('Recorded values are snapshots', function () {
         const row = {
             ok: true,
             tags: ['a'],
-            none: [],
             handlers: ['a', callback],
-            note: null,
             when: new Date('2026-01-01T00:00:00Z'),
             logger,
             options,
@@ -4170,29 +4178,15 @@ describe('Recorded values are snapshots', function () {
         assert.equal(result.type, 'Success', 'an uncloneable result must not fail the run');
         row.ok = false;
         row.tags.push('b');
-        row.handlers.push('b');
-        row.when.setFullYear(2030);
         options.retries = 2;
-        const entry = /** @type {any} */ (rec.entries[0].result);
-        assert.equal(entry.ok, true, 'a later mutation does not rewrite the entry');
-        assert.deepEqual(entry.tags, ['a'], 'nested values are copied too');
-        assert.deepEqual(entry.handlers, ['a', callback], 'an array holding a function is copied around the function');
-        assert.deepEqual(entry.none, []);
-        assert.equal(entry.note, null);
-        assert.ok(entry.when instanceof Date, 'an object that can be cloned on its own is cloned');
-        assert.equal(entry.when.toISOString(), '2026-01-01T00:00:00.000Z');
-        assert.equal(entry.options.retries, 1, 'an object without a prototype is copied');
-        assert.equal(Object.getPrototypeOf(entry.options), null, 'and keeps having none');
-        assert.equal(entry.options.onRetry, options.onRetry);
-        // An instance that cannot be cloned was kept as it is, so the trace held the live object: see the next test.
-        assert.notEqual(entry.logger, logger, 'an instance that cannot be cloned is copied too');
-        assert.equal(
-            Object.getPrototypeOf(entry.logger),
-            Object.prototype,
-            'as plain data, as structuredClone copies one'
-        );
-        assert.equal(entry.logger.write, logger.write, 'around the function it holds');
-        assert.equal(entry.callback, callback, 'and a function is kept as it is');
+        assert.deepEqual(rec.entries[0].result, {
+            ok: true,
+            tags: ['a'],
+            handlers: ['a', null],
+            when: '2026-01-01T00:00:00.000Z',
+            logger: {},
+            options: { retries: 1 }
+        });
     });
 
     it('should copy an object it cannot clone, so an in-place redact never reaches the run', async function () {
@@ -4244,12 +4238,13 @@ describe('Recorded values are snapshots', function () {
         assert.equal(recorded.email, 'a@b.c', 'the replay did not rewrite the trace');
     });
 
-    it('should copy a cycle in a value that cannot be cloned as a cycle', async function () {
-        // An HTTP client's error is the usual shape: a request and a response that point at each other, next to
-        // a config holding functions.
+    it('should cut a reference back to an enclosing object, and keep one shared without a loop', async function () {
+        // An HTTP client's request and response point at each other. JSON refuses the loop, so the copy cuts it where
+        // it returns, as serializeError cuts an error chain, and keeps a value that merely appears twice in full.
+        const headers = { accept: 'json' };
         /** @type {any} */
-        const request = { method: 'POST', transform: () => {} };
-        request.response = { status: 502, request };
+        const request = { method: 'POST', transform: () => {}, headers };
+        request.response = { status: 502, request, headers };
         const rec = recorder();
         await runEffect(
             Command(
@@ -4261,9 +4256,36 @@ describe('Recorded values are snapshots', function () {
             {},
             { onStep: rec.onStep }
         );
-        const entry = /** @type {any} */ (rec.entries[0].result);
-        assert.notEqual(entry, request, 'the value is copied');
-        assert.equal(entry.response.request, entry, 'and the copy points at itself where the original did');
+        assert.deepEqual(rec.entries[0].result, {
+            method: 'POST',
+            headers: { accept: 'json' },
+            response: { status: 502, headers: { accept: 'json' } }
+        });
+    });
+
+    it("should let redact trim an HTTP client's error, whose request and response point at each other", async function () {
+        // A plain JSON copy failed on the loop before redact ran, so a redact written to trim the error never could,
+        // and the step was left out of the trace.
+        const flow = (/** @type {any} */ input) =>
+            effectPipe(() =>
+                Command(function cmdCharge() {
+                    /** @type {any} */
+                    const request = { method: 'POST', transform: () => {} };
+                    request.response = { status: 502, request };
+                    throw Object.assign(new Error('Request failed with status code 502'), {
+                        request,
+                        response: request.response
+                    });
+                })
+            )(input);
+        const redact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
+            kind === 'error' ? { name: value.name, message: value.message, status: value.response.status } : value;
+        const { trace } = await recordEffect(flow, 'in', { redact });
+        const { result } = await replayEffect(flow('in'), JSON.parse(JSON.stringify(trace)));
+        assert.ok(errorOf(result) instanceof Error);
+        const error = /** @type {any} */ (errorOf(result));
+        assert.equal(error.message, 'Request failed with status code 502');
+        assert.equal(error.status, 502);
     });
 
     it('should not let a replayed flow rewrite an uncloneable recorded result', async function () {
@@ -4364,20 +4386,21 @@ describe('Recorded values are snapshots', function () {
         assert.deepEqual(tokens, ['tok_live'], 'and the Command got the token');
         assert.deepEqual(trace.initialInput, { email: 'new@x.io' });
         assert.equal(/** @type {any} */ (trace.context).apiToken, undefined);
-        assert.equal(/** @type {any} */ (trace.context).log, log, 'the function is kept as it is');
+        assert.equal(
+            /** @type {any} */ (trace.context).log,
+            undefined,
+            'the function is left out, as storage leaves it'
+        );
     });
 
-    it('should keep a Date and a Map when replaying from memory', async function () {
-        // The copy is structuredClone, which keeps both; only a JSON sink turns them into a string and {}.
+    it('should replay a Date and a Map from memory as storage does', async function () {
         const flow = () =>
             Command(function cmdLoad() {
                 return { when: new Date('2026-01-01T00:00:00Z'), seen: new Map([['a', 1]]) };
             });
-        const { result, trace } = await recordEffect(flow, null);
+        const { trace } = await recordEffect(flow, null);
         const { result: replayed } = await replayEffect(flow(), trace);
-        const value = /** @type {any} */ (replayed).value;
-        assert.ok(value.when instanceof Date && value.seen instanceof Map);
-        assert.deepEqual(replayed, result);
+        assert.deepEqual(replayed, Success({ when: '2026-01-01T00:00:00.000Z', seen: {} }));
     });
 
     it('should not let a replayed flow rewrite the trace it replays', async function () {

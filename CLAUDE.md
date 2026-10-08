@@ -73,7 +73,7 @@ pure-effect is a zero-dependency effect system for JavaScript implementing the "
 - `onStep(name, type, op, path)` wraps each Command and each `Parallel`; a hook that only watches must `await op()` and return its result. `onRun(effect, op, flowName, initialInput)` wraps a whole run once. `onBeforeCommand(command, context)` runs before each Command, and throwing from it vetoes the Command as an abort.
 - `configureEffect` is additive. Each call adds one layer and returns a function that removes it; several configurations passed to one call form one layer; a bare call removes every layer; a call whose arguments are all `undefined` does nothing. `chainHooks` merges layers earliest outermost: `onStep` and `onRun` nest, and `onBeforeCommand` interceptors run in order. Keep those semantics if the hook shapes change. A per-call `callConfig` merges innermost, or over nothing under `inherit: false`, and a non-boolean `inherit` throws. A leftover `retry` key throws; that check comes out at 1.0.
 - **Anything that wraps `onStep` passes `path` on as the fourth argument, and anything that wraps `onRun` passes `initialInput` on.** Only the innermost hook can pass `op` an argument, the recorded decision.
-- The recorder only watches: `op` always runs, its result is returned, and its error propagates. It catches exactly the two parts of recording a value that run the caller's code or read the caller's value, `redact` and the copy (`recordPart`), and marks the value `unrecorded` with which one threw. Every read of the caller's value, or of a copy of it, goes through `recordPart`, since a copy keeps a getter that throws. Nothing else in it may throw, and it has no catch-all to hide a bug of its own.
+- The recorder only watches: `op` always runs, its result is returned, and its error propagates. It catches exactly the two parts of recording a value that run the caller's code or read the caller's value, `redact` and the copy (`recordPart`), and marks the value `unrecorded` with which one threw. Every read of the caller's value, and of what `redact` returns, goes through `recordPart`. Nothing else in it may throw, and it has no catch-all to hide a bug of its own.
 
 ### Recording and replay
 
@@ -85,7 +85,7 @@ pure-effect is a zero-dependency effect system for JavaScript implementing the "
     4. A replay fault is a harness error, marked `harnessError` and `replayFault`, which `replayEffect` turns into a `Failure` at its own boundary. A new harness error gets a mark, never a name to match on.
     5. The outcome wrapper is load-bearing: a `Resolver` returns `{ result }`, `{ error }`, or `undefined` for not recorded, and any other answer, or a throw from it, rejects the replay rather than counting as the Command failing. A trace whose `dropped` is above 0 refuses `onMissing: 'execute'`, and a step that threw is recorded with `threw: true`.
     6. Errors survive JSON through `serializeError` and `reviveError`, `cause` and an `AggregateError`'s `errors` included, with enumerability as the original had it; a chain that loops back is cut where it returns. An `Error` survives `redact` too: `redactError` re-marks an object returned for it.
-    7. Recorded values are copies, both ways: `snapshot` on the way in, `entryToOutcome` on the way out, and `toTrace` is called before the run. An object `structuredClone` refuses is rebuilt as plain data, never kept live; only a function and a getter that throws are kept as they are.
+    7. Recorded values are copies in the one form a trace has, JSON, both ways: `snapshot` on the way in, what `redact` returns included, and `entryToOutcome` on the way out, and `toTrace` is called before the run. A reference back to an enclosing object is cut, and a value JSON cannot encode is marked `unrecorded: 'copy'`, so a replay from memory gets what one from storage gets.
 - `redact` sees everything a trace holds: results, serialized errors, and the trace's `initialInput` and `context`, told apart by `kind`. **Keep that coverage complete if the trace format grows a field.** A stand-in must get the same verdict from the flow as the value it replaces, so a value `redact` throws on, or one the recorder cannot copy, gets none: it is left out and marked `unrecorded`, and a replay that needs it stops.
 - A replay proves the flow asks for the same Commands and handles the same answers, not what it computes. Test a value change against the pure step that computes it, and rename a Command whose result changes shape. A recording test asserts `unreached` is empty, or names the step a fix removed.
 - `onResolved` is for observing a replay and a `Resolver` for supplying outcomes. A throw from either rejects the replay with that error.
@@ -129,7 +129,7 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 - No loop helper: a loop is a step that gets the list, then `Parallel(list.map(f), { limit: 1 })`.
 - A `TimeParadox` after a flow changes shape is the design; an incident test is re-recorded when its flow changes shape.
 - A trace records results, never Command arguments.
-- A trace keeps data, not objects.
+- A trace keeps data, not objects, in one form, JSON.
 - Steps match by path, with no option to choose.
 - `fastRetry` is a parameter of the private `interpret`, not a rewrite of the tree, and not an option of `runEffect`.
 - Per-call configuration merges; it never replaces one slot.
@@ -150,7 +150,7 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 
 - Assert on the returned data, such as Commands, Failures and traces, rather than on side effects.
 - Reset the hooks in every suite with `beforeEach(() => configureEffect())`, a bare call; `configureEffect({})` adds an empty layer rather than resetting.
-- Count I/O in replay tests, and check a replay from memory and from JSON.
+- Count I/O in replay tests.
 - Test behaviour through the public surface, and reach an internal such as `fromTrace` through its public consumer.
 - Anchor an equation to a value, as the `Kleisli laws` suite does.
 - Each example file has a suite, so a change to the hook contract breaks the examples rather than letting them rot.
