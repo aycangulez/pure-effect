@@ -485,35 +485,13 @@ const asEffect = (value, source) => {
  * @returns {Effect} The composed Effect
  */
 const chain = (effect, fn, from) => {
-    const source = () => (from ? nextOf(from) : 'A continuation');
-
     // Before reading `.type`, so a missing return is named rather than thrown as a bare TypeError.
-    if (effect == null) return asEffect(effect, source());
-
-    switch (effect.type) {
-        case 'Success':
-            return asEffect(fn(effect.value), `Step '${fn.name || 'anonymous'}'`);
-        case 'Failure':
-            return effect;
-        case 'Command': {
-            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, effect);
-            return Command(effect.cmd, next, effect.meta);
-        }
-        case 'Ask': {
-            const next = (/** @type {any} */ ctx) => chain(effect.next(ctx), fn, effect);
-            return Ask(next);
-        }
-        case 'Retry': {
-            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, effect);
-            return { ...effect, next };
-        }
-        case 'Parallel': {
-            const next = (/** @type {any} */ result) => chain(effect.next(result), fn, effect);
-            return { ...effect, next };
-        }
-        default:
-            return asEffect(effect, source());
-    }
+    if (!isEffect(effect)) throw effectTypeError(effect, from ? nextOf(from) : 'A continuation');
+    if (effect.type === 'Success') return asEffect(fn(effect.value), `Step '${fn.name || 'anonymous'}'`);
+    if (effect.type === 'Failure') return effect;
+    const next = (/** @type {any} */ value) => chain(effect.next(value), fn, effect);
+    // A Command goes back through its constructor, which checks the function of one built by hand.
+    return effect.type === 'Command' ? Command(effect.cmd, next, effect.meta) : { ...effect, next };
 };
 
 /**

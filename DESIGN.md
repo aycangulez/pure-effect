@@ -73,7 +73,7 @@ A Command's identity is `commandName(eff)`: a non-empty string `meta.name`, else
 `chain` (internal) connects a node to the next pipeline step.
 
 - `Success` passes its value on, and `Failure` stops.
-- `Command`, `Ask`, `Retry` and `Parallel` wrap their continuations, carrying `Retry`'s `effect` and `Parallel`'s `effects` over untouched.
+- `Command`, `Ask`, `Retry` and `Parallel` get one `next` that continues into the step. A `Command` is rebuilt through its constructor, which checks the function of one built by hand, as the flow is built; the others are copied with the new `next`, carrying `Retry`'s `effect` and `Parallel`'s `effects` over untouched. Each type once had a case of its own that built the same `next`, and `Ask` went through its constructor and `Retry` and `Parallel` through a spread, by the order they were added rather than by design.
 - It checks what each step returns. That is the only place the step's name (`fn.name`) is known, so it is where the useful error message comes from.
 - It checks `effect == null` before reading `.type`, so a missing return is named rather than thrown as a bare `TypeError`.
 - A loop that recurses through `effectPipe`, as `poll = (n) => effectPipe(fetch, (s) => (s.done ? Success(s) : poll(n - 1)))(n)` does, takes time in proportion to its length, as one through a Command's `next` does: 200,000 levels took about 100 ms, twice the loop through `next`. It was quadratic, and overflowed the stack at 20,000 levels, while `effectPipe` ended in the identity pass that stamped the flow's input, since that pass wrapped each level's tree once more. That was left alone as rare, until removing the pass ([A `Failure` carries only its error](#a-failure-carries-only-its-error)) fixed it. A test in `Core` runs 50,000 levels with a `Retry` around each fetch, the shape a paged loop needs, since a `Retry` around a Command whose `next` continues the loop would repeat every later page.
@@ -918,7 +918,7 @@ Mutation testing stays out of CI. Its survivors need reading rather than countin
 
 Its survivors are not a to-do list:
 
-- Most are equivalent mutants that change nothing observable: optional chaining on an `AbortController` that always exists, arrays sized in advance and then filled, `performance.now()` against `Date.now()`, `chain` cases that fall through into identical code, and a check after a retry backoff that the loop repeats. Others change only message wording.
+- Most are equivalent mutants that change nothing observable: optional chaining on an `AbortController` that always exists, arrays sized in advance and then filled, `performance.now()` against `Date.now()`, and a check after a retry backoff that the loop repeats. Others change only message wording.
 - A few flip between runs, because some tests depend on timing.
 - Two gaps are left on purpose: whether each nested `Parallel` removes its listener from the enclosing signal, and the exact wording of `timeTravel`'s narration.
 

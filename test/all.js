@@ -5041,6 +5041,18 @@ describe('Malformed flows', function () {
         assert.match(e.message, /Step 'saveUser' returned an object with an unrecognised type 'Sucess'\./);
     });
 
+    it('should check a Command built by hand as the flow is built, when a step follows it', function () {
+        // `chain` rebuilds a Command through its constructor, which checks its function. Copied with a spread
+        // instead, a `cmd` that is not a function would throw only when it ran, as an I/O fault a Retry retries.
+        const handBuilt = () => /** @type {any} */ ({ type: 'Command', cmd: 42, next: Success });
+        assert.throws(
+            () => effectPipe(handBuilt, (/** @type {any} */ x) => Success(x))(1),
+            (/** @type {any} */ e) =>
+                e.name === 'EffectTypeError' &&
+                /Command expects the function that does the I\/O, got the number 42\./.test(e.message)
+        );
+    });
+
     it('should call a missing return what it usually is', async function () {
         function ensureEmailAvailable() {}
         const e = await errorFrom(() => runEffect(effectPipe(/** @type {any} */ (ensureEmailAvailable))({ id: 1 })));
