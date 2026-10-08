@@ -174,7 +174,7 @@ const Retry = (effect, options) => {
         );
     }
     checkOptions(options, 'Retry', retryOptionRules, malformed);
-    return { type: 'Retry', effect, options: options ?? {}, next: (value) => Success(value) };
+    return { type: 'Retry', effect, options: Object.freeze({ ...options }), next: (value) => Success(value) };
 };
 
 /**
@@ -224,7 +224,7 @@ const Parallel = (effects, nextOrOptions, maybeOptions) => {
         type: 'Parallel',
         effects,
         next: hasNext ? nextOrOptions : (/** @type {any[]} */ values) => Success(values),
-        options: options ?? {}
+        options: Object.freeze({ ...options })
     };
 };
 
@@ -314,7 +314,7 @@ const checkOptions = (options, source, rules, raise = (message) => new TypeError
 const defaultRetryOptions = { attempts: 3, delay: 100, backoff: 1 };
 
 /**
- * Checked when the Retry is built and again when it runs, since a caller can change the options object in between.
+ * Checked when the Retry is built, which keeps a frozen copy of the options, so they cannot change before it runs.
  * @type {Record<string, OptionRule>}
  */
 const retryOptionRules = {
@@ -331,7 +331,7 @@ const retryOptionRules = {
 };
 
 /**
- * Checked when the Parallel is built and again when it runs, as `Retry`'s are.
+ * Checked when the Parallel is built, which keeps a frozen copy, as a `Retry` does.
  * @type {Record<string, OptionRule>}
  */
 const parallelOptionRules = {
@@ -925,7 +925,6 @@ const execute = async (runtime, eff, signal, path = '') => {
  * @returns {Promise<SuccessState | FailureState | IoFaultState>}
  */
 const runRetry = async (runtime, retry, signal, stepPath) => {
-    checkOptions(retry.options, 'Retry', retryOptionRules, malformed);
     const given = Object.entries(retry.options ?? {}).filter(([, value]) => value !== undefined);
     const opts = /** @type {typeof defaultRetryOptions & RetryState['options']} */ ({
         ...defaultRetryOptions,
@@ -967,7 +966,6 @@ const runRetry = async (runtime, retry, signal, stepPath) => {
 const runParallel = async (runtime, parallel, signal, stepPath) => {
     const branchPath = `${stepPath}p`;
     const options = parallel.options ?? {};
-    checkOptions(options, 'Parallel', parallelOptionRules, malformed);
     const { settled } = options;
     // Cast rather than annotated, since only `op` assigns it.
     let branchRun = /** @type {BranchRun | undefined} */ (undefined);

@@ -6796,15 +6796,28 @@ describe('Retry attempts and the removed global retry', function () {
         });
     });
 
-    it('should check the options again when the Retry or Parallel runs, in case they changed', async function () {
-        // A node's options are a plain object a caller can change after building it, and a changed `attempts: 0`
-        // would make `onExhausted` a free catch.
-        const retry = Retry(failing(), { attempts: 1, delay: 0, onExhausted: () => Success('fallback') });
-        retry.options.attempts = 0;
-        await assert.rejects(runEffect(retry), { name: 'EffectTypeError', message: /Retry 'attempts'/ });
-        const parallel = Parallel([Success(1)], { limit: 1 });
-        /** @type {any} */ (parallel.options).limit = 0;
-        await assert.rejects(runEffect(parallel), { name: 'EffectTypeError', message: /Parallel 'limit'/ });
+    it('should keep a frozen copy of the options a Retry or Parallel is built with', async function () {
+        // A node kept the caller's own options object, which could change after the check, so the options were
+        // checked again on every run: a changed `attempts: 0` would make `onExhausted` a free catch.
+        let fallbacks = 0;
+        const given = { attempts: 1, delay: 0, onExhausted: () => (fallbacks++, Success('fallback')) };
+        const retry = Retry(failing(), given);
+        given.attempts = 0;
+        assert.equal(retry.options.attempts, 1, "a change to the caller's object does not reach the node");
+        assert.throws(() => {
+            retry.options.attempts = 0;
+        }, TypeError);
+        assert.deepEqual(await runEffect(retry), Success('fallback'));
+        assert.equal(fallbacks, 1);
+
+        const limits = { limit: 1 };
+        const parallel = Parallel([Success(1), Success(2)], limits);
+        limits.limit = 0;
+        assert.equal(parallel.options?.limit, 1);
+        assert.throws(() => {
+            /** @type {any} */ (parallel.options).limit = 0;
+        }, TypeError);
+        assert.deepEqual(await runEffect(parallel), Success([1, 2]));
     });
 
     it('should still accept the smallest real retry', async function () {

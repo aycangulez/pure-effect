@@ -166,7 +166,7 @@ Options:
 - Per-use, merged over `attempts: 3`, `delay: 100` and `backoff: 1`. An option set to `undefined` keeps its default, since that is how an absent config key arrives.
 - Checked as the `Retry` is built, with the names: `attempts` must be a positive integer, `delay` and `backoff` finite numbers of 0 or more, and `onExhausted` a function. An undefined `backoff` once made every wait after the first `NaN` milliseconds, which is no wait at all, and an `onExhausted` given the fallback Effect rather than a function returning it meant no fallback.
 - They were checked only when the `Retry` ran, a leftover of global retry options, which merged in at run time. A bad value was then reported after the Commands ahead of it, as a `TypeError`, where a misspelt name was an `EffectTypeError` as the flow was built. A `Retry` built inside a `next` is still checked only when that `next` runs, as its names are, since that is when it exists.
-- They are checked again when the `Retry` runs, since a node's options are a plain object a caller can change after building it, and a changed `attempts: 0` would make `onExhausted` a free catch. `Parallel`'s `limit` and `settled` are checked the same two ways.
+- The `Retry` keeps a frozen copy of the options it checked, so they cannot change before it runs: a changed `attempts: 0` would make `onExhausted` a free catch. `Parallel` keeps its `limit` and `settled` the same way. Until October 2026 a node kept the caller's own object, and the options were checked again on every run, since the caller could change that object after building the node. A node built by hand, without its constructor, is not checked, as no other part of one is.
 
 Outcomes:
 
