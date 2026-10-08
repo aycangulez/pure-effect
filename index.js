@@ -165,9 +165,12 @@ const Ask = (next) => {
  */
 const Retry = (effect, options) => {
     if (!isEffect(effect)) throw malformed(`Retry expects the Effect to run, got ${describeValue(effect)}.`, effect);
-    if (options != null && !isOptionsObject(options)) {
-        const hint = typeof options === 'number' ? `: write Retry(effect, { attempts: ${options} })` : '';
-        throw malformed(`Retry's options must be an object, got ${describeArgument(options)}${hint}.`, options);
+    if (typeof options === 'number') {
+        const got = describeArgument(options);
+        throw malformed(
+            `Retry's options must be an object, got ${got}: write Retry(effect, { attempts: ${options} }).`,
+            options
+        );
     }
     checkOptions(options, 'Retry', retryOptionRules, malformed);
     return { type: 'Retry', effect, options: options ?? {}, next: (value) => Success(value) };
@@ -215,9 +218,6 @@ const Parallel = (effects, nextOrOptions, maybeOptions) => {
         );
     }
     const options = optionsSecond ? nextOrOptions : maybeOptions;
-    if (options != null && !isOptionsObject(options)) {
-        throw malformed(`Parallel's options must be an object, got ${describeArgument(options)}.`, options);
-    }
     checkOptions(options, 'Parallel', parallelOptionRules, malformed);
     return {
         type: 'Parallel',
@@ -287,16 +287,19 @@ const rejectUnknownOptions = (options, source, known, raise = (message) => new T
  */
 
 /**
- * Refuses an option name the function does not read, and a value it cannot use. An option set to `undefined` keeps
- * its default.
+ * Refuses options that are not an object, an option name the function does not read, and a value it cannot use.
+ * `null` is no options, as `undefined` is, and an option set to `undefined` keeps its default.
  * @param {any} options
  * @param {string} source - The function that takes them, as the message names it
  * @param {Record<string, OptionRule>} rules - Every option the function reads, in the order a message lists them
  * @param {(message: string, value: any) => Error} [raise] - Builds the error; a constructor's are EffectTypeErrors
  */
 const checkOptions = (options, source, rules, raise = (message) => new TypeError(message)) => {
+    if (options == null) return;
+    if (!isOptionsObject(options)) {
+        throw raise(`${source}'s options must be an object, got ${describeArgument(options)}.`, options);
+    }
     rejectUnknownOptions(options, source, Object.keys(rules), raise);
-    if (!isObject(options)) return;
     for (const [name, rule] of Object.entries(rules)) {
         const value = options[name];
         if (rule === null || value === undefined || rule[0](value)) continue;
@@ -1490,7 +1493,7 @@ const now = () => (typeof performance === 'object' ? performance.now() : Date.no
  */
 const recorder = (options = {}) => {
     checkOptions(options, 'recorder', recorderOptionRules);
-    const { redact = (/** @type {any} */ r) => r, maxEntries = Infinity, stack = false } = options;
+    const { redact = (/** @type {any} */ r) => r, maxEntries = Infinity, stack = false } = options ?? {};
     /** @type {TraceEntry[]} */
     const entries = [];
     let dropped = 0;
@@ -1609,7 +1612,8 @@ const recorder = (options = {}) => {
  */
 const recordEffect = async (flowFn, initialInput, options = {}) => {
     checkOptions(options, 'recordEffect', { context: null, version: null, ...recorderOptionRules });
-    const { context = {}, version, ...recorderOptions } = options;
+    checkFlowFn(flowFn, 'recordEffect');
+    const { context = {}, version, ...recorderOptions } = options ?? {};
     const rec = recorder(recorderOptions);
     // Before the run, so a Command that writes to the input or the context cannot rewrite what the trace received.
     const head = rec.toTrace({ initialInput, flowName: context?.flowName, context, version });
@@ -1663,6 +1667,56 @@ const nodesAlong = (path) => {
     return nodes;
 };
 
+/** What `replayEffect` takes in place of a Resolver, as its messages name it. */
+const replayEffectTakes = "a Resolver, a trace from recordEffect or a recorder's toTrace, or its array of entries";
+
+/**
+ * Refuses a trace a replay cannot read: one with no `trace` array, or an entry that is not an object with a string
+ * `command`, as every entry a recorder writes is. Returns the entries.
+ * @param {any} traceLog
+ * @param {string} source - The function given it, as the message names it
+ * @param {string} takes - What that function takes, as the message names it
+ * @param {boolean} takesEntries - Whether a bare array of entries will do, as it does for `replayEffect`
+ * @returns {TraceEntry[]}
+ */
+const checkTrace = (traceLog, source, takes, takesEntries) => {
+    const bareEntries = Array.isArray(traceLog);
+    const entries = bareEntries
+        ? takesEntries
+            ? traceLog
+            : undefined
+        : isObject(traceLog)
+          ? traceLog.trace
+          : undefined;
+    if (!Array.isArray(entries)) {
+        const got = bareEntries
+            ? 'an array of entries, which holds no initialInput to rebuild the flow from; pass the whole trace, or ' +
+              'replay the entries with replayEffect'
+            : isObject(traceLog)
+              ? 'an object with no `trace` array'
+              : describeArgument(traceLog);
+        throw replayError(`${source} expects ${takes}, got ${got}.`);
+    }
+    const bad = entries.findIndex((entry) => !isObject(entry) || typeof entry.command !== 'string');
+    if (bad >= 0) {
+        const what = isObject(entries[bad]) ? 'has no string command' : `is ${describeArgument(entries[bad])}`;
+        throw replayError(`${source}'s trace entry ${bad} ${what}; an entry is an object with a string command.`);
+    }
+    return entries;
+};
+
+/**
+ * Refuses a flow that is not a function, for the functions that build one from a recorded input.
+ * @param {any} flowFn
+ * @param {string} source - The function given it, as the message names it
+ */
+const checkFlowFn = (flowFn, source) => {
+    if (typeof flowFn !== 'function') {
+        const got = describeArgument(flowFn);
+        throw new TypeError(`${source} expects the function that builds the flow from its input, got ${got}.`);
+    }
+};
+
 /**
  * Turns a recorded entry into the outcome a Resolver returns, copied so a replayed step that mutates its result
  * cannot rewrite the trace.
@@ -1695,8 +1749,7 @@ const isDecisionEntry = (entry) =>
  */
 const fromTrace = (traceLog, options = {}) => {
     const { onEntry } = options;
-    const entries = Array.isArray(traceLog) ? traceLog : traceLog?.trace;
-    if (!Array.isArray(entries)) throw replayError('Trace has no `trace` array.');
+    const entries = checkTrace(traceLog, 'replayEffect', replayEffectTakes, true);
     const resolveEntry = (/** @type {TraceEntry} */ entry, /** @type {ReplayStep} */ step) => {
         if (onEntry) onEntry(entry);
         // Production ran this step, so it stops the replay rather than run live under `onMissing`.
@@ -1914,7 +1967,7 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
         onMissing: [(value) => value === 'throw' || value === 'execute', "'throw' or 'execute'"],
         onResolved: [isFunction, 'a function']
     });
-    const { fastRetry = true, hooks = false, onMissing = 'throw', onResolved } = options;
+    const { context: givenContext, fastRetry = true, hooks = false, onMissing = 'throw', onResolved } = options ?? {};
     const fromResolver = typeof traceOrResolver === 'function';
     /** @type {Set<TraceEntry>} */
     const reached = new Set();
@@ -1926,7 +1979,7 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     // Another context can take another branch at an `Ask` with nothing to flag it, so a trace whose context was not
     // recorded needs one passed.
     const contextCause = unrecordedCause(traceLog, 'context');
-    if (options.context == null && contextCause !== undefined) {
+    if (givenContext == null && contextCause !== undefined) {
         throw unrecordedError(
             'context',
             contextCause,
@@ -1936,7 +1989,7 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     }
     // A recorded `null` is what production ran with, so only a trace that holds no context gets `{}`.
     const recordedContext = traceLog?.context === undefined ? {} : traceLog.context;
-    const context = options.context ?? recordedContext;
+    const context = givenContext ?? recordedContext;
     // A capped trace lacks steps production ran, so running a missing one live could repeat production's I/O.
     const droppedEntries = Number(traceLog?.dropped) || 0;
     const capped = droppedEntries > 0;
@@ -2038,18 +2091,11 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
  */
 const timeTravel = async (flowFn, traceLog, options = {}) => {
     checkOptions(options, 'timeTravel', { log: [isFunction, 'a function'], context: null, version: null });
-    const { log = console.log, context, version } = options;
+    const { log = console.log, context, version } = options ?? {};
+    checkFlowFn(flowFn, 'timeTravel');
     // Checked here, since timeTravel reads the trace's own fields before `replayEffect` checks its shape.
-    if (!isObject(traceLog) || Array.isArray(traceLog) || !Array.isArray(traceLog.trace)) {
-        const got = Array.isArray(traceLog)
-            ? 'an array of entries, which holds no initialInput to rebuild the flow from; pass the whole trace, or ' +
-              'replay the entries with replayEffect'
-            : isObject(traceLog)
-              ? 'an object with no `trace` array'
-              : describeArgument(traceLog);
-        throw replayError(`timeTravel expects a trace from recordEffect or a recorder's toTrace, got ${got}.`);
-    }
-    const { initialInput, trace, flowName, version: traceVersion } = traceLog;
+    const trace = checkTrace(traceLog, 'timeTravel', "a trace from recordEffect or a recorder's toTrace", false);
+    const { initialInput, flowName, version: traceVersion } = traceLog;
     const inputCause = unrecordedCause(traceLog, 'initialInput');
     if (inputCause !== undefined) {
         throw unrecordedError('initialInput', inputCause, 'The flow is rebuilt from it, so', { field: 'initialInput' });

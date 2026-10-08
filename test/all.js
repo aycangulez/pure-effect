@@ -1462,10 +1462,20 @@ describe('Recording and replay', function () {
 
     it('should reject a malformed trace as a ReplayError, not a TypeError', async function () {
         const { flow } = makeFlow();
-        for (const bad of [undefined, null, 42, {}, { trace: 'nope' }]) {
+        const cases = /** @type {[any, string][]} */ ([
+            [undefined, 'undefined'],
+            [null, 'null'],
+            [42, 'the number 42'],
+            [{}, 'an object with no `trace` array'],
+            [{ trace: 'nope' }, 'an object with no `trace` array']
+        ]);
+        const expects =
+            "replayEffect expects a Resolver, a trace from recordEffect or a recorder's toTrace, or its array";
+        for (const [bad, got] of cases) {
             await assert.rejects(
-                () => replayEffect(flow({ id: 'x' }), /** @type {any} */ (bad)),
-                (/** @type {any} */ e) => e.name === 'ReplayError' && /no `trace` array/.test(e.message),
+                () => replayEffect(flow({ id: 'x' }), bad),
+                (/** @type {any} */ e) =>
+                    e.name === 'ReplayError' && e.message === `${expects} of entries, got ${got}.`,
                 `expected a ReplayError for ${JSON.stringify(bad)}`
             );
         }
@@ -1722,6 +1732,104 @@ describe('Recording and replay', function () {
             message: /timeTravel 'log' must be a function/
         });
         assert.deepEqual(calls, { read: 0, write: 0 });
+    });
+
+    it('should refuse an options argument that is not an object, and take null as none', async function () {
+        // Only the options inside were checked, so `recorder(42)` ran with every default, and `null` threw a bare
+        // TypeError reading the first option.
+        const { flow, calls } = makeFlow();
+        const { trace } = await recordEffect(flow, { id: 'x' });
+        Object.assign(calls, { read: 0, write: 0 });
+        assert.throws(() => recorder(/** @type {any} */ (42)), {
+            name: 'TypeError',
+            message: "recorder's options must be an object, got the number 42."
+        });
+        for (const options of [42, 'stack', [], true]) {
+            const given = /** @type {any} */ (options);
+            assert.throws(() => recorder(given), {
+                name: 'TypeError',
+                message: /^recorder's options must be an object/
+            });
+            await assert.rejects(recordEffect(flow, { id: 'x' }, given), {
+                name: 'TypeError',
+                message: /^recordEffect's options must be an object/
+            });
+            await assert.rejects(replayEffect(flow({ id: 'x' }), trace, given), {
+                name: 'TypeError',
+                message: /^replayEffect's options must be an object/
+            });
+            await assert.rejects(timeTravel(flow, trace, given), {
+                name: 'TypeError',
+                message: /^timeTravel's options must be an object/
+            });
+        }
+        assert.deepEqual(calls, { read: 0, write: 0 }, 'refused before any flow runs');
+
+        // `null` is no options, as it is for Retry and Parallel.
+        const none = /** @type {any} */ (null);
+        assert.doesNotThrow(() => recorder(none));
+        assert.equal((await recordEffect(flow, { id: 'x' }, none)).result.type, 'Success');
+        assert.equal((await replayEffect(flow({ id: 'x' }), trace, none)).result.type, 'Success');
+        const consoleLog = console.log;
+        console.log = () => {};
+        try {
+            assert.equal((await timeTravel(flow, trace, none)).type, 'Success');
+        } finally {
+            console.log = consoleLog;
+        }
+    });
+
+    it('should reject a trace a replay cannot read with a ReplayError that names what is wrong', async function () {
+        // replayEffect checked only for a `trace` array, and nothing checked its entries: a null entry threw a bare
+        // TypeError reading its path, and 42 replayed as a TimeParadox saying the trace recorded undefined.
+        const { flow, calls } = makeFlow();
+        const { trace } = await recordEffect(flow, { id: 'x' });
+        Object.assign(calls, { read: 0, write: 0 });
+        /** @param {() => Promise<unknown>} replay @param {RegExp} named */
+        const refused = (replay, named) =>
+            assert.rejects(replay(), (/** @type {any} */ e) =>
+                e.name === 'ReplayError' && named.test(e.message) ? true : assert.fail(`${e.name}: ${e.message}`)
+            );
+        const cases = /** @type {[any, string][]} */ ([
+            [null, 'is null'],
+            [42, 'is the number 42'],
+            [{ path: '1', result: { written: 'x' } }, 'has no string command']
+        ]);
+        for (const [entry, what] of cases) {
+            const broken = { ...trace, trace: [trace.trace[0], entry] };
+            const named = new RegExp(`trace entry 1 ${what}; an entry is an object with a string command\\.$`);
+            await refused(() => replayEffect(flow({ id: 'x' }), broken), new RegExp(`^replayEffect's ${named.source}`));
+            await refused(
+                () => replayEffect(flow({ id: 'x' }), broken.trace),
+                new RegExp(`^replayEffect's ${named.source}`)
+            );
+            await refused(
+                () => timeTravel(flow, broken, { log: () => {} }),
+                new RegExp(`^timeTravel's ${named.source}`)
+            );
+        }
+        const expects =
+            /^replayEffect expects a Resolver, a trace from recordEffect or a recorder's toTrace, or its array/;
+        await refused(() => replayEffect(flow({ id: 'x' }), /** @type {any} */ (42)), expects);
+        await refused(() => replayEffect(flow({ id: 'x' }), /** @type {any} */ ({})), expects);
+        assert.deepEqual(calls, { read: 0, write: 0 }, 'refused before anything replays');
+    });
+
+    it('should refuse a flow that is not a function in recordEffect and timeTravel', async function () {
+        // Each called what it was given, so a number failed with "flowFn is not a function", naming a parameter the
+        // caller never wrote.
+        const { flow } = makeFlow();
+        const { trace } = await recordEffect(flow, { id: 'x' });
+        await assert.rejects(recordEffect(/** @type {any} */ (42), { id: 'x' }), {
+            name: 'TypeError',
+            message: 'recordEffect expects the function that builds the flow from its input, got the number 42.'
+        });
+        // The likely mistake: the flow called with its input, where timeTravel calls it with the recorded one.
+        await assert.rejects(timeTravel(/** @type {any} */ (flow({ id: 'x' })), trace, { log: () => {} }), {
+            name: 'TypeError',
+            message:
+                "timeTravel expects the function that builds the flow from its input, got an Effect of type 'Command'."
+        });
     });
 
     it('should give a trace without paths a live tail under onMissing: execute', async function () {
