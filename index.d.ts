@@ -1280,18 +1280,21 @@ type GenReturnCheck<R> =
               : { 'a Promise cannot be returned; put the call in a Command': never }
           : { 'a step is returned with return yield* step(...)': never };
 type GenError<Y, R> = EffectError<StepEffectOf<Y>> | EffectError<ReturnedEffect<R>>;
-// A step that reads no context gives `unknown`, which would erase the others in an intersection, so it is dropped.
+// A step that reads no context gives `unknown`, which would erase the others in an intersection, so it is dropped. Each
+// context is boxed, so one that is itself a union is intersected whole rather than member by member.
 type GenNeeds<X> = X extends AnyEffect
     ? EffectContext<X> extends infer C
         ? unknown extends C
             ? never
-            : C
+            : { context: C }
         : never
     : never;
 type GenIntersection<U> = (U extends any ? (u: U) => void : never) extends (i: infer I) => void ? I : never;
 type GenContext<Y, R> = [GenNeeds<StepEffectOf<Y> | ReturnedEffect<R>>] extends [never]
     ? unknown
-    : GenIntersection<GenNeeds<StepEffectOf<Y> | ReturnedEffect<R>>>;
+    : GenIntersection<GenNeeds<StepEffectOf<Y> | ReturnedEffect<R>>> extends { context: infer C }
+      ? C
+      : unknown;
 
 /**
  * Builds a flow function from a generator function, written with `yield* step(effect)` where `async` code writes

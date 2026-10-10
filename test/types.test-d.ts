@@ -1155,3 +1155,12 @@ const bothContexts = gen(function* () {
 runEffect(bothContexts(undefined), { tenant: 'acme', requestId: 'r1' });
 // @ts-expect-error the second step reads requestId
 runEffect(bothContexts(undefined), { tenant: 'acme' });
+
+// A context that is itself a union stays a union, rather than becoming the intersection of its members.
+type ModeEnv = { mode: 'test' } | { mode: 'prod'; apiKey: string };
+declare const modeEnv: ModeEnv;
+const readMode = gen(function* () {
+    return (yield* step(Ask<ModeEnv>())).mode;
+});
+expectType<Effect<'test' | 'prod', never, ModeEnv>>(readMode(undefined));
+runEffect(readMode(undefined), modeEnv);
