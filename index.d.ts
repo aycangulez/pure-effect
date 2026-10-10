@@ -1270,15 +1270,6 @@ type StepEffectOf<Y> = Y extends Step<infer X, any> ? X : never;
 type GenIsAny<R> = 0 extends 1 & R ? true : false;
 type ReturnedEffect<R> = GenIsAny<R> extends true ? never : R extends AnyEffect ? R : never;
 type GenValue<R> = GenIsAny<R> extends true ? any : R extends AnyEffect ? EffectValue<R> : R;
-// Refuses, with its reason, a return the runtime throws on: a step without `yield*`, or a Promise.
-type GenReturnCheck<R> =
-    GenIsAny<R> extends true
-        ? unknown
-        : [Extract<R, Step<any, any>>] extends [never]
-          ? [Extract<R, PromiseLike<any>>] extends [never]
-              ? unknown
-              : { 'a Promise cannot be returned; put the call in a Command': never }
-          : { 'a step is returned with return yield* step(...)': never };
 type GenError<Y, R> = EffectError<StepEffectOf<Y>> | EffectError<ReturnedEffect<R>>;
 // A step that reads no context gives `unknown`, which would erase the others in an intersection, so it is dropped. Each
 // context is boxed, so one that is itself a union is intersected whole rather than member by member.
@@ -1301,7 +1292,7 @@ type GenContext<Y, R> = [GenNeeds<StepEffectOf<Y> | ReturnedEffect<R>>] extends 
  * `await`. A plain return value is a `Success`; return a `Failure` to stop.
  */
 export declare function gen<I, Y extends Step<any, any>, R>(
-    body: ((input: I) => Generator<Y, R, unknown>) & GenReturnCheck<R>
+    body: (input: I) => Generator<Y, R, unknown>
 ): (input: I) => Effect<GenValue<R>, GenError<Y, R>, GenContext<Y, R>>;
 
 /**

@@ -1128,14 +1128,8 @@ const returnsAny = gen(function* (email: string) {
 });
 expectType<Effect<any, 'DB_DOWN', unknown>>(returnsAny('a@b.c'));
 
-// @ts-expect-error a step is returned with yield*, not as it is
-gen(function* () {
-    return step(findGenUser('a'));
-});
-// @ts-expect-error a Promise cannot be returned; put the call in a Command
-gen(function* () {
-    return Promise.resolve(1);
-});
+// Returning a step or a Promise compiles, since a type check that refuses them also refuses generic helpers; the
+// runtime refuses both with an EffectTypeError.
 
 // The helpers behind gen's types are internal, as is CheckedContext.
 // @ts-expect-error GenValue is not exported
@@ -1164,3 +1158,16 @@ const readMode = gen(function* () {
 });
 expectType<Effect<'test' | 'prod', never, ModeEnv>>(readMode(undefined));
 runEffect(readMode(undefined), modeEnv);
+
+// Generic helpers that wrap a step or return a value of a type parameter compile, and type once instantiated.
+const timedStep = <T, E, C>(effect: Effect<T, E, C>) =>
+    gen(function* () {
+        return yield* step(effect);
+    });
+expectType<Effect<GenUser | null, 'DB_DOWN', unknown>>(timedStep(findGenUser('a@b.c'))(undefined));
+const auditThen = <T>(value: T) =>
+    gen(function* () {
+        yield* step(Command(() => Promise.resolve('logged')));
+        return value;
+    });
+expectType<Effect<number, never, unknown>>(auditThen(42)(undefined));
