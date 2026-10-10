@@ -70,20 +70,15 @@ async function registerUser(input) {
 }
 ```
 
-The same flow can be written as a generator, with `yield* step(...)` where `async` code writes `await`. It builds the same Commands, so it records, replays and tests the same way, and `runEffect(registerUserFlowGen(input))` runs it. [Writing Flows as Generators](#writing-flows-as-generators) covers what to know.
+The same flow can be written as a generator, with `yield* step(...)` where `async` code writes `await`. It is made of the same steps, so it records and replays the same way, the tests in [Testing Without Mocks](#testing-without-mocks) cover it unchanged, and `runEffect(registerUserFlowGen(input))` runs it. [Writing Flows as Generators](#writing-flows-as-generators) covers what to know.
 
 ```js
 import { gen, step } from 'pure-effect';
 
 const registerUserFlowGen = gen(function* (input) {
     yield* step(validateRegistration(input));
-
-    const cmdFindUser = () => db.findUser(input.email);
-    const found = yield* step(Command(cmdFindUser));
-    if (found) return Failure('Email already in use.');
-
-    const cmdSaveUser = () => db.saveUser(input);
-    return yield* step(Command(cmdSaveUser));
+    yield* step(ensureEmailAvailable(input));
+    return yield* step(saveUser(input));
 });
 ```
 
@@ -319,6 +314,29 @@ The loop belongs in the flow only when the flow has to decide something on each 
 
 A generator flow is written the way `async` code is, with `yield* step(...)` where `async` code writes `await`. `gen` turns it into the same Commands a pipeline builds, so recording, replay, `Retry`, `Parallel` and the tests on this page all work the same for both. The Quick Start's `registerUserFlowGen` is one.
 
+### Where a generator helps
+
+A generator earns its keep when a later step needs the results of more than one earlier step. Here the welcome email needs both the saved user and the workspace created for them, and each is a variable:
+
+```js
+const onboardUser = gen(function* (input) {
+    const user = yield* step(registerUserFlowGen(input));
+
+    const cmdCreateWorkspace = () => db.createWorkspace(user.id);
+    const workspace = yield* step(Command(cmdCreateWorkspace));
+
+    const cmdSendWelcome = () => mailer.sendWelcome(user.email, workspace.name);
+    yield* step(Command(cmdSendWelcome));
+
+    return { user, workspace };
+});
+
+const onboarded = await runEffect(onboardUser(input));
+assert.equal(onboarded.value.workspace.ownerId, onboarded.value.user.id);
+```
+
+In a pipeline, the step that sends the email would need a step before it that passes the user and the workspace on together; see [Composing Larger Flows](#composing-larger-flows). Keep the decisions in step functions all the same, as `registerUserFlowGen` does, so they can be tested on their own.
+
 ### What runs once, and what runs again
 
 A run goes through the body once, top to bottom, as `async` code does. Two things run it again from the top. A `Retry` around the flow starts the body afresh for each attempt, as a retried `async` function does. And a test that hands an earlier step a second answer, to walk another branch, runs it again, since a generator cannot be copied:
@@ -396,7 +414,7 @@ In TypeScript, most of these do not compile; see [TypeScript](#typescript-typed-
 
 ### Testing a generator flow
 
-Keep a decision the flow makes in a plain function, as `validateRegistration` is, and test it by calling it. Then run the whole flow with each Command answered by name, as [Testing Without Mocks](#testing-without-mocks) does for a pipeline, with nothing called and nothing to wait for:
+Keep each decision in a step function, as the Quick Start's `ensureEmailAvailable` is, and test it by handing it an answer, as [Testing Without Mocks](#testing-without-mocks) does; the generator only puts the steps in order. Then run the whole flow with each Command answered by name, as [Testing Without Mocks](#testing-without-mocks) does for a pipeline, with nothing called and nothing to wait for:
 
 ```js
 const answers = { cmdFindUser: null, cmdSaveUser: { id: 1, ...input } };

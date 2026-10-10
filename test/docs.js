@@ -114,7 +114,12 @@ describe('README examples', function () {
             });
         const stubs = {
             input: { email: 'test@test.com', password: 'password123' },
-            db: { findUser: async () => null, saveUser: async (/** @type {any} */ user) => user },
+            db: {
+                findUser: async () => null,
+                saveUser: async (/** @type {any} */ user) => ({ id: 1, ...user }),
+                createWorkspace: async (/** @type {number} */ ownerId) => ({ id: 'ws_1', ownerId, name: 'Personal' })
+            },
+            mailer: { sendWelcome: async () => ({ sent: true }) },
             app: { post: () => {} },
             it: () => {},
             fetch: () => {
