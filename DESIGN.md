@@ -317,6 +317,7 @@ A replay reproduces a cancellation rather than recomputing it:
 - A step missing from a branch the decision cancelled is where production stopped it. `fromTrace` throws the `replayCut` marker, and the interpreter stops that branch as cancelled.
 - The result is the recorded branch's failure. A `TimeParadox` fires if that branch no longer fails, or if the decision names a branch past the end.
 - Nothing in a replay waits for a cancellation, so a diverged flow cannot hang.
+- When the branch that cancelled the others threw, the decision says so with `threw: true`, and the replay marks the `Parallel`'s scope as production's throw did, before any branch runs, so a cut branch stops no generator flow. Without it, a sibling's `catch` ran in the replay and not in production, and one that swallowed its stop replaced the real error. A decision recorded before the field is replayed as before.
 
 Edge cases:
 

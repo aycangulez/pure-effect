@@ -14,6 +14,7 @@ import {
     configureEffect,
     recordEffect,
     replayEffect,
+    recorder,
     commandName,
     gen,
     step
@@ -792,6 +793,45 @@ describe('gen: stopping', function () {
             assert.equal(result.type, 'Failure');
             assert.deepEqual(seen, ['finally']);
         }
+    });
+
+    it('should replay a branch that threw without running a sibling catch or finally, as production did', async function () {
+        // A sibling whose catch swallows the stop would otherwise replace the real error in the replay.
+        const sibling = gen(function* () {
+            try {
+                yield* step(Command(() => new Promise((resolve) => setTimeout(resolve, 20))));
+                yield* step(
+                    Parallel([
+                        gen(function* () {
+                            try {
+                                yield* step(Command(function cmdNested() {}));
+                            } finally {
+                                seen.push('nested finally');
+                            }
+                        })(undefined)
+                    ])
+                );
+                return yield* step(Command(function cmdAfter() {}));
+            } catch {
+                seen.push('catch');
+                return 'recovered';
+            } finally {
+                seen.push('finally');
+            }
+        });
+        const bug = Command(
+            () => new Promise((resolve) => setTimeout(resolve, 5)),
+            () => {
+                throw new Error('the real bug');
+            }
+        );
+        const flow = () => Parallel([sibling(undefined), bug]);
+        const recording = recorder();
+        await assert.rejects(runEffect(flow(), {}, { onStep: recording.onStep }), /^Error: the real bug$/);
+        assert.deepEqual(seen, []);
+        const trace = JSON.parse(JSON.stringify(recording.toTrace()));
+        await assert.rejects(replayEffect(flow(), trace), /^Error: the real bug$/);
+        assert.deepEqual(seen, []);
     });
 
     it('should keep the waiting flows on a root that effectPipe or gen copied', async function () {

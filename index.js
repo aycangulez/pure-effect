@@ -1147,8 +1147,10 @@ const cancelledBranch = () =>
 /**
  * Which branch, if any, cancelled a Parallel, and how many branches it had; `branch: null` means an enclosing Parallel
  * did. Timing decides it, so it is recorded as the Parallel's own step for a replay to hand back, and the count lets a
- * replay see a branch added or removed.
- * @typedef {{ cancelled: false, branches: number } | { cancelled: true, branch: number | null, branches: number }} ParallelDecision
+ * replay see a branch added or removed. `threw` says the branch threw, so a replay stops no generator flow, as
+ * production did not.
+ * @typedef {{ cancelled: false, branches: number }
+ *   | { cancelled: true, branch: number | null, branches: number, threw?: true }} ParallelDecision
  */
 
 /**
@@ -1187,7 +1189,10 @@ const asDecision = (value, branches) => {
     if (value.cancelled !== true) return undefined;
     const { branch } = value;
     if (branch === null) return { cancelled: true, branch: null, branches };
-    return isBranchIndex(branch, branches) ? { cancelled: true, branch, branches } : undefined;
+    if (!isBranchIndex(branch, branches)) return undefined;
+    return value.threw === true
+        ? { cancelled: true, branch, branches, threw: true }
+        : { cancelled: true, branch, branches };
 };
 
 /**
@@ -1221,6 +1226,7 @@ const thrownScopes = new WeakSet();
  */
 const linkedScope = (signal) => {
     const scope = new AbortController();
+    if (signal && thrownScopes.has(signal)) thrownScopes.add(scope.signal);
     const relay = () => {
         if (signal && thrownScopes.has(signal)) thrownScopes.add(scope.signal);
         scope.abort();
@@ -1531,13 +1537,14 @@ const runBranches = async (runtime, effects, options, signal, branchPath, record
     const reproducing = forced !== undefined && forced.cancelled;
     // Live, a throw cancels the others, and so does a failure unless `settled`. Reproducing, nothing does,
     // since the recording already says where each branch stops.
-    const { results, thrown, trigger, cancelled } = await settleBranches(
+    const { results, thrown, trigger, triggerThrew, cancelled } = await settleBranches(
         runtime,
         effects,
         limit,
         signal,
         branchPath,
-        reproducing ? () => false : (threw, result) => threw || (!settled && result.type !== 'Success')
+        reproducing ? () => false : (threw, result) => threw || (!settled && result.type !== 'Success'),
+        reproducing && forced.threw === true
     );
     if (reproducing) {
         // A branch that threw has no result to check, and its throw is what is rethrown.
@@ -1555,7 +1562,9 @@ const runBranches = async (runtime, effects, options, signal, branchPath, record
     /** @type {ParallelDecision} */
     const decision =
         trigger >= 0
-            ? { cancelled: true, branch: trigger, branches }
+            ? triggerThrew
+                ? { cancelled: true, branch: trigger, branches, threw: true }
+                : { cancelled: true, branch: trigger, branches }
             : cancelled
               ? { cancelled: true, branch: null, branches }
               : { cancelled: false, branches };
@@ -1573,15 +1582,18 @@ const runBranches = async (runtime, effects, options, signal, branchPath, record
  * @param {AbortSignal | undefined} signal
  * @param {string} branchPath
  * @param {(threw: boolean, result: SuccessState | FailureState | IoFaultState) => boolean} cancelsOthers
+ * @param {boolean} [recordedThrow] - A replay's recorded decision says the trigger threw, so no generator flow stops
  * @returns {Promise<{
  *   results: (SuccessState | FailureState | IoFaultState)[],
  *   thrown: { error: unknown } | undefined,
  *   trigger: number,
+ *   triggerThrew: boolean,
  *   cancelled: boolean
  * }>}
  */
-const settleBranches = async (runtime, effects, limit, signal, branchPath, cancelsOthers) => {
+const settleBranches = async (runtime, effects, limit, signal, branchPath, cancelsOthers, recordedThrow = false) => {
     const { scope, unlink } = linkedScope(signal);
+    if (recordedThrow) thrownScopes.add(scope.signal);
     /** @type {(SuccessState | FailureState | IoFaultState)[]} */
     const results = new Array(effects.length);
     // Held rather than rethrown, so every branch still settles and no `limit` worker stops early.
@@ -1616,6 +1628,7 @@ const settleBranches = async (runtime, effects, limit, signal, branchPath, cance
         // The first by array order, since every branch has settled by now.
         thrown: thrown.find(Boolean),
         trigger: triggered.indexOf(true),
+        triggerThrew: triggered.some((isTrigger, i) => isTrigger && thrown[i] !== undefined),
         cancelled: scope.signal.aborted
     };
 };

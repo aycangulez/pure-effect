@@ -1306,12 +1306,12 @@ export type StepRunner = (
 ) => Promise<unknown>;
 
 /**
- * Which branch, if any, cancelled a `Parallel`, and how many branches it had; `branch: null` means an enclosing one
- * did. A replay refuses a `Parallel` whose count differs, and a decision without one is not checked.
+ * Which branch, if any, cancelled a `Parallel`, whether it threw, and how many branches it had; `branch: null` means an
+ * enclosing one did. A replay refuses a `Parallel` whose count differs, and a decision without one is not checked.
  */
 export type ParallelDecision =
     | { cancelled: false; branches?: number | undefined }
-    | { cancelled: true; branch: number | null; branches?: number | undefined };
+    | { cancelled: true; branch: number | null; branches?: number | undefined; threw?: true | undefined };
 
 /**
  * `flowName` is `context.flowName`, or `''` when the context has none. `initialInput` is what the flow was called with
