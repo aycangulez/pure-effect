@@ -318,7 +318,7 @@ A replay reproduces a cancellation rather than recomputing it:
 - The result is the recorded branch's failure. A `TimeParadox` fires if that branch no longer fails, or if the decision names a branch past the end.
 - Nothing in a replay waits for a cancellation, so a diverged flow cannot hang.
 - A `Parallel` a cut branch reaches is skipped, as production's cancellation skipped it, and `stopSkipped` tells the generator flows built in its branches, so their `finally` runs in the replay as it did in production.
-- When the branch that cancelled the others threw, the decision says so with `threw: true`, and the replay marks the `Parallel`'s scope as production's throw did, before any branch runs, so a cut branch stops no generator flow. Without it, a sibling's `catch` ran in the replay and not in production, and one that swallowed its stop replaced the real error. A decision recorded before the field is replayed as before.
+- When a branch threw, the decision says so with `threw: true`, whichever branch cancelled the others first, and the replay marks the `Parallel`'s scope as production's throw did, before any branch runs, so a cut branch stops no generator flow. Recording only a throw that cancelled the others missed a throw that came after a failure had: production's throw still marked the scope before a sibling reached its next step, and the replay, not knowing, let that sibling swallow its stop. Without it, a sibling's `catch` ran in the replay and not in production, and one that swallowed its stop replaced the real error. A decision recorded before the field is replayed as before.
 
 Edge cases:
 

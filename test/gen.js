@@ -834,6 +834,34 @@ describe('gen: stopping', function () {
         assert.deepEqual(seen, []);
     });
 
+    it('should replay a throw that came after another branch cancelled the Parallel to the same error', async function () {
+        // A Failure cancels the others first; a branch's throw comes next and marks the scope, so production stops no
+        // generator, and the replay, which knows only the order the trace gives it, must not either.
+        const swallowing = gen(function* () {
+            try {
+                yield* step(Command(() => new Promise((resolve) => setTimeout(resolve, 20))));
+                return yield* step(Command(function cmdAfter() {}));
+            } catch {
+                seen.push('catch');
+                return 'recovered';
+            }
+        });
+        const bug = Command(
+            () => new Promise((resolve) => setTimeout(resolve, 5)),
+            () => {
+                throw new Error('the real bug');
+            }
+        );
+        // Fails while the bug's Command is already running, which ignores the cancellation and then throws.
+        const declined = Command(() => new Promise((_, reject) => setTimeout(() => reject(new Error('declined')), 2)));
+        const flow = () => Parallel([swallowing(undefined), declined, bug]);
+        const recording = recorder();
+        await assert.rejects(runEffect(flow(), {}, { onStep: recording.onStep }), /^Error: the real bug$/);
+        const trace = JSON.parse(JSON.stringify(recording.toTrace()));
+        await assert.rejects(replayEffect(flow(), trace), /^Error: the real bug$/);
+        assert.deepEqual(seen, []);
+    });
+
     it('should replay a cancelled branch that skipped a Parallel of generator flows, running their finally as production did', async function () {
         const leaf = gen(function* (/** @type {string} */ id) {
             try {
