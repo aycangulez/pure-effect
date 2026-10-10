@@ -13,9 +13,11 @@ import {
     recordEffect,
     replayEffect,
     timeTravel,
-    commandName
+    commandName,
+    step
 } from '../index.js';
 import type {
+    Step,
     SuccessState,
     FailureState,
     CommandState,
@@ -511,9 +513,21 @@ type TwentyErrors =
 expectType<Effect<{ total: number }, TwentyErrors, AppCtx>>(twentySteps(0));
 
 // Twenty-one is past the ceiling. A pipeline is itself a step, so a longer one nests.
-const step = stepWith('e');
-const eleven = [step, step, step, step, step, step, step, step, step, step, step] as const;
-const ten = [step, step, step, step, step, step, step, step, step, step] as const;
+const oneStep = stepWith('e');
+const eleven = [
+    oneStep,
+    oneStep,
+    oneStep,
+    oneStep,
+    oneStep,
+    oneStep,
+    oneStep,
+    oneStep,
+    oneStep,
+    oneStep,
+    oneStep
+] as const;
+const ten = [oneStep, oneStep, oneStep, oneStep, oneStep, oneStep, oneStep, oneStep, oneStep, oneStep] as const;
 // @ts-expect-error typed for up to 20 steps; nest pipelines for more
 effectPipe(...eleven, ...ten);
 const nested = effectPipe(effectPipe(...eleven), effectPipe(...ten));
@@ -1013,3 +1027,9 @@ replayEffect(configured, traceLog, {
     onResolved: undefined
 });
 timeTravel(typedFlow, traceLog, { log: undefined, context: undefined, version: fromConfig.name });
+
+// --- step ---
+
+expectType<Step<CommandState<number, number, never, unknown>>>(step(Command(() => 1)));
+// @ts-expect-error step takes an Effect, not a Promise
+step(Promise.resolve(1));

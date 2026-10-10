@@ -1248,6 +1248,18 @@ export declare function effectPipe<
 >;
 // END effectPipe overloads.
 
+// `__effect` exists only in the type, never at runtime, and the iterator is typed as yielding the Step itself, which
+// never happens either: together they are how `gen` reads each step's Effect type out of the body's yield type. A
+// `declare const` symbol would be a value, which a declaration file exports even without `export`.
+/** A step for `yield*` inside `gen`, which gives back the Effect's value. Using it any other way throws. */
+export type Step<X extends AnyEffect> = {
+    readonly __effect?: X;
+    [Symbol.iterator](): Generator<Step<X>, EffectValue<X>, unknown>;
+};
+
+/** Wraps an Effect for `yield*` inside `gen`: `const user = yield* step(findUser(email))`. */
+export declare function step<X extends AnyEffect>(effect: X): Step<X>;
+
 /**
  * Wraps each Command, and each `Parallel`. Call `op` and return its result; a hook that calls another passes `path` on.
  */

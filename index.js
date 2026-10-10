@@ -537,6 +537,95 @@ const effectPipe = (...fns) => {
     };
 };
 
+/**
+ * Every marker a step's iterator yielded, so `gen` can tell one from a value the body yielded itself.
+ * @type {WeakSet<StepMarker>}
+ */
+const stepMarkers = new WeakSet();
+
+/**
+ * The markers `gen` received, so a step's iterator can tell `yield*` from a spread or a `for...of`.
+ * @type {WeakSet<StepMarker>}
+ */
+const claimedMarkers = new WeakSet();
+
+/**
+ * The Effect inside each step wrapper, so `gen` can name a step yielded or returned without `yield*`.
+ * @type {WeakMap<object, Effect>}
+ */
+const stepEffects = new WeakMap();
+
+/** @typedef {Readonly<{ effect: Effect }>} StepMarker */
+
+/**
+ * @param {any} value
+ * @returns {boolean}
+ */
+const isThenable = (value) => isObject(value) && typeof value.then === 'function';
+
+/**
+ * Names a step for a message, and for comparing one run of a body with the next.
+ * @param {Effect} effect
+ * @returns {string}
+ */
+const describeStep = (effect) =>
+    effect.type === 'Command'
+        ? `Command '${commandName(effect)}'`
+        : `${effect.type === 'Ask' ? 'an' : 'a'} ${effect.type}`;
+
+/**
+ * Wraps an Effect for `yield*` inside `gen`, which gives back the Effect's value. The wrapper is a proxy that throws
+ * when it is used as a value, and its iterator throws unless `gen` claimed what it yielded.
+ *
+ * @param {Effect} effect
+ * @returns {any}
+ */
+const step = (effect) => {
+    if (!isEffect(effect)) {
+        throw malformed(
+            isThenable(effect)
+                ? 'step expects an Effect, got a Promise: put the call in a Command, as in ' +
+                      'yield* step(Command(() => db.findUser(email))).'
+                : `step expects an Effect, got ${describeArgument(effect)}.`,
+            effect
+        );
+    }
+    /** @returns {Generator<StepMarker, any, any>} */
+    const iterate = function* () {
+        const marker = Object.freeze({ effect });
+        stepMarkers.add(marker);
+        try {
+            return yield marker;
+        } finally {
+            // Only `gen` claims a marker, so an unclaimed one means a spread, `Array.from` or a `for...of`.
+            if (!claimedMarkers.has(marker)) {
+                throw malformed(
+                    `step(${describeStep(effect)}) was iterated outside yield*; write yield* step(...).`,
+                    effect
+                );
+            }
+        }
+    };
+    const refuse = () => {
+        throw malformed(`step(${describeStep(effect)}) was used as a value; write yield* step(...).`, effect);
+    };
+    const inspectCustom = Symbol.for('nodejs.util.inspect.custom');
+    const hint = () => `[step: ${describeStep(effect)}, use with yield*]`;
+    // On the target as well, since Node's inspect reads a proxy's target without running its traps.
+    const target = Object.freeze(Object.defineProperty({}, inspectCustom, { value: hint }));
+    const wrapper = new Proxy(target, {
+        get: (_, key) => (key === Symbol.iterator ? iterate : key === inspectCustom ? hint : refuse()),
+        has: refuse,
+        ownKeys: refuse,
+        getOwnPropertyDescriptor: refuse,
+        set: refuse,
+        defineProperty: refuse,
+        deleteProperty: refuse
+    });
+    stepEffects.set(wrapper, effect);
+    return wrapper;
+};
+
 // #endregion
 // #region Configuration
 
@@ -2357,5 +2446,6 @@ export {
     recordEffect,
     replayEffect,
     timeTravel,
-    commandName
+    commandName,
+    step
 };
