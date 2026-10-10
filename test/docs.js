@@ -92,7 +92,17 @@ describe('README examples', function () {
         const [quickStart, ...rest] = sections.filter((section) => section.length > 0);
         const nested = (/** @type {string[]} */ section) =>
             section.reduceRight((inner, block) => `{\n${withoutImports(block)}\n${inner}}\n`, '');
-        const program = quickStart.map(withoutImports).join('\n') + '\n' + rest.map(nested).join('');
+        // The Quick Start shows one flow written two ways, and they must stay the same flow.
+        const sameFlow = `
+            for (const given of [input, { email: 'bad-email', password: 'password123' }]) {
+                const piped = await recordEffect(registerUserFlow, given);
+                const generated = await recordEffect(registerUserFlowGen, given);
+                assert.deepEqual(generated.result, piped.result);
+                const shape = (log) => log.trace.map(({ command, path, result }) => ({ command, path, result }));
+                assert.deepEqual(shape(generated.trace), shape(piped.trace));
+            }
+        `;
+        const program = quickStart.map(withoutImports).join('\n') + '\n' + sameFlow + '\n' + rest.map(nested).join('');
 
         // Everything the examples reach for that is not the library. These exist so the flows can be
         // built and walked, not to stand in for a real driver: every assertion the README makes is
@@ -352,6 +362,31 @@ describe('Documented sharp edges', function () {
         const replay = await replayEffect(changed(undefined), trace);
         assert.equal(/** @type {any} */ (replay.result).error.name, 'TimeParadox');
         assert.deepEqual(seen, []);
+    });
+
+    it('should not notice a forgotten yield* when the step is only tested for truth', async function () {
+        // Pinned deliberately: JavaScript cannot trap a truth test, so the step is always truthy and its Command never
+        // runs, as a forgotten await leaves a Promise that is always truthy.
+        const flow = gen(function* () {
+            const found = step(Command(() => /** @type {{ id: number } | null} */ (null)));
+            return found ? 'taken' : 'free';
+        });
+        assert.deepEqual(await runEffect(flow(undefined)), Success('taken'));
+    });
+
+    it('should change a variable outside a generator body again when a test walks a second branch', function () {
+        // Pinned deliberately: a generator cannot be copied, so answering an earlier step again runs the body from
+        // the top, and code in it that changes something outside it does so again.
+        let logged = 0;
+        const flow = gen(function* () {
+            logged++;
+            const found = yield* step(Command(() => /** @type {{ id: number } | null} */ (null)));
+            return found ? 'taken' : 'free';
+        });
+        const root = /** @type {any} */ (flow(undefined));
+        root.next({ id: 1 });
+        root.next(null);
+        assert.equal(logged, 2);
     });
 });
 

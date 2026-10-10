@@ -9,17 +9,17 @@
 - Inject context without touching function signatures
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks
-- Zero dependencies, about 9 KB minified and gzipped
+- Zero dependencies, about 11 KB minified and gzipped
 - Works in JavaScript, and in TypeScript 5.1 or later (full generics, bundled `.d.ts`)
 
 ## Table of Contents
 
-- **Getting started:** [Installation](#installation) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Testing Without Mocks](#testing-without-mocks) · [Coming from async/await](#coming-from-asyncawait)
+- **Getting started:** [Installation](#installation) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Testing Without Mocks](#testing-without-mocks) · [Coming from async/await](#coming-from-asyncawait) · [Writing Flows as Generators](#writing-flows-as-generators)
 - **Recording and replay:** [Time-Travel Debugging](#time-travel-debugging) · [Recording in Production](#recording-in-production)
 - **Building flows:** [Passing Runtime Context](#passing-runtime-context) · [Retrying Transient Failures](#retrying-transient-failures) · [Running Effects in Parallel](#running-effects-in-parallel) · [Composing Larger Flows](#composing-larger-flows) · [Which Errors Are Data](#which-errors-are-data) · [TypeScript](#typescript-typed-errors-and-context)
 - **Reference:** [Why Pure Effect](#why-pure-effect) · [Load Tests](#load-tests) · [API Reference](#api-reference) · [Limitations](#limitations)
 
-The five sections under Getting started are enough to write and test a flow. Come back to the rest when a flow needs it: recording, retries, steps that run at the same time, or TypeScript.
+The six sections under Getting started are enough to write and test a flow. Come back to the rest when a flow needs it: recording, retries, steps that run at the same time, or TypeScript.
 
 ## Installation
 
@@ -70,9 +70,26 @@ async function registerUser(input) {
 }
 ```
 
+The same flow can be written as a generator, with `yield* step(...)` where `async` code writes `await`. It builds the same Commands, so it records, replays and tests the same way, and `runEffect(registerUserFlowGen(input))` runs it. [Writing Flows as Generators](#writing-flows-as-generators) covers what to know.
+
+```js
+import { gen, step } from 'pure-effect';
+
+const registerUserFlowGen = gen(function* (input) {
+    yield* step(validateRegistration(input));
+
+    const cmdFindUser = () => db.findUser(input.email);
+    const found = yield* step(Command(cmdFindUser));
+    if (found) return Failure('Email already in use.');
+
+    const cmdSaveUser = () => db.saveUser(input);
+    return yield* step(Command(cmdSaveUser));
+});
+```
+
 ## How It Works
 
-A flow is a chain of pairs: an I/O call, and a `next` function that receives its answer and returns the next Command, a Success, or a Failure. `runEffect` walks the chain in a loop.
+A flow is a chain of pairs: an I/O call, and a `next` function that receives its answer and returns the next Command, a Success, or a Failure. `runEffect` walks the chain in a loop. A generator flow builds the same Commands: `gen` runs your function up to each `yield*` and continues it with the answer.
 
 Recording and replay hook into the one place where a Command's function is called. Recording writes down each answer. Replay supplies the recorded answer instead of making the call, so a replayed flow does no I/O.
 
@@ -153,23 +170,23 @@ For a step that returns its Command directly, as in `ensureEmailAvailable(input)
 
 A flow does what `async`/`await` code does, as data. Instead of making a call and waiting for it, a step returns a Command that says which call to make and what to do with the answer. That is what lets a test hand a step an answer instead of mocking the database, and a replay hand it the recorded one. Each thing you would write with `async`/`await` has an equivalent:
 
-| With `async`/`await` | In a flow |
-| --- | --- |
-| `const user = await db.findUser(email)` | a Command: `Command(() => db.findUser(email), next)` |
-| the code after the `await`, which uses `user` | the Command's `next`, which receives `user` |
-| an `if` on `user` after the `await` | a branch in `next` |
-| `return value` | `Success(value)` |
-| `throw` to stop | `Failure(error)` |
-| a call inside `try`/`catch` | catch inside the Command's function and return a value for `next` to branch on; see [Which Errors Are Data](#which-errors-are-data) |
-| a loop that retries a call | `Retry(Command(...), options)` |
-| `await Promise.all([...])` | `Parallel([...])` |
-| a `for` loop with an `await` inside | a step that gets the list, then `Parallel(list.map(...), { limit: 1 })` |
-| a `try`/`catch` inside a loop, to keep going past a failure | the same `Parallel`, with `settled: true` |
-| a later call that needs two earlier results | a named step that passes both on; see [Composing Larger Flows](#composing-larger-flows) |
-| a value from the request, such as the tenant | `Ask`; see [Passing Runtime Context](#passing-runtime-context) |
-| `Date.now()` or a random ID | a Command, so a replay gets the recorded value |
+| With `async`/`await` | In a generator flow | In a pipeline |
+| --- | --- | --- |
+| `const user = await db.findUser(email)` | `const user = yield* step(Command(() => db.findUser(email)))` | a Command: `Command(() => db.findUser(email), next)` |
+| the code after the `await`, which uses `user` | the code after the `yield*` | the Command's `next`, which receives `user` |
+| an `if` on `user` after the `await` | the same `if` | a branch in `next` |
+| `return value` | `return value` | `Success(value)` |
+| `throw` to stop | `return Failure(error)` | `Failure(error)` |
+| a call inside `try`/`catch` | catch inside the Command's function and return a value to branch on; a `catch` around `yield*` can log and rethrow, nothing more | catch inside the Command's function and return a value for `next` to branch on; see [Which Errors Are Data](#which-errors-are-data) |
+| a loop that retries a call | `yield* step(Retry(Command(...), options))` | `Retry(Command(...), options)` |
+| `await Promise.all([...])` | `yield* step(Parallel([...]))` | `Parallel([...])` |
+| a `for` loop with an `await` inside | the same `for` loop, with `yield*` | a step that gets the list, then `Parallel(list.map(...), { limit: 1 })` |
+| a `try`/`catch` inside a loop, to keep going past a failure | `yield* step(Parallel(list.map(...), { limit: 1, settled: true }))` | the same `Parallel`, with `settled: true` |
+| a later call that needs two earlier results | the two variables | a named step that passes both on; see [Composing Larger Flows](#composing-larger-flows) |
+| a value from the request, such as the tenant | `yield* step(Ask())` | `Ask`; see [Passing Runtime Context](#passing-runtime-context) |
+| `Date.now()` or a random ID | `yield* step(Command(() => Date.now()))` | a Command, so a replay gets the recorded value |
 
-One rule is behind every row. In `async` code, an `if` or a loop can have an `await` inside it. In a flow it can't: an `if` goes in a step or a Command's `next`, where the answer has already arrived, and a loop that makes calls becomes a `Parallel` or a `Retry`. So each decision lives in a small function of its own, which a test can call directly.
+One rule is behind the pipeline column. In `async` code, an `if` or a loop can have an `await` inside it; in a pipeline it can't, so each decision lives in a small function of its own, which a test can call directly. A generator flow lifts that rule: an `if` or a `for` loop can wrap `yield*` as it wraps `await`, and you test its decisions by answering its Commands, or by moving them into plain functions.
 
 The Quick Start's `registerUserFlow` is this function, translated row by row: each `await` became a Command, the code after it became that Command's `next`, and each `throw` became a `Failure`.
 
@@ -297,6 +314,98 @@ const listAllOrders = () => {
 To the flow, the whole loop is one step. A trace records the finished list as that step's result, and a replay hands the list back without replaying the pages. A `Retry` around the Command starts again from the first page. A flow test cannot see inside it, so, like any Command's function, it is left to an integration test.
 
 The loop belongs in the flow only when the flow has to decide something on each pass, such as stopping at the first order that matches, or saving each page as it arrives. Then the Command's `next` returns the Command for the next page instead of a `Success`, until there are no more pages.
+
+## Writing Flows as Generators
+
+A generator flow is written the way `async` code is, with `yield* step(...)` where `async` code writes `await`. `gen` turns it into the same Commands a pipeline builds, so recording, replay, `Retry`, `Parallel` and the tests on this page all work the same for both. The Quick Start's `registerUserFlowGen` is one.
+
+### What runs once, and what runs again
+
+A run goes through the body once, top to bottom, as `async` code does. Two things run it again from the top. A `Retry` around the flow starts the body afresh for each attempt, as a retried `async` function does. And a test that hands an earlier step a second answer, to walk another branch, runs it again, since a generator cannot be copied:
+
+```js
+const flow = registerUserFlowGen(input);
+assert.equal(commandName(flow), 'cmdFindUser');
+
+// The first answer finds a user, so the flow stops there.
+assert.deepEqual(flow.next({ id: 1 }), Failure('Email already in use.'));
+
+// A second answer to the same step runs the body again from the top, and this time it goes on to save.
+assert.equal(commandName(flow.next(null)), 'cmdSaveUser');
+```
+
+So keep the body to its own variables. When it runs again, it has to ask for the same steps in the same order, and a body that asks for a different one stops the run with an `EffectTypeError` naming both. `Date.now()`, a random ID, or a variable outside the body can change between runs: get the first two from a Command, as a pipeline does, and pass the third in the flow's input.
+
+### How a generator flow stops
+
+`return` ends the flow. A plain value is its `Success`, `return Failure(error)` stops it with that error, and returning a Command or any other Effect runs it, as `return fetch(url)` does in an `async` function. A `throw` in the body is a bug, as one in a pipeline step is, and `runEffect` rejects with it.
+
+When a step stops the flow, because its Command threw or it returned a `Failure`, the body's `catch` and `finally` blocks run, as they would for an `await` that rejected. The `catch` gets an error saying where the flow stopped, not the original, which is the flow's `Failure`. It can log, but it cannot recover:
+
+```js
+const unreliableDb = {
+    saveUser: async () => {
+        throw new Error('connection reset');
+    }
+};
+
+const saveUser = gen(function* (user) {
+    try {
+        const cmdSaveUser = () => unreliableDb.saveUser(user);
+        return yield* step(Command(cmdSaveUser));
+    } catch (error) {
+        // Runs when the save throws. It can log, and it has to let the error pass.
+        throw error;
+    }
+});
+
+const result = await runEffect(saveUser({ id: 1 }));
+assert.equal(result.error.message, 'connection reset');
+```
+
+A `catch` that returns or carries on, one that throws a different error, and a `finally` that runs another step all stop the run with an `EffectTypeError` that says so:
+
+```js
+const saveLater = gen(function* (user) {
+    try {
+        const cmdSaveUser = () => unreliableDb.saveUser(user);
+        return yield* step(Command(cmdSaveUser));
+    } catch {
+        return 'saved later';
+    }
+});
+
+await assert.rejects(runEffect(saveLater({ id: 1 })), /kept going after Command 'cmdSaveUser' stopped it/);
+```
+
+Handle an error the flow expects inside the Command's function, and return it as data for the body to branch on; recover from one that keeps happening with `Retry`'s `onExhausted`. See [Which Errors Are Data](#which-errors-are-data). Cleanup for the whole run goes in a `try`/`finally` around `runEffect`, as it does for a pipeline.
+
+### Mistakes it catches
+
+| Written | What happens |
+| --- | --- |
+| `yield step(x)`, without the star | an `EffectTypeError`: write `yield*` |
+| `yield x` | an `EffectTypeError`: write `yield* step(x)` |
+| `yield* x`, without `step` | the engine's `TypeError`, which on V8 becomes an `EffectTypeError` saying to write `yield* step(x)` |
+| `const found = step(x)`, then `found.id` | an `EffectTypeError`: `step(...)` was used as a value |
+| `[...step(x)]` or `for (const v of step(x))` | an `EffectTypeError`: `step(...)` was iterated outside `yield*` |
+| `step(db.findUser(email))` | an `EffectTypeError`: put the call in a Command |
+| `gen(async function* () {})` | an `EffectTypeError`: write `function*` |
+
+In TypeScript, most of these do not compile; see [TypeScript](#typescript-typed-errors-and-context).
+
+### Testing a generator flow
+
+Keep a decision the flow makes in a plain function, as `validateRegistration` is, and test it by calling it. Then run the whole flow with each Command answered by name, as [Testing Without Mocks](#testing-without-mocks) does for a pipeline, with nothing called and nothing to wait for:
+
+```js
+const answers = { cmdFindUser: null, cmdSaveUser: { id: 1, ...input } };
+const answerByName = (asked) => (asked.name in answers ? { result: answers[asked.name] } : undefined);
+const { result } = await replayEffect(registerUserFlowGen(input), answerByName);
+assert.deepEqual(result, Success({ id: 1, ...input }));
+```
+
+Walking the flow with `assertCommand` works as it does for a pipeline: a walk straight through runs the body once, and walking a second branch runs it again.
 
 ## Time-Travel Debugging
 
@@ -819,6 +928,21 @@ const result = await runEffect(findProduct('abc'), { tenant: 'acme', requestId: 
 
 Every step's context counts, so a pipeline needs all the contexts its steps read, even when the first step reads none, and a `Parallel` needs every context its branches read. `runEffect` requires a context whenever the flow reads one, since the flow would otherwise get an empty object, and checks one passed as a variable against what the flow reads, as it checks one written in place, so a variable whose type lacks a field the flow reads does not compile. `recordEffect`, `replayEffect` and `timeTravel` check a context the same way, and `replayEffect` given a resolver requires one, since a resolver holds none.
 
+### Generator flows
+
+`gen` infers everything from the body. Each `yield*` is typed by its own step, the error union collects every step's errors and every `Failure` the body returns, and the context collects what every step reads:
+
+```ts
+const registerUser = gen(function* (input: { email: string }) {
+    const found = yield* step(findUser(input.email)); // User | null
+    if (found) return Failure('EMAIL_TAKEN');
+    return yield* step(saveUser(input));
+});
+// (input: { email: string }) => Effect<User, 'EMAIL_TAKEN' | the errors findUser and saveUser declare>
+```
+
+`yield* x` without `step`, reading a property of a step, and an `async function*` do not compile. `yield step(x)` without the star does, and fails when it runs. Name the context `Ask()` reads as `Ask<AppContext>()`.
+
 ## Why Pure Effect
 
 **vs. Temporal and durable execution (Restate, Inngest):** The closest relatives, built on the same idea: record what every step returned and replay it. Those engines store the history on a server and resume workflows automatically after a crash. Pure Effect leaves storage and restarts to your application, and there is no infrastructure to run.
@@ -886,9 +1010,9 @@ Use `meta.name` in code that gets minified, since a minifier renames functions a
 
 Returns a Command's name, chosen in the order above, so a test checks a step by the name its trace would record: `assert.equal(commandName(step), 'cmdFindUser')`. Anything but a Command throws an `EffectTypeError`.
 
-#### `Ask(nextFn)`
+#### `Ask(nextFn?)`
 
-Returns `{ type: 'Ask', next }`. Passes the `context` from `runEffect` into `nextFn`.
+Returns `{ type: 'Ask', next }`. Passes the `context` from `runEffect` into `nextFn`. With no argument, the flow gets the context itself, as `yield* step(Ask())` reads it.
 
 #### `Retry(effect, options?)`
 
@@ -934,6 +1058,19 @@ In either language, a Command a step builds and does not return never runs, and 
 ```
 
 Return the Command, and have its `next` return the value the rest of the pipeline needs.
+
+#### `gen(body)`
+
+Returns a flow function, `(input) => Effect`, from a generator function, `function* (input) { ... }`. See [Writing Flows as Generators](#writing-flows-as-generators).
+
+- Calling it runs the body up to its first `yield*`, so a `Failure` before the first step comes back at once, as a pipeline's does.
+- `return value` is `Success(value)`, `return Failure(error)` stops the flow, and a returned Effect runs.
+- When a step stops the flow, the body's `catch` and `finally` blocks run; a `catch` that recovers or throws another error, or a `finally` that runs a step, rejects the run.
+- An `async function*`, and a body that yields anything but `yield* step(effect)`, throws an `EffectTypeError`.
+
+#### `step(effect)`
+
+Wraps an Effect for `yield*` inside `gen`, which gives back its value: `const user = yield* step(findUser(email))`. Anything but an Effect throws an `EffectTypeError`, and so does using the result any other way than `yield*`.
 
 ### Running a flow
 
@@ -1079,3 +1216,4 @@ Replays a trace and narrates each step with its recorded duration, naming any re
 - **Replay reproduces what one flow saw, not timing.** A stale read replays exactly. A race between two concurrent requests does not, because a trace records one flow. `Parallel` branches replay with the results each branch saw, and a cancelled `Parallel` with the branch that cancelled it, but not the order they ran in, so replay cannot settle a race between branches that share state.
 - **Configuration belongs to one copy of the library.** `configureEffect` stores hooks in module state, so two copies of the library in one process (from a dual ESM and CJS setup, two versions in the dependency tree, or a worker thread) each have their own. Hooks configured in one do not apply to the other, and nothing warns you.
 - **A Command needs a name.** `meta.name` survives minification. `cmd.name` does not, unless the minifier is set to keep function names.
+- **A generator flow's body can run more than once.** A `Retry` around the flow starts the body again for each attempt, and a test that hands an earlier step a second answer runs it again from the top, so code in the body that changes something outside it, such as a counter or a log line, does so again, and a body that asks for different steps when it runs again stops the run. When a run is rejected, by a bug or a `TimeParadox`, the body's `finally` blocks do not run. A `step` you forgot to `yield*` is caught when it is used, but not when it is only tested for truth, as in `if (step(x))`, which is always true, as a forgotten `await` is. On engines other than V8, `yield*` on an Effect keeps the engine's own error, without the hint to write `step`.
