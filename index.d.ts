@@ -1260,6 +1260,31 @@ export type Step<X extends AnyEffect> = {
 /** Wraps an Effect for `yield*` inside `gen`: `const user = yield* step(findUser(email))`. */
 export declare function step<X extends AnyEffect>(effect: X): Step<X>;
 
+type StepEffectOf<Y> = Y extends Step<infer X> ? X : never;
+type ReturnedEffect<R> = R extends AnyEffect ? R : never;
+type GenValue<R> = R extends AnyEffect ? EffectValue<R> : R;
+type GenError<Y, R> = EffectError<StepEffectOf<Y>> | EffectError<ReturnedEffect<R>>;
+// A step that reads no context gives `unknown`, which would erase the others in an intersection, so it is dropped.
+type GenNeeds<X> = X extends AnyEffect
+    ? EffectContext<X> extends infer C
+        ? unknown extends C
+            ? never
+            : C
+        : never
+    : never;
+type GenIntersection<U> = (U extends any ? (u: U) => void : never) extends (i: infer I) => void ? I : never;
+type GenContext<Y, R> = [GenNeeds<StepEffectOf<Y> | ReturnedEffect<R>>] extends [never]
+    ? unknown
+    : GenIntersection<GenNeeds<StepEffectOf<Y> | ReturnedEffect<R>>>;
+
+/**
+ * Builds a flow function from a generator function, written with `yield* step(effect)` where `async` code writes
+ * `await`. A plain return value is a `Success`; return a `Failure` to stop.
+ */
+export declare function gen<I, Y extends Step<any>, R>(
+    body: (input: I) => Generator<Y, R, unknown>
+): (input: I) => Effect<GenValue<R>, GenError<Y, R>, GenContext<Y, R>>;
+
 /**
  * Wraps each Command, and each `Parallel`. Call `op` and return its result; a hook that calls another passes `path` on.
  */

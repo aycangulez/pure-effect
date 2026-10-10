@@ -626,6 +626,260 @@ const step = (effect) => {
     return wrapper;
 };
 
+/** What an `async function*` inherits from, which `gen` refuses before it builds anything. */
+const asyncGeneratorFunction = Object.getPrototypeOf(async function* () {});
+
+/**
+ * A generator flow called with its input, which a re-run starts its body from again.
+ * @typedef {{ body: (input: any) => any, input: any }} GenFlow
+ */
+
+/**
+ * One run of a body: its generator, the position of the step it is waiting at, and whether it can still resume.
+ * @typedef {{ generator: Generator<any, any, any>, position: number, state: 'suspended' | 'done' }} BodyRun
+ */
+
+/**
+ * The answers a body was given before a position, newest first, each with the step it answered, so a re-run can feed
+ * them again and check the body asks for the same steps. Shared between continuations, never copied.
+ * @typedef {{ signature: string, answer: any, earlier: Trail } | null} Trail
+ */
+
+/**
+ * @typedef {(generator: Generator<any, any, any>) => IteratorResult<any, any>} Resume
+ */
+
+/**
+ * Starts a body. A function that returns anything but a synchronous generator is refused here, which covers a bundled
+ * `async function*` the prototype check in `gen` missed.
+ * @param {GenFlow} flow
+ * @returns {BodyRun}
+ */
+const startRun = (flow) => {
+    const generator = flow.body(flow.input);
+    const isGenerator =
+        isObject(generator) &&
+        ['next', 'throw', 'return'].every((name) => typeof generator[name] === 'function') &&
+        generator[Symbol.toStringTag] !== 'AsyncGenerator';
+    if (!isGenerator) {
+        throw malformed(
+            'gen expects a generator function, function* (input) { ... }; ' +
+                `its function returned ${describeValue(generator)}.`,
+            generator
+        );
+    }
+    return { generator, position: 0, state: 'suspended' };
+};
+
+/**
+ * Adds a hint to V8's error for `yield*` on a value that is not iterable, keeping the original as `cause`.
+ * @param {unknown} e
+ * @returns {unknown}
+ */
+const explainBodyThrow = (e) => {
+    // V8's two wordings; the second is not unique to yield*, so the hint is conditional.
+    const notIterable = [
+        /^yield\* .* is not iterable$/,
+        /^object is not iterable \(cannot read property Symbol\(Symbol\.iterator\)\)$/
+    ];
+    if (!(e instanceof TypeError) || hasMark(e, harnessError) || !notIterable.some((p) => p.test(e.message))) {
+        return e;
+    }
+    const error = malformed(
+        `A generator flow threw "${e.message}". If it came from yield* on an Effect, write yield* step(effect).`,
+        undefined
+    );
+    return Object.defineProperty(error, 'cause', { value: e, writable: true, configurable: true });
+};
+
+/**
+ * @param {BodyRun} run
+ * @param {Resume} resume
+ * @returns {IteratorResult<any, any>}
+ */
+const resumeBody = (run, resume) => {
+    try {
+        const result = resume(run.generator);
+        if (result.done) run.state = 'done';
+        return result;
+    } catch (e) {
+        run.state = 'done';
+        throw explainBodyThrow(e);
+    }
+};
+
+/**
+ * Takes the Effect out of what a body yielded, claiming its marker, or refuses what is not a step.
+ * @param {any} value
+ * @returns {Effect}
+ */
+const claimStep = (value) => {
+    // First, since reading anything from a step wrapper throws.
+    const unstarred = stepEffects.get(value);
+    if (unstarred) {
+        throw malformed(
+            `A generator flow yielded step(${describeStep(unstarred)}) without the star; write yield* step(...).`,
+            undefined
+        );
+    }
+    if (stepMarkers.has(value)) {
+        claimedMarkers.add(value);
+        return value.effect;
+    }
+    if (isEffect(value)) {
+        throw malformed(`A generator flow yielded ${describeArgument(value)}; write yield* step(effect).`, value);
+    }
+    if (isThenable(value)) {
+        throw malformed(
+            'A generator flow yielded a Promise; put the call in a Command and yield* step(command).',
+            value
+        );
+    }
+    throw malformed(`A generator flow yielded ${describeValue(value)}; it can only yield* step(effect).`, value);
+};
+
+/**
+ * What a body's `return` means: an Effect runs as it is, a plain value is a `Success`.
+ * @param {any} value
+ * @returns {Effect}
+ */
+const returnedEffect = (value) => {
+    if (stepEffects.has(value)) {
+        throw malformed(
+            'A generator flow returned step(...); write return yield* step(...), or return the Effect itself.',
+            undefined
+        );
+    }
+    if (isEffect(value)) return value;
+    if (isThenable(value)) {
+        throw malformed(
+            'A generator flow returned a Promise; put the call in a Command and return yield* step(command).',
+            value
+        );
+    }
+    return Success(value);
+};
+
+/**
+ * Runs a body again from the top, feeding it the answers in `trail`, and checks it asks for the same steps.
+ * @param {GenFlow} flow
+ * @param {Trail} trail
+ * @param {string} signature - The step the body has to be waiting at once the answers are fed
+ * @returns {BodyRun} The new run, waiting at that step
+ */
+const rerun = (flow, trail, signature) => {
+    const run = startRun(flow);
+    const expect = (/** @type {IteratorResult<any, any>} */ result, /** @type {string} */ wanted) => {
+        const asked = result.done ? 'to return' : describeStep(claimStep(result.value));
+        if (asked !== wanted) {
+            throw malformed(
+                `A generator flow asked for ${asked} where its earlier run asked for ${wanted}. Something in its ` +
+                    'body changes between runs, such as Date.now(), Math.random(), or a variable outside the body; ' +
+                    "make it a Command, or pass it in the flow's input.",
+                undefined
+            );
+        }
+    };
+    /** @type {{ signature: string, answer: any }[]} */
+    const answers = [];
+    for (let cell = trail; cell; cell = cell.earlier) answers.unshift(cell);
+    let result = resumeBody(run, (g) => g.next());
+    for (const { signature: asked, answer } of answers) {
+        expect(result, asked);
+        run.position++;
+        result = resumeBody(run, (g) => g.next(answer));
+    }
+    expect(result, signature);
+    return run;
+};
+
+/**
+ * The run waiting at `position`: the live one if it is there, else a new one the earlier answers bring there, as
+ * when a test walks a second branch or a `Retry` repeats the flow.
+ * @param {GenFlow} flow
+ * @param {BodyRun} run
+ * @param {number} position
+ * @param {Trail} trail
+ * @param {string} signature
+ * @returns {BodyRun}
+ */
+const runAt = (flow, run, position, trail, signature) =>
+    run.state === 'suspended' && run.position === position ? run : rerun(flow, trail, signature);
+
+/**
+ * Resumes a body and turns what it does next into an Effect: the step it yields, chained back into the body, or what
+ * it returns.
+ * @param {GenFlow} flow
+ * @param {BodyRun} run
+ * @param {Trail} trail - The answers before the position the body resumes at
+ * @param {Resume} resume
+ * @returns {Effect}
+ */
+const advance = (flow, run, trail, resume) => {
+    for (;;) {
+        const result = resumeBody(run, resume);
+        if (result.done) return returnedEffect(result.value);
+        const effect = claimStep(result.value);
+        const position = run.position;
+        const signature = describeStep(effect);
+        const before = trail;
+        if (effect.type === 'Success') {
+            // Fed straight back rather than through `chain`, so a long run of pure steps does not grow the stack.
+            trail = { signature, answer: effect.value, earlier: before };
+            run.position = position + 1;
+            resume = (g) => g.next(effect.value);
+            continue;
+        }
+        return chain(effect, (answer) => continueBody(flow, run, position, before, signature, answer));
+    }
+};
+
+/**
+ * Hands a step's answer to the body waiting at it.
+ * @param {GenFlow} flow
+ * @param {BodyRun} run
+ * @param {number} position
+ * @param {Trail} trail
+ * @param {string} signature
+ * @param {any} answer
+ * @returns {Effect}
+ */
+const continueBody = (flow, run, position, trail, signature, answer) => {
+    const current = runAt(flow, run, position, trail, signature);
+    current.position = position + 1;
+    return advance(flow, current, { signature, answer, earlier: trail }, (g) => g.next(answer));
+};
+
+/**
+ * Builds a flow function from a generator function, which writes `yield* step(effect)` where `async` code writes
+ * `await`. Calling the flow function runs the body up to its first step, and the flow it returns is made of ordinary
+ * nodes, so it records, replays and tests as a pipeline does.
+ *
+ * @param {(input: any) => Generator<any, any, any>} body
+ * @returns {(input: any) => Effect}
+ */
+const gen = (body) => {
+    if (typeof body !== 'function') {
+        throw malformed(
+            `gen expects a generator function, function* (input) { ... }, got ${describeArgument(body)}.`,
+            body
+        );
+    }
+    if (Object.getPrototypeOf(body) === asyncGeneratorFunction) {
+        throw malformed(
+            'gen expects function*, not async function*: get each result with yield* step(command) instead of await.',
+            body
+        );
+    }
+    return (input) => {
+        const flow = { body, input };
+        // Keyed on a copy, as `effectPipe`'s root is, since a body can return a shared object.
+        const root = { ...advance(flow, startRun(flow), null, (g) => g.next()) };
+        flowInputs.set(root, input);
+        return root;
+    };
+};
+
 // #endregion
 // #region Configuration
 
@@ -2447,5 +2701,6 @@ export {
     replayEffect,
     timeTravel,
     commandName,
+    gen,
     step
 };
