@@ -165,6 +165,10 @@ expectType<SuccessState<User> | FailureState<string>>(failResult);
 const ask = Ask((ctx) => Success(ctx as User));
 expectType<AskState<User, never>>(ask);
 
+// With no argument, Ask succeeds with the context, typed by its one type argument.
+expectType<AskState<{ tenant: string }, never, { tenant: string }>>(Ask<{ tenant: string }>());
+expectType<AskState<unknown, never, unknown>>(Ask());
+
 const askFlow = effectPipe((input: User) => Ask((_ctx) => Success(input)));
 expectType<Effect<User, never>>(askFlow({ email: 'a@b.com', password: 'secret123' }));
 

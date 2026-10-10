@@ -137,10 +137,14 @@ const commandName = (eff) => {
 
 /**
  * Reads the context object from the current `runEffect` call.
- * @param {(context: any) => Effect} next - Receives the context and returns the next Effect
+ * @param {...((context: any) => Effect)} args - `next`, which receives the context and returns the next Effect. With
+ *        no argument, the Ask succeeds with the context itself, as `yield* step(Ask())` reads it.
  * @returns {AskState}
  */
-const Ask = (next) => {
+const Ask = (...args) => {
+    // Only a call with no argument: an explicit `undefined` is usually a misspelt name.
+    if (args.length === 0) return { type: 'Ask', next: (/** @type {any} */ context) => Success(context) };
+    const [next] = args;
     if (typeof next !== 'function') {
         throw malformed(`Ask expects a function that receives the context, got ${describeArgument(next)}.`, next);
     }
