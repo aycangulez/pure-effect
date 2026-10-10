@@ -652,6 +652,37 @@ describe('gen: stopping', function () {
         assert.deepEqual(seen, ['start', 'finally', 'start', 'finally', 'start', 'finally']);
     });
 
+    it('should close a nested flow a body builds again when it runs again, in a run that succeeds', async function () {
+        // On the second attempt the outer body runs again to reach its step, building a new inner flow it does not
+        // run, since the answer is already known. That inner body entered its try, so its finally has to run.
+        let calls = 0;
+        const inner = gen(function* () {
+            seen.push('inner enter');
+            try {
+                return yield* step(
+                    Command(function cmdA() {
+                        return 'a';
+                    })
+                );
+            } finally {
+                seen.push('inner finally');
+            }
+        });
+        const outer = gen(function* () {
+            const a = yield* step(inner(undefined));
+            const b = yield* step(
+                Command(function cmdB() {
+                    if (calls++ === 0) throw new Error('flaky');
+                    return 'b';
+                })
+            );
+            return [a, b];
+        });
+        assert.deepEqual(await runEffect(Retry(outer(undefined), { attempts: 1, delay: 0 })), Success(['a', 'b']));
+        const entered = seen.filter((event) => event === 'inner enter').length;
+        assert.equal(seen.filter((event) => event === 'inner finally').length, entered);
+    });
+
     it('should let the body go on when onExhausted recovers', async function () {
         const flow = gen(function* () {
             const value = yield* step(

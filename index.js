@@ -797,7 +797,9 @@ const returnedEffect = (value) => {
 };
 
 /**
- * Runs a body again from the top, feeding it the answers in `trail`, and checks it asks for the same steps.
+ * Runs a body again from the top, feeding it the answers in `trail`, and checks it asks for the same steps. A step it
+ * builds again but does not run, since its answer is known, is stopped as a skipped one is (`stopSkipped`), so a
+ * generator flow inside it that has already entered its `try` runs its `finally`.
  * @param {GenFlow} flow
  * @param {Trail} trail
  * @param {string} signature - The step the body has to be waiting at once the answers are fed
@@ -818,6 +820,7 @@ const rerun = (flow, trail, signature) => {
                 undefined
             );
         }
+        if (effect.type !== 'Success') stopSkipped(effect, Success(undefined), undefined);
         return effect;
     };
     /** @type {{ signature: string, answer: any }[]} */
