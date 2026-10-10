@@ -834,6 +834,41 @@ describe('gen: stopping', function () {
         assert.deepEqual(seen, []);
     });
 
+    it('should replay a cancelled branch that skipped a Parallel of generator flows, running their finally as production did', async function () {
+        const leaf = gen(function* (/** @type {string} */ id) {
+            try {
+                return yield* step(
+                    Command(function cmdLeaf() {
+                        return id;
+                    })
+                );
+            } finally {
+                seen.push(`leaf ${id} finally`);
+            }
+        });
+        // Its slow step ignores the signal, so the branch reaches the Parallel after the cancellation, which skips it.
+        const branch = gen(function* () {
+            yield* step(
+                Command(function cmdSlow() {
+                    return new Promise((resolve) => setTimeout(resolve, 30));
+                })
+            );
+            return yield* step(Parallel([leaf('x'), leaf('y')]));
+        });
+        const failing = Command(function cmdFail() {
+            return new Promise((_, reject) => setTimeout(() => reject(new Error('declined')), 5));
+        });
+        const flow = () => Parallel([branch(undefined), failing]);
+        const recording = recorder();
+        const production = await runEffect(flow(), {}, { onStep: recording.onStep });
+        assert.equal(production.type, 'Failure');
+        assert.deepEqual([...seen].sort(), ['leaf x finally', 'leaf y finally']);
+        seen = [];
+        const replay = await replayEffect(flow(), JSON.parse(JSON.stringify(recording.toTrace())));
+        assert.equal(replay.result.type, 'Failure');
+        assert.deepEqual([...seen].sort(), ['leaf x finally', 'leaf y finally']);
+    });
+
     it('should keep the waiting flows on a root that effectPipe or gen copied', async function () {
         const watched = gen(function* () {
             try {

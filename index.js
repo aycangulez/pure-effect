@@ -1471,8 +1471,12 @@ const runParallel = async (runtime, parallel, signal, stepPath) => {
     try {
         await runtime.onStep('Parallel', 'Parallel', op, branchPath);
     } catch (e) {
-        // A cut from `fromTrace`: production had already stopped the branch this Parallel is in.
-        if (hasMark(e, replayCut)) return cancelledBranch();
+        // A cut from `fromTrace`: production had already stopped the branch this Parallel is in, so it skipped this
+        // Parallel, and `stopSkipped` tells the flows built in its branches, as production's cancellation did.
+        if (hasMark(e, replayCut)) {
+            parallel.effects.forEach((branch) => stopSkipped(branch, cancelledBranch(), signal));
+            return cancelledBranch();
+        }
         throw e;
     }
     if (!branchRun) {
