@@ -475,6 +475,32 @@ describe('Documented sharp edges', function () {
         await replayEffect(flow(), JSON.parse(JSON.stringify(recording.toTrace())));
         assert.deepEqual(seen, ['after Ask']);
     });
+
+    it('should lose an error passing through a body whose finally step a cancellation skips', async function () {
+        // Pinned deliberately: a step in a body's finally is unsupported. Here a nested flow's refusal is passing
+        // through the outer body when its finally yields a step; the cancellation reaches the body before that step
+        // starts, and the stop thrown into the paused finally replaces the pending error.
+        const refused = gen(function* () {
+            try {
+                yield* step(Failure('early'));
+            } finally {
+                yield* step(Command(function cmdInnerCleanup() {}));
+            }
+        });
+        const outer = gen(function* () {
+            try {
+                yield* step(refused(undefined));
+            } finally {
+                yield* step(Command(function cmdOuterCleanup() {}));
+            }
+        });
+        const failing = Command(function cmdFail() {
+            return new Promise((_, reject) => setTimeout(() => reject(new Error('declined')), 5));
+        });
+        const result = await runEffect(Parallel([failing, outer(undefined)], { limit: 1 }));
+        assert.equal(result.type, 'Failure');
+        assert.equal(/** @type {any} */ (result).error.message, 'declined');
+    });
 });
 
 describe('Declaration parity', function () {
