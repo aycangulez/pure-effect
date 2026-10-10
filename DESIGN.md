@@ -960,7 +960,7 @@ Before calling a survivor new, apply the mutant by hand to the old code and the 
 
 The README's feature bullet states the minified, gzipped size in prose. Re-measure it with the size command in `CLAUDE.md` after changing `index.js`, and reword it when the number moves.
 
-The size badge, `img.shields.io/bundlejs/size/pure-effect`, measures the latest published version with esbuild, the same tool, so it corrects itself after a publish. Bundlephobia's badge was not used, because it measures with webpack and terser and is often rate limited.
+The README has no size badge. `img.shields.io/bundlejs/size/pure-effect` was used until October 2026: it measured the latest published version with esbuild, the same tool, so it corrected itself after a publish. It was replaced by the Node version badge, `img.shields.io/node/v/pure-effect`, which reads `engines` from `package.json`, because a bundle-size badge at the top of the README signalled a frontend library, and this one is mostly used on servers, where the size matters for what it says about dependencies and cold starts rather than download cost. The bullet says that, and between a merge and a publish it no longer disagrees with a badge still showing the last release.
 
 **A commit message and a changelog entry never mention the size.** Both are read long after the fact, when the number is stale and the reader cannot tell, and neither is what they are for: a changelog says what changed for a user, and a commit message says why.
 

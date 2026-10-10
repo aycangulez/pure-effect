@@ -1,6 +1,6 @@
 # Pure Effect
 
-[![npm version](https://img.shields.io/npm/v/pure-effect)](https://www.npmjs.com/package/pure-effect) [![minified size (gzip)](https://img.shields.io/bundlejs/size/pure-effect)](https://bundlejs.com/?q=pure-effect) [![license](https://img.shields.io/npm/l/pure-effect)](https://github.com/aycangulez/pure-effect/blob/main/LICENSE)
+[![npm version](https://img.shields.io/npm/v/pure-effect)](https://www.npmjs.com/package/pure-effect) [![node](https://img.shields.io/node/v/pure-effect)](https://www.npmjs.com/package/pure-effect) [![license](https://img.shields.io/npm/l/pure-effect)](https://github.com/aycangulez/pure-effect/blob/main/LICENSE)
 
 **Pure Effect** records what your business logic did in production and replays it anywhere: time-travel debugging for JavaScript and TypeScript, with zero dependencies. Business logic is plain data you can test without mocks.
 
@@ -9,7 +9,7 @@
 - Inject context without touching function signatures
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks
-- Zero dependencies, about 11 KB minified and gzipped
+- Zero dependencies and a single file, about 11 KB minified and gzipped: nothing to audit, and little added to a serverless cold start
 - Works in JavaScript, and in TypeScript 5.1 or later (full generics, bundled `.d.ts`)
 
 ## Table of Contents
