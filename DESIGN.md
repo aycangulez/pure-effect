@@ -26,7 +26,7 @@ pure-effect is a zero-dependency effect system for JavaScript implementing the "
 
 A flow is inert data until the interpreter walks it. That is what lets a recorded run be fed back through the interpreter with no I/O at all.
 
-Control structures stay in pipeline functions, and have since the first version: an `if` or a loop never wraps a Command. Each decision sits in a function that receives one value, and control that spans I/O is a node, a `Parallel` or a `Retry`. Languages that let control span an effect, as Haskell's do-notation does, rely on a compiler that keeps the code between steps pure; JavaScript cannot, so each decision is kept where that boundary is visible, and every decision is a place a test can start.
+Control structures stay in pipeline functions, and have since the first version: in a pipeline, an `if` or a loop never wraps a Command. Each decision sits in a function that receives one value, and control that spans I/O is a node, a `Parallel` or a `Retry`. Languages that let control span an effect, as Haskell's do-notation does, rely on a compiler that keeps the code between steps pure; JavaScript cannot, so each decision is kept where that boundary is visible, and every decision is a place a test can start. `gen` is the one exception, made deliberately for developers coming from `async`/`await`: its body may wrap `yield*` in an `if` or a loop. Three things keep that safe: the body can yield only Effects, a body that asks for different steps when it runs again is refused, and a step that stops the flow runs the body's `catch` and `finally` while refusing any recovery. [Generator flows, judged by least surprise](#generator-flows-judged-by-least-surprise) gives the case.
 
 Everything is in `index.js`, and `index.d.ts` declares it.
 
@@ -77,6 +77,7 @@ A Command's identity is `commandName(eff)`: a non-empty string `meta.name`, else
 - It checks what each step returns. That is the only place the step's name (`fn.name`) is known, so it is where the useful error message comes from.
 - It checks `effect == null` before reading `.type`, so a missing return is named rather than thrown as a bare `TypeError`.
 - A loop that recurses through `effectPipe`, as `poll = (n) => effectPipe(fetch, (s) => (s.done ? Success(s) : poll(n - 1)))(n)` does, takes time in proportion to its length, as one through a Command's `next` does: 200,000 levels took about 100 ms, twice the loop through `next`. It was quadratic, and overflowed the stack at 20,000 levels, while `effectPipe` ended in the identity pass that stamped the flow's input, since that pass wrapped each level's tree once more. That was left alone as rare, until removing the pass ([A `Failure` carries only its error](#a-failure-carries-only-its-error)) fixed it. A test in `Core` runs 50,000 levels with a `Retry` around each fetch, the shape a paged loop needs, since a `Retry` around a Command whose `next` continues the loop would repeat every later page.
+- It carries the stop listeners `gen` registers. `chain` takes an optional fourth argument, `onStop`; each node it copies keeps the original's listeners plus its own, innermost first, in the private `stopListeners` map. When a `Failure` passes a continuation that has a listener, `chain` calls it, and when a copied node itself stops the flow (a Command that throws, a `Retry` or `Parallel` that ends in a `Failure`, a cancelled branch), `execute`'s `stopAt` calls its listeners. The two ends are exclusive for a given node, so each waiting generator hears of a stop once. `copyRoot` keeps the listeners when `effectPipe` or `gen` copies a root for `flowInputs`; a copy made any other way loses them, and the generator waiting on it is then left without its `catch` and `finally`, though the outcome is unchanged.
 
 ### The flow's input reaches `onRun`, not the outcome
 
@@ -592,6 +593,8 @@ Under `settled`:
 
 `RetryState`'s and `ParallelState`'s `options` are `Readonly`, since the constructors keep a frozen copy of what they checked. Declared changeable, they let TypeScript accept `node.options.attempts = 0`, an assignment that throws when it runs, in strict mode. Two `@ts-expect-error` lines pin it.
 
+- `Step<X>` carries `X` in `__effect`, an optional property that exists only in the type: a `declare const` symbol would be a value, which a declaration file exports even without `export`, as the `Declaration parity` test caught. Its iterator is typed as yielding the `Step` itself, which never happens at runtime either; together they are how `gen` reads each step's Effect type out of the body's yield type. The generator's `next` type is `unknown`, since each `yield*` takes its result type from its own `Step`, which one `next` type could not express. `GenContext` drops a step whose context is `unknown` before intersecting, since `unknown` in a union would make the whole context `unknown` and erase every requirement, which is what the spike's first version did. `yield step(x)` without the star compiles, since a `Step` satisfies the yield type; the runtime refuses it.
+
 ## Reference integrations
 
 `examples/opentelemetry-example.js` and `examples/recording-example.js` are reference code, not part of the library. The rule for both is that observing a run never decides it.
@@ -626,24 +629,22 @@ Four kinds of kept trace produce a warning through `onWarning`, by default `cons
 
 Each of these was weighed and decided. Do not propose them again as improvements or rank them as weaknesses; the reasons are here.
 
-### No generator syntax
+### Generator flows, judged by least surprise
 
-Control structures stay in their own functions. In a flow built from Commands and `next` continuations, every `if` and loop sits inside a function that receives one answer, between two Commands. Control that spans I/O is a node: a loop is a `Parallel`, a retry is a `Retry`, and a branch is a different Effect returned. So it is data a test can see, as `flow.next(invoices).effects.length` counts a loop's passes, and a trace gives each pass its own path.
+`gen(function* (input) { ... })` writes a flow with `yield* step(effect)` where `async` code writes `await`. It was added in October 2026 for developers coming from `async`/`await`, reversing an earlier decision against generator syntax, and judged throughout by the principle of least surprise: an `async` habit either works as it does there or fails loudly at the line that used it.
 
-A generator lets an `if` or a loop wrap a `yield*`, so control moves into syntax that spans a Command, and the tree and the trace see a flat run of steps. Most of what a generator flow costs follows from that:
+The earlier decision rested mostly on surprises. A decision written inline is reachable only by walking the flow from the top; code before a step runs again when a test or a `Retry` re-enters it; the rule that a decision comes out the same on every run sits in code that reads as running once; and a `try`/`catch` around a step reads as handling a failure and never ran. A spike in October 2026 had already shown the mechanism works over the existing nodes: flows stayed reusable, recorded, replayed from JSON, retried, ran a `Parallel` with cancellation, read the context, fell back through `onExhausted`, and typed values and the error union through `yield*` on TypeScript 5.1. The design below answers each surprise.
 
-- A decision written inline is reachable only by walking the flow from the top. One in its own step is tested by handing it an answer, which is the README's case against `async`/`await`.
-- The code before a step runs again whenever a test or a `Retry` re-enters it, so a change to anything outside the generator happens twice. Re-entering a continuation runs only that continuation.
-- The rule that a decision comes out the same on every run sits in code that reads as running once.
-- A `try`/`catch` around `yield*` reads as handling a failure, and never runs.
-
-Reusability is not the obstacle, though it was once given as the reason. A spike in October 2026 built generator syntax over the existing nodes. Each node advanced the running generator the first time its `next` was called, and when called again started a fresh one fed the earlier answers, refusing if it yielded a different step on the way. Flows stayed reusable, so a test walked both branches of one node, and they recorded, replayed from JSON, retried, ran a `Parallel` with cancellation, read the context through `Ask` and fell back through `onExhausted` as continuation flows do. Values and the error union were typed through `yield*` on TypeScript 5.1. Making nodes iterable, so `yield* node` needed no wrapper, passed the whole suite, and Jest and Vitest judged equality as before. The `Kleisli laws` were not checked against generator flows. It also cost:
-
-- Speed: generator flows ran at about 1.6 times the cost of continuations, and the iterator added about 0.1 µs to every node, generator or not.
-- A node copied with object spread lost its hidden iterator, so `yield*` on the copy threw.
-- A flow's context type had to be intersected across the yielded steps, or a step that reads none erased the requirement.
-
-The nesting that dependent values cost is the price of keeping control in functions, and the `Composing Larger Flows` patterns keep it low.
+- **`step` wraps an Effect for `yield*`; nodes stay plain data.** Iterable nodes read closest to `await`, but every node would carry a hidden iterator, a node copied with object spread lost it, and code that never used `gen` paid for it. A plain `yield effect` cannot be typed, since TypeScript gives a plain `yield` one result type. The name is `step` because `use` clashes with React's and `run` suggests it runs at once.
+- **A proxy guards the wrapper, and nothing else.** Any use of a step but `yield*` throws an `EffectTypeError`, a harness error, so one inside a Command's function rejects the run rather than being retried. The proxy cannot tell `yield*` from a spread, since both read `Symbol.iterator`, so `gen` claims the marker a step's iterator yields, and the iterator's `finally` throws when nothing claimed it. Proxying nodes was rejected: Jest's and Vitest's `toEqual` read `Symbol.iterator` to probe iterability, so every test comparing nodes would throw, and `structuredClone` refuses a proxy. Node's `inspect` reads a proxy's target without running its traps, so the logging hint sits on the target.
+- **A step that stops the flow runs the body's `catch` and `finally`.** `gen` throws a `FlowStopped` error into the waiting generator. Only that error coming back out is accepted; a `catch` that returns or carries on, a different error, and a `yield*` inside `finally` while stopping reject the run. Abandoning the generator instead left a `try`/`catch` around a step silently doing nothing, the worst surprise of the set. The stop carries neither the original error nor whether it was an abort or an I/O fault, which keeps provenance out of user code, and the outcome stays the original `Failure`.
+- **A harness error stops no generator.** Running user code while the run is already broken could hide the real error behind a `catch`. The cost, `finally` not running on a rejected run, is a documented sharp edge.
+- **A body runs again only when it has to, and is checked when it does.** A run advances one generator live, so a run, a replay and a straight walk run the body once. Answering an earlier step again, as a test walking a second branch or a `Retry` repeating the flow does, starts a fresh generator fed the earlier answers, kept as a linked list rather than copied; this is what made `flow(fn)` slow. A fresh run that asks for a different step is refused, naming both. An opt-in mode that ran every part twice, after React's StrictMode, was dropped: the check fires in exactly the tests that walk branches.
+- **A run of pure steps is fed straight back,** not through `chain`, so 5,000 `yield* step(Success(i))` in a loop do not grow the stack.
+- **V8's error for `yield*` on a node gets a hint.** It has two wordings, `yield* (intermediate value) is not iterable` and `object is not iterable (cannot read property Symbol(Symbol.iterator))`; the second is not unique to `yield*`, so the hint says "if it came from yield*" and keeps the original as `cause`. Other engines keep their own message.
+- **`Ask()` with no argument succeeds with the context,** as `Command` defaults its own `next`, so a body reads it with `yield* step(Ask())`. Only a call with no argument: an explicit `undefined` still throws, since it is usually a misspelt name.
+- **Speed is not a documented cost.** Generator flows ran at about 1.6 times the cost of pipelines in the spike, which is not material, and code that does not use `gen` pays only a map lookup on the path where a node fails.
+- **The Quick Start shows both styles, the pipeline first,** since Testing Without Mocks and later sections build on its steps, and the generator version is explained in its terms. A test keeps the two recording the same trace.
 
 ### No catch
 
@@ -655,7 +656,7 @@ The exception, recovering from `Retry` exhaustion inside the flow, became `Retry
 - Retry-then-fallback is a standard resilience pairing (Polly, resilience4j), so the demand was predictable.
 - It completes `Retry`'s own failure handling rather than adding catch.
 
-The ceiling stands: no general catch, only an I/O fault is recoverable (from anywhere in the wrapped tree, deliberately), `onExhausted` is per-use, and a cancelled branch skips it.
+The ceiling stands: no general catch, only an I/O fault is recoverable (from anywhere in the wrapped tree, deliberately), `onExhausted` is per-use, and a cancelled branch skips it. A `catch` around `yield*` in a generator flow runs, so it can log, but a `catch` that recovers is refused, which keeps this ceiling.
 
 ### `attempts: 0` throws
 
@@ -701,7 +702,7 @@ A signal read that way makes the function throw, which is an I/O fault. So a `Re
 
 ### No finalizer inside a flow
 
-Cleanup for a run, a transaction included, is a try/finally around `runEffect` in the shell.
+Cleanup for a run, a transaction included, is a try/finally around `runEffect` in the shell. A generator flow's `finally` runs code that needs no steps; a `yield*` there while the flow stops is refused.
 
 ### Nested pipelines for dependent values are a TypeScript cost only
 
@@ -734,6 +735,8 @@ It was dropped because its syntax hides how it runs:
 
 Newcomers from `async`/`await` get the README's `Coming from async/await` section instead, which maps what they would write to the flow that does the same.
 
+`gen` is the generator form this section's spike lacked. It advances its body live, so code in it runs once per run rather than once per step; it copies no answers, keeping them as a shared list; and it keeps the error union in TypeScript. It also keeps the two habits `flow(fn)` needed guards against loud: an `async function*` is refused, and a `catch` that recovers rejects the run.
+
 ### No loop helper; a loop is taught as two parts
 
 `Loop(start, pass)`, whose pass returned `Again(state)` to go round again or took a separate `while` condition, was proposed and dropped before it was built. It removed the self-call from a loop whose passes need each other's answers. But it read no more like the loop a newcomer from `async`/`await` would write than the recursion it replaced, and `Again` would have been a seventh node type for `chain` and the interpreter to carry.
@@ -742,6 +745,8 @@ The README splits a loop the way its `async` version is usually written: a step 
 
 - When getting the list is itself a loop, as with cursor paging, that loop stays an ordinary `async` function called from one Command, which keeps the Command's function a single call. The README states the cost: one trace step holding the whole list, a `Retry` that starts again from the first page, and a loop no flow test can see.
 - Recursion through a Command's `next` gets one sentence, for a loop that has to decide something on each pass. The recursive paging example was dropped, since recursion is the hardest thing in a flow to follow.
+
+A generator flow loops with `for` and `yield*`, as `async` code does; each pass gets its own path in the trace.
 
 ### A `TimeParadox` after a flow changes shape is the design
 
@@ -882,7 +887,7 @@ The signal edge was narrowed, not guarded, in October 2026. It used to cover any
 
 ## Tests
 
-The runtime tests are in `test/`, a file for each concern (`core`, `retry`, `parallel`, `hooks`, `recording`, `replay`, `examples` and `docs`), with what more than one file needs in `test/helpers.js`, including the user-registration domain that is their running example. `registerUserFlow` has the same shape as the README's Quick Start, so the tests and the documentation demonstrate one idiom. Until October 2026 every runtime test was in one file, `test/all.js`, which reached 7,700 lines, three and a half times `index.js`. The case for keeping `index.js` whole does not carry over: nothing in the tests is followed from one suite into another, since each suite resets the hooks and reads top to bottom, so a split by concern cost only a shared helpers file. The split moved every test unchanged, and the full title of each was compared before and after. The Recording and replay suite, about 2,300 lines, became `Recording` and `Replay`, along runs of tests that were already grouped by theme.
+The runtime tests are in `test/`, a file for each concern (`core`, `retry`, `parallel`, `hooks`, `recording`, `replay`, `gen`, `examples` and `docs`), with what more than one file needs in `test/helpers.js`, including the user-registration domain that is their running example. `registerUserFlow` has the same shape as the README's Quick Start, so the tests and the documentation demonstrate one idiom. Until October 2026 every runtime test was in one file, `test/all.js`, which reached 7,700 lines, three and a half times `index.js`. The case for keeping `index.js` whole does not carry over: nothing in the tests is followed from one suite into another, since each suite resets the hooks and reads top to bottom, so a split by concern cost only a shared helpers file. The split moved every test unchanged, and the full title of each was compared before and after. The Recording and replay suite, about 2,300 lines, became `Recording` and `Replay`, along runs of tests that were already grouped by theme.
 
 The test names say what each suite covers. These are the conventions they follow.
 

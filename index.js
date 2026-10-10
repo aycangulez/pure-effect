@@ -4,12 +4,14 @@
 //
 // 1. Types: the JSDoc shapes of the nodes a flow is made of.
 // 2. Building flows: the constructors; the checks, error messages and kinds of failure the later sections
-//    share, `checkOptions` and `Retry`'s defaults among them; and `effectPipe`, with the `chain` that joins its
-//    steps and the `flowInputs` it records for `onRun`.
+//    share, `checkOptions` and `Retry`'s defaults among them; `effectPipe`, with the `chain` that joins its
+//    steps, the stop listeners `chain` keeps for generator flows, and the `flowInputs` it records for `onRun`;
+//    and `step` and `gen`, which build a flow from a generator function.
 // 3. Configuration: the hook types and their defaults, `configureEffect` and its layers, and `chainHooks`, which
 //    merges them.
 // 4. Running flows: the helpers `Retry`, `Parallel` and Commands run on; `interpret`, which builds a run's
-//    `Runtime`, then `execute` and a function for each kind of node, which each take it; and `runEffect`.
+//    `Runtime`, then `stopAt`, which tells a waiting generator flow its step stopped, `execute` and a function
+//    for each kind of node, which each take it; and `runEffect`.
 // 5. Recording and replay: the trace format and replay errors, copying values and errors into a trace,
 //    `recorder` and `recordEffect`, then `fromTrace`, `replayEffect` and `timeTravel`, each followed by the
 //    functions it hands its parts to.
