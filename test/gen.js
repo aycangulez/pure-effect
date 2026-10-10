@@ -597,3 +597,139 @@ describe('gen: stopping', function () {
         assert.deepEqual(seen, ['finally']);
     });
 });
+
+describe('gen: the same as a pipeline', function () {
+    beforeEach(() => configureEffect());
+    beforeEach(() => db.users.clear());
+
+    const input = { email: 'test@test.com', password: 'password123' };
+
+    it('should walk the same Commands as registerUserFlow', function () {
+        const piped = /** @type {any} */ (registerUserFlow(input));
+        const generated = /** @type {any} */ (registerUserGen(input));
+        assert.equal(commandName(generated), commandName(piped));
+        assert.equal(commandName(generated.next(null)), commandName(piped.next(null)));
+        assert.deepEqual(generated.next({ id: 1 }), piped.next({ id: 1 }));
+    });
+
+    it('should show onStep the same names and paths', async function () {
+        /** @type {string[][]} */
+        const steps = [[], []];
+        for (const [i, flow] of [registerUserFlow, registerUserGen].entries()) {
+            db.users.clear();
+            await runEffect(
+                flow(input),
+                {},
+                {
+                    onStep: async (name, type, op, path) => {
+                        steps[i].push(`${type} ${name} ${path}`);
+                        return op();
+                    }
+                }
+            );
+        }
+        assert.deepEqual(steps[1], steps[0]);
+    });
+
+    it('should record the same trace, and replay it from JSON with no I/O', async function () {
+        const piped = await recordEffect(registerUserFlow, input);
+        db.users.clear();
+        const generated = await recordEffect(registerUserGen, input);
+        /** @param {import('../index.js').TraceEntry[]} trace */
+        const shape = (trace) => trace.map(({ command, path }) => ({ command, path }));
+        assert.deepEqual(shape(generated.trace.trace), shape(piped.trace.trace));
+
+        let io = 0;
+        const saveUser = db.saveUser;
+        db.saveUser = async (user) => {
+            io++;
+            return saveUser.call(db, user);
+        };
+        try {
+            const replay = await replayEffect(registerUserGen(input), JSON.parse(JSON.stringify(generated.trace)));
+            assert.deepEqual(replay.result, generated.result);
+            assert.deepEqual(replay.unreached, []);
+            assert.equal(io, 0);
+        } finally {
+            db.saveUser = saveUser;
+        }
+    });
+
+    it('should hand onRun the input, so a hook-based recorder can rebuild the flow', async function () {
+        // recordEffect is handed the input itself, so only onRun shows that gen recorded it.
+        /** @type {unknown} */
+        let initialInput;
+        await runEffect(
+            registerUserGen(input),
+            {},
+            {
+                onRun: async (_effect, op, _flowName, given) => {
+                    initialInput = given;
+                    return op();
+                }
+            }
+        );
+        assert.deepEqual(initialInput, input);
+    });
+
+    it('should compose with effectPipe in both directions', async function () {
+        const double = (/** @type {number} */ x) =>
+            Command(function cmdDouble() {
+                return x * 2;
+            });
+        const doubled = gen(function* (/** @type {number} */ x) {
+            return yield* step(double(x));
+        });
+        const inPipe = effectPipe(doubled, (/** @type {number} */ x) => Success(x + 1));
+        assert.deepEqual(await runEffect(inPipe(2)), Success(5));
+        const aroundPipe = gen(function* (/** @type {number} */ x) {
+            return (yield* step(effectPipe(double, double)(x))) + 1;
+        });
+        assert.deepEqual(await runEffect(aroundPipe(2)), Success(9));
+    });
+});
+
+describe('gen: Kleisli laws', function () {
+    // `gen(function* (x) { return yield* step(f(x)) })` must be `f`, and `gen(function* (x) { return x })` must be
+    // `Success`, observed through runEffect, since two equivalent flows hold different closures.
+    beforeEach(() => configureEffect());
+
+    const f = (/** @type {number} */ x) =>
+        Command(function cmdDouble() {
+            return x * 2;
+        });
+    const g = (/** @type {number} */ x) => Ask((/** @type {any} */ ctx) => Success(x + ctx.bonus));
+    const context = { bonus: 5 };
+
+    it('should treat a body that returns its input as Success', async function () {
+        const pure = gen(function* (/** @type {number} */ x) {
+            return x;
+        });
+        assert.deepEqual(await runEffect(pure(3)), Success(3));
+    });
+
+    it('should treat a body that returns one step as that step', async function () {
+        const lifted = gen(function* (/** @type {number} */ x) {
+            return yield* step(f(x));
+        });
+        assert.deepEqual(await runEffect(lifted(3)), await runEffect(f(3)));
+        assert.deepEqual(await runEffect(lifted(3)), Success(6));
+    });
+
+    it('should give the same result nested as flat', async function () {
+        const flat = gen(function* (/** @type {number} */ x) {
+            const doubled = yield* step(f(x));
+            return yield* step(g(doubled));
+        });
+        const inner = gen(function* (/** @type {number} */ x) {
+            return yield* step(f(x));
+        });
+        const nested = gen(function* (/** @type {number} */ x) {
+            const doubled = yield* step(inner(x));
+            return yield* step(g(doubled));
+        });
+        assert.deepEqual(await runEffect(flat(3), context), Success(11));
+        assert.deepEqual(await runEffect(nested(3), context), await runEffect(flat(3), context));
+        assert.deepEqual(await runEffect(effectPipe(f, g)(3), context), Success(11));
+    });
+});
