@@ -1,7 +1,20 @@
 // @ts-check
 
 import { strict as assert } from 'assert';
-import { Success, Failure, Command, Retry, Parallel, effectPipe, runEffect, configureEffect } from '../index.js';
+import {
+    Success,
+    Failure,
+    Command,
+    Retry,
+    Parallel,
+    effectPipe,
+    runEffect,
+    configureEffect,
+    recordEffect,
+    replayEffect,
+    gen,
+    step
+} from '../index.js';
 import * as lib from '../index.js';
 import ts from 'typescript';
 import { readFileSync } from 'node:fs';
@@ -316,6 +329,29 @@ describe('Documented sharp edges', function () {
         assert.deepEqual(await runEffect(Command(pageSize)), Success(50));
         assert.deepEqual(await runEffect(Parallel([Command(pageSize)])), Success(['a signal']));
         assert.deepEqual(await runEffect(Parallel([Command(() => pageSize())])), Success([50]), 'wrapped, it works');
+    });
+
+    it("should run no generator flow's finally when the run is rejected", async function () {
+        // Pinned deliberately: a harness error, such as this TimeParadox, rejects the run without running the body's
+        // catch or finally, since a catch could otherwise hide the real error.
+        /** @type {string[]} */
+        const seen = [];
+        const recorded = gen(function* () {
+            yield* step(Command(function cmdFirst() {}));
+            yield* step(Command(function cmdSecond() {}));
+        });
+        const trace = (await recordEffect(() => recorded(undefined), undefined)).trace;
+        const changed = gen(function* () {
+            try {
+                yield* step(Command(function cmdFirst() {}));
+                yield* step(Parallel([Command(function cmdSecond() {})]));
+            } finally {
+                seen.push('finally');
+            }
+        });
+        const replay = await replayEffect(changed(undefined), trace);
+        assert.equal(/** @type {any} */ (replay.result).error.name, 'TimeParadox');
+        assert.deepEqual(seen, []);
     });
 });
 

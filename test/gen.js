@@ -50,6 +50,18 @@ const messageOf = async (fn) => {
     return 'nothing was thrown';
 };
 
+/** @param {string} name */
+const boom = (name) =>
+    Command(
+        Object.defineProperty(
+            () => {
+                throw new Error('io');
+            },
+            'name',
+            { value: name }
+        )
+    );
+
 describe('step', function () {
     beforeEach(() => configureEffect());
 
@@ -379,5 +391,209 @@ describe('gen', function () {
             });
             assert.deepEqual(await runEffect(flow(undefined), { tenant: 't1' }), Success('t1'));
         });
+    });
+});
+
+describe('gen: stopping', function () {
+    beforeEach(() => configureEffect());
+
+    /** @type {string[]} */
+    let seen = [];
+    beforeEach(() => (seen = []));
+
+    /**
+     * A flow that waits at `effect` inside try/catch/finally, recording which blocks ran and rethrowing.
+     * @param {import('../index.js').Effect<any, any, any>} effect
+     */
+    const watching = (effect) =>
+        gen(function* () {
+            try {
+                return yield* step(effect);
+            } catch (e) {
+                seen.push(`catch:${/** @type {Error} */ (e).name}`);
+                throw e;
+            } finally {
+                seen.push('finally');
+            }
+        })(undefined);
+
+    it('should run catch and finally when a Command throws, and keep the I/O fault as the outcome', async function () {
+        const result = await runEffect(watching(boom('cmdSave')));
+        assert.equal(result.type, 'Failure');
+        assert.equal(/** @type {any} */ (result).error.message, 'io');
+        assert.deepEqual(seen, ['catch:FlowStopped', 'finally']);
+    });
+
+    it('should stop the body for every way a step can stop the flow', async function () {
+        const failingNext = Command(
+            function cmdLook() {},
+            () => Failure('nope')
+        );
+        const ways = {
+            'a Failure yielded as the flow is built': Failure('early'),
+            "a Failure from a step's next": failingNext,
+            'a Failure inside a Retry': Retry(failingNext),
+            'a Retry out of attempts': Retry(boom('cmdFlaky'), { attempts: 1, delay: 0 }),
+            'a failing Parallel branch': Parallel([Success(1), failingNext])
+        };
+        for (const [way, effect] of Object.entries(ways)) {
+            seen = [];
+            const result = await runEffect(/** @type {any} */ (watching(effect)));
+            assert.equal(result.type, 'Failure', way);
+            assert.deepEqual(seen, ['catch:FlowStopped', 'finally'], way);
+        }
+    });
+
+    it('should not throw into a body that returned its own Failure', async function () {
+        const flow = gen(function* () {
+            try {
+                yield* step(Command(function cmdLook() {}));
+                return Failure('done');
+            } finally {
+                seen.push('finally');
+            }
+        });
+        assert.deepEqual(await runEffect(flow(undefined)), Failure('done'));
+        assert.deepEqual(seen, ['finally']);
+    });
+
+    it('should reject the run when a catch swallows the stop', async function () {
+        const flow = gen(function* () {
+            try {
+                yield* step(boom('cmdSave'));
+            } catch {
+                return 'recovered';
+            }
+        });
+        await assert.rejects(runEffect(flow(undefined)), /kept going after Command 'cmdSave' stopped it/);
+    });
+
+    it('should reject the run when a catch throws another error, keeping it as the cause', async function () {
+        const flow = gen(function* () {
+            try {
+                yield* step(boom('cmdSave'));
+            } catch {
+                throw new Error('mine');
+            }
+        });
+        await assert.rejects(runEffect(flow(undefined)), (/** @type {Error} */ e) => {
+            assert.match(e.message, /threw another error after Command 'cmdSave' stopped it/);
+            assert.equal(/** @type {Error} */ (e.cause).message, 'mine');
+            return true;
+        });
+    });
+
+    it('should reject the run when finally runs a step while stopping', async function () {
+        const flow = gen(function* () {
+            try {
+                yield* step(boom('cmdSave'));
+            } finally {
+                yield* step(Command(function cmdCleanUp() {}));
+            }
+        });
+        await assert.rejects(runEffect(flow(undefined)), /or a finally ran a step/);
+    });
+
+    it('should stop nested flows innermost first, each once', async function () {
+        const inner = gen(function* () {
+            try {
+                yield* step(boom('cmdSave'));
+            } finally {
+                seen.push('inner');
+            }
+        });
+        const outer = gen(function* () {
+            try {
+                yield* step(inner(undefined));
+            } finally {
+                seen.push('outer');
+            }
+        });
+        await runEffect(outer(undefined));
+        assert.deepEqual(seen, ['inner', 'outer']);
+    });
+
+    it('should stop each attempt under Retry, starting the body afresh for the next', async function () {
+        let calls = 0;
+        const flow = gen(function* () {
+            seen.push('start');
+            try {
+                return yield* step(
+                    Command(function cmdFlaky() {
+                        if (++calls < 3) throw new Error('io');
+                        return 'ok';
+                    })
+                );
+            } finally {
+                seen.push('finally');
+            }
+        });
+        assert.deepEqual(await runEffect(Retry(flow(undefined), { attempts: 3, delay: 0 })), Success('ok'));
+        assert.deepEqual(seen, ['start', 'finally', 'start', 'finally', 'start', 'finally']);
+    });
+
+    it('should let the body go on when onExhausted recovers', async function () {
+        const flow = gen(function* () {
+            const value = yield* step(
+                Retry(boom('cmdPrice'), { attempts: 1, delay: 0, onExhausted: () => Success('cached') })
+            );
+            return `${value}!`;
+        });
+        assert.deepEqual(await runEffect(flow(undefined)), Success('cached!'));
+    });
+
+    it('should stop a cancelled branch, the failing branch and the flow around them', async function () {
+        const slow = gen(function* () {
+            try {
+                yield* step(Command(() => new Promise((resolve) => setTimeout(resolve, 20))));
+                yield* step(Command(function cmdAfter() {}));
+            } finally {
+                seen.push('slow');
+            }
+        });
+        const failing = gen(function* () {
+            try {
+                yield* step(boom('cmdBad'));
+            } finally {
+                seen.push('failing');
+            }
+        });
+        const outer = gen(function* () {
+            try {
+                yield* step(Parallel([slow(undefined), failing(undefined)]));
+            } finally {
+                seen.push('outer');
+            }
+        });
+        assert.equal((await runEffect(outer(undefined))).type, 'Failure');
+        assert.deepEqual([...seen].sort(), ['failing', 'outer', 'slow']);
+    });
+
+    it('should stop a failed branch under settled while the flow around it goes on', async function () {
+        const failing = gen(function* () {
+            try {
+                yield* step(boom('cmdBad'));
+            } finally {
+                seen.push('failing');
+            }
+        });
+        const outer = gen(function* () {
+            const outcomes = yield* step(Parallel([failing(undefined), Success(1)], { settled: true }));
+            return outcomes.map((outcome) => outcome.type);
+        });
+        assert.deepEqual(await runEffect(outer(undefined)), Success(['Failure', 'Success']));
+        assert.deepEqual(seen, ['failing']);
+    });
+
+    it('should keep the waiting flows on a root that effectPipe or gen copied', async function () {
+        const watched = gen(function* () {
+            try {
+                yield* step(boom('cmdSave'));
+            } finally {
+                seen.push('finally');
+            }
+        });
+        await runEffect(effectPipe(() => watched(undefined))(undefined));
+        assert.deepEqual(seen, ['finally']);
     });
 });

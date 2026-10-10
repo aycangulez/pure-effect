@@ -490,16 +490,50 @@ const asEffect = (value, source) => {
  * @param {Effect} effect - The current Effect object
  * @param {(value: any) => Effect} fn - The next function to run if the current effect is a Success
  * @param {Effect} [from] - The node whose `next` returned `effect`, which an error names
+ * @param {StopListener} [onStop] - Set by `gen`: told when a Failure passes `fn`, and kept on each copy for
+ *        `execute`'s `stopAt`, which calls it when the copy itself stops the flow
  * @returns {Effect} The composed Effect
  */
-const chain = (effect, fn, from) => {
+const chain = (effect, fn, from, onStop) => {
     // Before reading `.type`, so a missing return is named rather than thrown as a bare TypeError.
     if (!isEffect(effect)) throw effectTypeError(effect, from ? nextOf(from) : 'A continuation');
     if (effect.type === 'Success') return asEffect(fn(effect.value), `Step '${fn.name || 'anonymous'}'`);
-    if (effect.type === 'Failure') return effect;
-    const next = (/** @type {any} */ value) => chain(effect.next(value), fn, effect);
+    if (effect.type === 'Failure') {
+        onStop?.(from);
+        return effect;
+    }
+    const next = (/** @type {any} */ value) => chain(effect.next(value), fn, effect, onStop);
     // A Command goes back through its constructor, which checks the function of one built by hand.
-    return effect.type === 'Command' ? Command(effect.cmd, next, effect.meta) : { ...effect, next };
+    const copy = effect.type === 'Command' ? Command(effect.cmd, next, effect.meta) : { ...effect, next };
+    const waiting = stopListeners.get(effect);
+    if (onStop) stopListeners.set(copy, [...(waiting ?? []), onStop]);
+    else if (waiting) stopListeners.set(copy, waiting);
+    return copy;
+};
+
+/**
+ * Told that the flow stopped at `node`, or at a Failure when `node` is undefined, so a generator flow waiting on it
+ * runs its `catch` and `finally` blocks.
+ * @typedef {(node: Effect | undefined) => void} StopListener
+ */
+
+/**
+ * The generator flows waiting on each node `chain` copied for them, innermost first. `chain` calls one when a Failure
+ * passes the continuation it guards, and `execute`'s `stopAt` calls them all when the node itself stops the flow.
+ * @type {WeakMap<Effect, StopListener[]>}
+ */
+const stopListeners = new WeakMap();
+
+/**
+ * Copies a flow's root, which `flowInputs` is keyed on, keeping the generator flows waiting on it.
+ * @param {Effect} tree
+ * @returns {Effect}
+ */
+const copyRoot = (tree) => {
+    const root = { ...tree };
+    const waiting = stopListeners.get(tree);
+    if (waiting) stopListeners.set(root, waiting);
+    return root;
 };
 
 /**
@@ -531,7 +565,7 @@ const effectPipe = (...fns) => {
     return (start) => {
         const tree = fns.reduce((eff, fn) => chain(eff, fn), /** @type {Effect} */ (Success(start)));
         // Keyed on a copy, since the last step can return an object other flows share, such as a constant Failure.
-        const root = { ...tree };
+        const root = copyRoot(tree);
         flowInputs.set(root, start);
         return root;
     };
@@ -830,7 +864,12 @@ const advance = (flow, run, trail, resume) => {
             resume = (g) => g.next(effect.value);
             continue;
         }
-        return chain(effect, (answer) => continueBody(flow, run, position, before, signature, answer));
+        return chain(
+            effect,
+            (answer) => continueBody(flow, run, position, before, signature, answer),
+            undefined,
+            (node) => stopBody(flow, run, position, before, signature, node)
+        );
     }
 };
 
@@ -848,6 +887,45 @@ const continueBody = (flow, run, position, trail, signature, answer) => {
     const current = runAt(flow, run, position, trail, signature);
     current.position = position + 1;
     return advance(flow, current, { signature, answer, earlier: trail }, (g) => g.next(answer));
+};
+
+/**
+ * Throws a stop into the body waiting at a step that stopped the flow, so its `catch` and `finally` blocks run. Only
+ * the stop coming back out is accepted: a body that swallows it, throws something else, or yields while stopping
+ * rejects the run.
+ * @param {GenFlow} flow
+ * @param {BodyRun} run
+ * @param {number} position
+ * @param {Trail} trail
+ * @param {string} signature
+ * @param {Effect | undefined} node - The node that stopped the flow; undefined for a Failure
+ */
+const stopBody = (flow, run, position, trail, signature, node) => {
+    const current = runAt(flow, run, position, trail, signature);
+    current.state = 'done';
+    const where = node && isPending(node) ? describeStep(node) : 'a Failure';
+    const advice = "return the error as data inside the Command's function, or use Retry's onExhausted.";
+    // Carries neither the error nor what kind of stop it was, so user code cannot branch on either.
+    const stop = Object.assign(new Error(`The flow stopped at ${where}. Nothing can be caught here: ${advice}`), {
+        name: 'FlowStopped'
+    });
+    try {
+        current.generator.throw(stop);
+    } catch (e) {
+        if (e === stop) return;
+        if (hasMark(e, harnessError)) throw e;
+        const error = malformed(
+            `A catch in a generator flow threw another error after ${where} stopped it; a catch around yield* ` +
+                'cannot recover, so let the stop pass.',
+            undefined
+        );
+        throw Object.defineProperty(error, 'cause', { value: e, writable: true, configurable: true });
+    }
+    throw malformed(
+        `A generator flow kept going after ${where} stopped it: a catch swallowed the stop, or a finally ran a ` +
+            `step. Nothing can be caught here: ${advice}`,
+        undefined
+    );
 };
 
 /**
@@ -874,7 +952,7 @@ const gen = (body) => {
     return (input) => {
         const flow = { body, input };
         // Keyed on a copy, as `effectPipe`'s root is, since a body can return a shared object.
-        const root = { ...advance(flow, startRun(flow), null, (g) => g.next()) };
+        const root = copyRoot(advance(flow, startRun(flow), null, (g) => g.next()));
         flowInputs.set(root, input);
         return root;
     };
@@ -1230,6 +1308,19 @@ const interpret = async (effect, context = {}, callConfig = {}, fastRetry = fals
 };
 
 /**
+ * Tells the generator flows waiting on `node` that it stopped the flow, innermost first. The other end of the
+ * protocol is `chain`, which keeps the listeners on each node it copies. Returns `result`, for a `return` to pass on.
+ *
+ * @param {Effect} node
+ * @param {SuccessState | FailureState | IoFaultState} result
+ * @returns {SuccessState | FailureState | IoFaultState}
+ */
+const stopAt = (node, result) => {
+    stopListeners.get(node)?.forEach((listener) => listener(node));
+    return result;
+};
+
+/**
  * Walks a subtree until it reaches a Success, a Failure or an I/O fault. Every node but `Ask` runs in its
  * own function, which returns a Success carrying the value for the node's `next`, or what stops the subtree.
  *
@@ -1246,7 +1337,7 @@ const execute = async (runtime, eff, signal, path = '') => {
     let from;
     while (isPending(eff)) {
         // A Command already in flight cannot be stopped, but the next one never starts.
-        if (signal?.aborted) return cancelledBranch();
+        if (signal?.aborted) return stopAt(eff, cancelledBranch());
         if (eff.type === 'Ask') {
             from = eff;
             eff = eff.next(runtime.context);
@@ -1259,7 +1350,7 @@ const execute = async (runtime, eff, signal, path = '') => {
                 : eff.type === 'Parallel'
                   ? await runParallel(runtime, eff, signal, stepPath)
                   : await runCommand(runtime, eff, signal, stepPath);
-        if (outcome.type !== 'Success') return outcome;
+        if (outcome.type !== 'Success') return stopAt(eff, outcome);
         // Outside every catch: `next` and the pure steps it reaches are code, not I/O, so a throw there
         // rejects the run.
         from = eff;
