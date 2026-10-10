@@ -167,11 +167,11 @@ A flow does what `async`/`await` code does, as data. Instead of making a call an
 
 | With `async`/`await` | In a generator flow | In a pipeline |
 | --- | --- | --- |
-| `const user = await db.findUser(email)` | `const user = yield* step(Command(() => db.findUser(email)))` | a Command: `Command(() => db.findUser(email), next)` |
-| the code after the `await`, which uses `user` | the code after the `yield*` | the Command's `next`, which receives `user` |
-| an `if` on `user` after the `await` | the same `if` | a branch in `next` |
+| `const user = await db.findUser(email)` | `const user = yield* step(findUser(email))`, where `findUser` returns the Command | a Command: `Command(() => db.findUser(email), next)` |
+| the code after the `await`, which uses `user` | the next `yield*`, which hands `user` to the next step | the Command's `next`, which receives `user` |
+| an `if` on `user` after the `await` | a step that receives `user` and returns `Success` or `Failure`, as `ensureEmailAvailable` does | a branch in `next` |
 | `return value` | `return value` | `Success(value)` |
-| `throw` to stop | `return Failure(error)` | `Failure(error)` |
+| `throw` to stop | a step that returns `Failure(error)` | `Failure(error)` |
 | a call inside `try`/`catch` | catch inside the Command's function and return a value to branch on; a `catch` around `yield*` can log and rethrow, nothing more | catch inside the Command's function and return a value for `next` to branch on; see [Which Errors Are Data](#which-errors-are-data) |
 | a loop that retries a call | `yield* step(Retry(Command(...), options))` | `Retry(Command(...), options)` |
 | `await Promise.all([...])` | `yield* step(Parallel([...]))` | `Parallel([...])` |
@@ -181,7 +181,7 @@ A flow does what `async`/`await` code does, as data. Instead of making a call an
 | a value from the request, such as the tenant | `yield* step(Ask())` | `Ask`; see [Passing Runtime Context](#passing-runtime-context) |
 | `Date.now()` or a random ID | `yield* step(Command(() => Date.now()))` | a Command, so a replay gets the recorded value |
 
-One rule is behind the pipeline column. In `async` code, an `if` or a loop can have an `await` inside it; in a pipeline it can't, so each decision lives in a small function of its own, which a test can call directly. A generator flow lifts that rule: an `if` or a `for` loop can wrap `yield*` as it wraps `await`, and you test its decisions by answering its Commands, or by moving them into plain functions.
+One rule is behind both columns. In `async` code, an `if` can sit between two `await`s. In a flow, each decision lives in a small step function that receives the answer it depends on and returns `Success` or `Failure`, which a test can call directly. A pipeline joins those steps with `effectPipe`; a generator flow puts them in order with `yield*` and keeps their results in variables. A generator body can still wrap an `if` around a `yield*`, but that decision can then be tested only by walking the whole flow, so keep the body to putting steps in order. A `for` loop that runs a step for each item is fine, since it decides nothing.
 
 The Quick Start's `registerUserFlow` is this function, translated row by row: each `await` became a Command, the code after it became that Command's `next`, and each `throw` became a `Failure`.
 
