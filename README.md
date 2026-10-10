@@ -959,7 +959,7 @@ const registerUser = gen(function* (input: { email: string }) {
 // (input: { email: string }) => Effect<User, 'EMAIL_TAKEN' | the errors findUser and saveUser declare>
 ```
 
-`yield* x` without `step`, reading a property of a step, and an `async function*` do not compile. `yield step(x)` without the star does, and fails when it runs. Name the context `Ask()` reads as `Ask<AppContext>()`.
+`yield* x` without `step`, reading a property of a step, returning a step or a Promise, and an `async function*` do not compile, and a body that returns an untyped value keeps its steps' errors. `yield step(x)` without the star does, and fails when it runs. Name the context `Ask()` reads as `Ask<AppContext>()`.
 
 ## Why Pure Effect
 

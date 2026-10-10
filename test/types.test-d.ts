@@ -1119,3 +1119,20 @@ gen(function* () {
 gen(async function* () {
     yield* step(findGenUser('a'));
 });
+
+// A body that returns an untyped value, such as a parsed row, keeps the errors of its steps; the returned value is any.
+declare const untypedRow: any;
+const returnsAny = gen(function* (email: string) {
+    yield* step(findGenUser(email));
+    return untypedRow;
+});
+expectType<Effect<any, 'DB_DOWN', unknown>>(returnsAny('a@b.c'));
+
+// @ts-expect-error a step is returned with yield*, not as it is
+gen(function* () {
+    return step(findGenUser('a'));
+});
+// @ts-expect-error a Promise cannot be returned; put the call in a Command
+gen(function* () {
+    return Promise.resolve(1);
+});
