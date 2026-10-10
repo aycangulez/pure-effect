@@ -9,7 +9,7 @@
 - Inject context without touching function signatures
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks
-- Zero dependencies and a single file, about 11 KB minified and gzipped: nothing to audit, and little added to a serverless cold start
+- Zero dependencies, about 11 KB minified and gzipped
 - Works in JavaScript, and in TypeScript 5.1 or later (full generics, bundled `.d.ts`)
 
 ## Table of Contents
@@ -165,21 +165,23 @@ For a step that returns its Command directly, as in `ensureEmailAvailable(input)
 
 A flow does what `async`/`await` code does, as data. Instead of making a call and waiting for it, a step returns a Command that says which call to make and what to do with the answer. That is what lets a test hand a step an answer instead of mocking the database, and a replay hand it the recorded one. Each thing you would write with `async`/`await` has an equivalent:
 
-| With `async`/`await` | In a generator flow | In a pipeline |
+| `async`/`await` | Generator flow | Pipeline |
 | --- | --- | --- |
-| `const user = await db.findUser(email)` | `const user = yield* step(findUser(email))`, where `findUser` returns the Command | a Command: `Command(() => db.findUser(email), next)` |
-| the code after the `await`, which uses `user` | the next `yield*`, which hands `user` to the next step | the Command's `next`, which receives `user` |
-| an `if` on `user` after the `await` | a step that receives `user` and returns `Success` or `Failure`, as `ensureEmailAvailable` does | a branch in `next` |
+| `await db.findUser(email)` | `yield* step(findUser(email))` | `Command(() => db.findUser(email), next)` |
+| the code after the `await` | the next `yield*` | the Command's `next` |
+| an `if` on a result | a step that returns `Success` or `Failure` | a branch in `next` |
 | `return value` | `return value` | `Success(value)` |
 | `throw` to stop | a step that returns `Failure(error)` | `Failure(error)` |
-| a call inside `try`/`catch` | catch inside the Command's function and return a value to branch on; a `catch` around `yield*` can log and rethrow, nothing more | catch inside the Command's function and return a value for `next` to branch on; see [Which Errors Are Data](#which-errors-are-data) |
-| a loop that retries a call | `yield* step(Retry(Command(...), options))` | `Retry(Command(...), options)` |
+| `try`/`catch` around a call | a catch inside the Command's function | the same |
+| a loop that retries a call | `yield* step(Retry(...))` | `Retry(...)` |
 | `await Promise.all([...])` | `yield* step(Parallel([...]))` | `Parallel([...])` |
-| a `for` loop with an `await` inside | the same `for` loop, with `yield*` | a step that gets the list, then `Parallel(list.map(...), { limit: 1 })` |
-| a `try`/`catch` inside a loop, to keep going past a failure | `yield* step(Parallel(list.map(...), { limit: 1, settled: true }))` | the same `Parallel`, with `settled: true` |
-| a later call that needs two earlier results | the two variables | a named step that passes both on; see [Composing Larger Flows](#composing-larger-flows) |
-| a value from the request, such as the tenant | `yield* step(Ask())` | `Ask`; see [Passing Runtime Context](#passing-runtime-context) |
-| `Date.now()` or a random ID | `yield* step(Command(() => Date.now()))` | a Command, so a replay gets the recorded value |
+| a `for` loop with an `await` inside | the same loop, with `yield*` | `Parallel(list.map(...), { limit: 1 })` |
+| a loop that keeps going past a failure | `Parallel(..., { settled: true })` | the same |
+| a call that needs two earlier results | two variables | a named step that passes both on |
+| a value from the request | `yield* step(Ask())` | `Ask` |
+| `Date.now()` or a random ID | a Command | a Command |
+
+`findUser` stands for a step that returns the Command, as `ensureEmailAvailable` does in the Quick Start. A `catch` around `yield*` can log and rethrow, but it cannot recover; see [Which Errors Are Data](#which-errors-are-data).
 
 One rule is behind both columns. In `async` code, an `if` can sit between two `await`s. In a flow, each decision lives in a small step function that receives the answer it depends on and returns `Success` or `Failure`, which a test can call directly. A pipeline joins those steps with `effectPipe`; a generator flow puts them in order with `yield*` and keeps their results in variables. A generator body can still wrap an `if` around a `yield*`, but that decision can then be tested only by walking the whole flow, so keep the body to putting steps in order. A `for` loop that runs a step for each item is fine, since it decides nothing.
 
@@ -358,7 +360,7 @@ So keep the body to its own variables. When it runs again, it has to ask for the
 
 `return` ends the flow. A plain value is its `Success`, `return Failure(error)` stops it with that error, and returning a Command or any other Effect runs it, as `return fetch(url)` does in an `async` function. A `throw` in the body is a bug, as one in a pipeline step is, and `runEffect` rejects with it.
 
-When a step stops the flow, because its Command threw or it returned a `Failure`, the body's `catch` and `finally` blocks run, as they would for an `await` that rejected. The `catch` gets an error saying where the flow stopped, not the original, which is the flow's `Failure`. It can log, but it cannot recover:
+When a step stops the flow, because its Command threw or it returned a `Failure`, the body's `catch` and `finally` blocks run, as they would for an `await` that rejected. The `catch` gets an error saying where the flow stopped, not the original, which is the flow's `Failure`, so it cannot branch on the original's fields: `e.code` and the like are `undefined`, and `e.name` is `FlowStopped`. It can log, but it cannot recover:
 
 ```js
 const unreliableDb = {
