@@ -1251,17 +1251,21 @@ export declare function effectPipe<
 // The symbol and the iterator's yield type exist only in the declarations, never at runtime: together they are how
 // `gen` reads each step's Effect type out of the body's yield type.
 declare const stepEffect: unique symbol;
+declare const stepContext: unique symbol;
 
 /** A step for `yield*` inside `gen`, which gives back the Effect's value. Using it any other way throws. */
-export type Step<X extends AnyEffect> = {
+// The context is also a function parameter, which TypeScript compares the opposite way to the Effect, so of two steps
+// it merges in a generator's yield type it can only drop the one that reads less context.
+export type Step<X extends AnyEffect, C = EffectContext<X>> = {
     readonly [stepEffect]?: X;
-    [Symbol.iterator](): Generator<Step<X>, EffectValue<X>, unknown>;
+    readonly [stepContext]?: (context: C) => void;
+    [Symbol.iterator](): Generator<Step<X, C>, EffectValue<X>, unknown>;
 };
 
 /** Wraps an Effect for `yield*` inside `gen`: `const user = yield* step(findUser(email))`. */
 export declare function step<X extends AnyEffect>(effect: X): Step<X>;
 
-type StepEffectOf<Y> = Y extends Step<infer X> ? X : never;
+type StepEffectOf<Y> = Y extends Step<infer X, any> ? X : never;
 // An `any` return would match both branches and turn the error union into `any`, so it counts as a plain value.
 type GenIsAny<R> = 0 extends 1 & R ? true : false;
 type ReturnedEffect<R> = GenIsAny<R> extends true ? never : R extends AnyEffect ? R : never;
@@ -1270,7 +1274,7 @@ type GenValue<R> = GenIsAny<R> extends true ? any : R extends AnyEffect ? Effect
 type GenReturnCheck<R> =
     GenIsAny<R> extends true
         ? unknown
-        : [Extract<R, Step<any>>] extends [never]
+        : [Extract<R, Step<any, any>>] extends [never]
           ? [Extract<R, PromiseLike<any>>] extends [never]
               ? unknown
               : { 'a Promise cannot be returned; put the call in a Command': never }
@@ -1293,7 +1297,7 @@ type GenContext<Y, R> = [GenNeeds<StepEffectOf<Y> | ReturnedEffect<R>>] extends 
  * Builds a flow function from a generator function, written with `yield* step(effect)` where `async` code writes
  * `await`. A plain return value is a `Success`; return a `Failure` to stop.
  */
-export declare function gen<I, Y extends Step<any>, R>(
+export declare function gen<I, Y extends Step<any, any>, R>(
     body: ((input: I) => Generator<Y, R, unknown>) & GenReturnCheck<R>
 ): (input: I) => Effect<GenValue<R>, GenError<Y, R>, GenContext<Y, R>>;
 

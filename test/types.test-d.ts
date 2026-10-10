@@ -1142,3 +1142,16 @@ gen(function* () {
 import type { GenValue } from '../index.js';
 // @ts-expect-error CheckedContext is not exported
 import type { CheckedContext } from '../index.js';
+
+// Two steps whose types differ only in how much context they read: TypeScript merges such members of a generator's
+// yield type, and the flow must still require the wider context.
+const readTenantOnly = Ask((c: { tenant: string }) => Success(c.tenant));
+const readTenantAndRequest = Ask((c: { tenant: string; requestId: string }) => Success(c.requestId));
+const bothContexts = gen(function* () {
+    const tenant = yield* step(readTenantOnly);
+    const requestId = yield* step(readTenantAndRequest);
+    return tenant + requestId;
+});
+runEffect(bothContexts(undefined), { tenant: 'acme', requestId: 'r1' });
+// @ts-expect-error the second step reads requestId
+runEffect(bothContexts(undefined), { tenant: 'acme' });
