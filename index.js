@@ -1196,15 +1196,25 @@ const replayCutError = (path) =>
     );
 
 /**
+ * Cancellation scopes a branch's throw aborted, and the scopes linked under them. `stopAt` stops no generator flow
+ * under one, since the throw rejects the run.
+ * @type {WeakSet<AbortSignal>}
+ */
+const thrownScopes = new WeakSet();
+
+/**
  * A cancellation scope for one Parallel, linked to the enclosing one so cancellation nests.
  * @param {AbortSignal} [signal] - The enclosing Parallel's signal, if any
  * @returns {{ scope: AbortController, unlink: () => void }}
  */
 const linkedScope = (signal) => {
     const scope = new AbortController();
-    const relay = () => scope.abort();
+    const relay = () => {
+        if (signal && thrownScopes.has(signal)) thrownScopes.add(scope.signal);
+        scope.abort();
+    };
     if (signal) {
-        if (signal.aborted) scope.abort();
+        if (signal.aborted) relay();
         else signal.addEventListener('abort', relay, { once: true });
     }
     const unlink = () => {
@@ -1312,14 +1322,32 @@ const interpret = async (effect, context = {}, callConfig = {}, fastRetry = fals
 /**
  * Tells the generator flows waiting on `node` that it stopped the flow, innermost first. The other end of the
  * protocol is `chain`, which keeps the listeners on each node it copies. Returns `result`, for a `return` to pass on.
+ * Under a scope a throw cancelled it tells none, since the run is about to reject and a `catch` could hide why.
  *
  * @param {Effect} node
  * @param {SuccessState | FailureState | IoFaultState} result
+ * @param {AbortSignal | undefined} signal
  * @returns {SuccessState | FailureState | IoFaultState}
  */
-const stopAt = (node, result) => {
+const stopAt = (node, result, signal) => {
+    if (signal && thrownScopes.has(signal)) return result;
     stopListeners.get(node)?.forEach((listener) => listener(node));
     return result;
+};
+
+/**
+ * `stopAt` for a node a cancellation skipped, which also tells the generator flows built inside a skipped `Retry` or
+ * `Parallel`, innermost first, since each body ran up to its first step as it was built.
+ *
+ * @param {Effect} node
+ * @param {SuccessState | FailureState | IoFaultState} result
+ * @param {AbortSignal | undefined} signal
+ * @returns {SuccessState | FailureState | IoFaultState}
+ */
+const stopSkipped = (node, result, signal) => {
+    if (node.type === 'Retry') stopSkipped(node.effect, result, signal);
+    if (node.type === 'Parallel') node.effects.forEach((branch) => stopSkipped(branch, result, signal));
+    return stopAt(node, result, signal);
 };
 
 /**
@@ -1339,7 +1367,7 @@ const execute = async (runtime, eff, signal, path = '') => {
     let from;
     while (isPending(eff)) {
         // A Command already in flight cannot be stopped, but the next one never starts.
-        if (signal?.aborted) return stopAt(eff, cancelledBranch());
+        if (signal?.aborted) return stopSkipped(eff, cancelledBranch(), signal);
         if (eff.type === 'Ask') {
             from = eff;
             eff = eff.next(runtime.context);
@@ -1352,7 +1380,7 @@ const execute = async (runtime, eff, signal, path = '') => {
                 : eff.type === 'Parallel'
                   ? await runParallel(runtime, eff, signal, stepPath)
                   : await runCommand(runtime, eff, signal, stepPath);
-        if (outcome.type !== 'Success') return stopAt(eff, outcome);
+        if (outcome.type !== 'Success') return stopAt(eff, outcome, signal);
         // Outside every catch: `next` and the pure steps it reaches are code, not I/O, so a throw there
         // rejects the run.
         from = eff;
@@ -1558,6 +1586,7 @@ const settleBranches = async (runtime, effects, limit, signal, branchPath, cance
         // Read-then-abort is atomic here, so exactly one branch is the trigger.
         if (cancelsOthers(thrown[i] !== undefined, results[i])) {
             if (!scope.signal.aborted) triggered[i] = true;
+            if (thrown[i] !== undefined) thrownScopes.add(scope.signal);
             scope.abort();
         }
     };

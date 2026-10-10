@@ -628,6 +628,47 @@ describe('gen: stopping', function () {
         assert.deepEqual(seen, ['finally']);
     });
 
+    it('should run no catch or finally in a sibling branch when a branch throws, so the real error is kept', async function () {
+        // A throw rejects the run, so it stops no generator flow, in its own branch or a sibling cancelled because of it.
+        const sibling = gen(function* () {
+            try {
+                yield* step(Command(() => new Promise((resolve) => setTimeout(resolve, 20))));
+                yield* step(Command(function cmdAfter() {}));
+            } catch {
+                seen.push('catch');
+                return 'recovered';
+            } finally {
+                seen.push('finally');
+            }
+        });
+        const bug = Command(
+            function cmdFast() {},
+            () => {
+                throw new Error('the real bug');
+            }
+        );
+        await assert.rejects(runEffect(Parallel([sibling(undefined), bug])), /^Error: the real bug$/);
+        assert.deepEqual(seen, []);
+    });
+
+    it('should stop a generator flow inside a Retry or a Parallel in a branch cancelled before it started', async function () {
+        // The body already ran up to its first step, inside its try, when the flow was built.
+        const opened = gen(function* () {
+            try {
+                yield* step(Command(function cmdNever() {}));
+            } finally {
+                seen.push('finally');
+            }
+        });
+        const wrappers = [(/** @type {any} */ flow) => Retry(flow), (/** @type {any} */ flow) => Parallel([flow])];
+        for (const wrap of wrappers) {
+            seen = [];
+            const result = await runEffect(Parallel([boom('cmdBad'), wrap(opened(undefined))], { limit: 1 }));
+            assert.equal(result.type, 'Failure');
+            assert.deepEqual(seen, ['finally']);
+        }
+    });
+
     it('should keep the waiting flows on a root that effectPipe or gen copied', async function () {
         const watched = gen(function* () {
             try {
