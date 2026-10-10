@@ -805,9 +805,11 @@ const returnedEffect = (value) => {
  */
 const rerun = (flow, trail, signature) => {
     const run = startRun(flow);
+    /** @returns {Effect} The step the body asked for */
     const expect = (/** @type {IteratorResult<any, any>} */ result, /** @type {string} */ wanted) => {
-        const asked = result.done ? undefined : describeStep(claimStep(result.value));
-        if (asked !== wanted) {
+        const effect = result.done ? undefined : claimStep(result.value);
+        const asked = effect && describeStep(effect);
+        if (!effect || asked !== wanted) {
             const did = asked === undefined ? 'returned' : `asked for ${asked}`;
             throw malformed(
                 `A generator flow ${did} where its earlier run asked for ${wanted}. Something in its ` +
@@ -816,15 +818,18 @@ const rerun = (flow, trail, signature) => {
                 undefined
             );
         }
+        return effect;
     };
     /** @type {{ signature: string, answer: any }[]} */
     const answers = [];
     for (let cell = trail; cell; cell = cell.earlier) answers.unshift(cell);
     let result = resumeBody(run, (g) => g.next());
     for (const { signature: asked, answer } of answers) {
-        expect(result, asked);
+        const effect = expect(result, asked);
         run.position++;
-        result = resumeBody(run, (g) => g.next(answer));
+        // A pure step's value is the one this run just computed, never an object the earlier run went on to change.
+        const value = effect.type === 'Success' ? effect.value : answer;
+        result = resumeBody(run, (g) => g.next(value));
     }
     expect(result, signature);
     return run;

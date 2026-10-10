@@ -368,6 +368,68 @@ describe('gen', function () {
             assert.deepEqual(again.next(3), Success([2, 3]));
         });
 
+        it('should hand a body that runs again the value its pure step computes now, not the earlier value', async function () {
+            // Each attempt of a Retry builds a fresh order, as a retried async function would.
+            let reserveCalls = 0;
+            const placeOrder = gen(function* () {
+                const order = yield* step(Success({ lines: /** @type {number[]} */ ([]) }));
+                order.lines.push(
+                    yield* step(
+                        Command(function cmdPrice() {
+                            return 10;
+                        })
+                    )
+                );
+                yield* step(
+                    Command(function cmdReserve() {
+                        if (reserveCalls++ === 0) throw new Error('timeout');
+                        return 'ok';
+                    })
+                );
+                return order.lines;
+            });
+            assert.deepEqual(await runEffect(Retry(placeOrder(undefined), { attempts: 2, delay: 0 })), Success([10]));
+
+            // One flow value in three branches: each runs its own body, with its own array.
+            const counted = gen(function* () {
+                const seen = yield* step(Success(/** @type {number[]} */ ([])));
+                seen.push(
+                    yield* step(
+                        Command(function cmdGet() {
+                            return 1;
+                        })
+                    )
+                );
+                return seen.length;
+            })(undefined);
+            assert.deepEqual(await runEffect(Parallel([counted, counted, counted])), Success([1, 1, 1]));
+        });
+
+        it('should let a body that runs again consume what its pure step built', async function () {
+            // A queue the first run emptied must not be handed to the second.
+            let saves = 0;
+            const importRows = gen(function* () {
+                const queue = yield* step(Success(['a', 'b']));
+                const saved = [];
+                while (queue.length) {
+                    const row = /** @type {string} */ (queue.shift());
+                    saved.push(
+                        yield* step(
+                            Command(function cmdSaveRow() {
+                                if (saves++ === 1) throw new Error('timeout');
+                                return row;
+                            })
+                        )
+                    );
+                }
+                return saved;
+            });
+            assert.deepEqual(
+                await runEffect(Retry(importRows(undefined), { attempts: 1, delay: 0 })),
+                Success(['a', 'b'])
+            );
+        });
+
         it('should refuse a body that asks for a different step when it runs again', async function () {
             let runs = 0;
             const flow = gen(function* () {
