@@ -1136,3 +1136,9 @@ gen(function* () {
 gen(function* () {
     return Promise.resolve(1);
 });
+
+// The helpers behind gen's types are internal, as is CheckedContext.
+// @ts-expect-error GenValue is not exported
+import type { GenValue } from '../index.js';
+// @ts-expect-error CheckedContext is not exported
+import type { CheckedContext } from '../index.js';

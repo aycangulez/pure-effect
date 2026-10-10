@@ -1248,12 +1248,13 @@ export declare function effectPipe<
 >;
 // END effectPipe overloads.
 
-// `__effect` exists only in the type, never at runtime, and the iterator is typed as yielding the Step itself, which
-// never happens either: together they are how `gen` reads each step's Effect type out of the body's yield type. A
-// `declare const` symbol would be a value, which a declaration file exports even without `export`.
+// The symbol and the iterator's yield type exist only in the declarations, never at runtime: together they are how
+// `gen` reads each step's Effect type out of the body's yield type.
+declare const stepEffect: unique symbol;
+
 /** A step for `yield*` inside `gen`, which gives back the Effect's value. Using it any other way throws. */
 export type Step<X extends AnyEffect> = {
-    readonly __effect?: X;
+    readonly [stepEffect]?: X;
     [Symbol.iterator](): Generator<Step<X>, EffectValue<X>, unknown>;
 };
 
@@ -1509,3 +1510,6 @@ export declare function timeTravel<T, E = unknown, Ctx = unknown>(
         version?: string | undefined;
     }
 ): Promise<SuccessState<T> | FailureState<E>>;
+
+// Only the declarations marked `export` are public; without this, a declaration file exports every top-level one.
+export {};

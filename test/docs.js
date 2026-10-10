@@ -393,6 +393,23 @@ describe('Documented sharp edges', function () {
         root.next(null);
         assert.equal(logged, 2);
     });
+
+    it('should run a generator body again when one flow value is run twice', async function () {
+        // Pinned deliberately: the first run used up the body's generator, so the second starts the body from the
+        // top. Build the flow from its input for each run.
+        let started = 0;
+        const flow = gen(function* () {
+            started++;
+            return yield* step(
+                Command(function cmdOne() {
+                    return 1;
+                })
+            );
+        })(undefined);
+        await runEffect(flow);
+        await runEffect(flow);
+        assert.equal(started, 2);
+    });
 });
 
 describe('Declaration parity', function () {

@@ -806,10 +806,11 @@ const returnedEffect = (value) => {
 const rerun = (flow, trail, signature) => {
     const run = startRun(flow);
     const expect = (/** @type {IteratorResult<any, any>} */ result, /** @type {string} */ wanted) => {
-        const asked = result.done ? 'to return' : describeStep(claimStep(result.value));
+        const asked = result.done ? undefined : describeStep(claimStep(result.value));
         if (asked !== wanted) {
+            const did = asked === undefined ? 'returned' : `asked for ${asked}`;
             throw malformed(
-                `A generator flow asked for ${asked} where its earlier run asked for ${wanted}. Something in its ` +
+                `A generator flow ${did} where its earlier run asked for ${wanted}. Something in its ` +
                     'body changes between runs, such as Date.now(), Math.random(), or a variable outside the body; ' +
                     "make it a Command, or pass it in the flow's input.",
                 undefined
@@ -908,9 +909,12 @@ const stopBody = (flow, run, position, trail, signature, node) => {
     const where = node && isPending(node) ? describeStep(node) : 'a Failure';
     const advice = "return the error as data inside the Command's function, or use Retry's onExhausted.";
     // Carries neither the error nor what kind of stop it was, so user code cannot branch on either.
-    const stop = Object.assign(new Error(`The flow stopped at ${where}. Nothing can be caught here: ${advice}`), {
-        name: 'FlowStopped'
-    });
+    const stop = Object.assign(
+        new Error(`The flow stopped ${node ? 'after' : 'at'} ${where}. Nothing can be caught here: ${advice}`),
+        {
+            name: 'FlowStopped'
+        }
+    );
     try {
         current.generator.throw(stop);
     } catch (e) {

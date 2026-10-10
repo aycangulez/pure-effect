@@ -385,6 +385,23 @@ describe('gen', function () {
             );
         });
 
+        it('should say a body returned where its earlier run asked for a step', async function () {
+            let runs = 0;
+            const flow = gen(function* () {
+                yield* step(Command(function cmdA() {}));
+                runs++;
+                if (runs > 1) return 'early';
+                yield* step(Command(function cmdB() {}));
+                yield* step(Command(function cmdC() {}));
+            });
+            const atC = /** @type {any} */ (flow(undefined)).next(1).next(2);
+            atC.next(3);
+            assert.match(
+                await messageOf(() => atC.next(4)),
+                /^A generator flow returned where its earlier run asked for Command 'cmdB'\./
+            );
+        });
+
         it('should keep a long run of pure steps off the stack, and finish a long loop of Commands quickly', async function () {
             this.timeout(10000);
             const pure = gen(function* () {
@@ -448,6 +465,21 @@ describe('gen: stopping', function () {
         assert.equal(result.type, 'Failure');
         assert.equal(/** @type {any} */ (result).error.message, 'io');
         assert.deepEqual(seen, ['catch:FlowStopped', 'finally']);
+    });
+
+    it('should say which step the flow stopped after', async function () {
+        /** @type {string[]} */
+        const messages = [];
+        const flow = gen(function* () {
+            try {
+                yield* step(boom('cmdSave'));
+            } catch (e) {
+                messages.push(/** @type {Error} */ (e).message);
+                throw e;
+            }
+        });
+        await runEffect(flow(undefined));
+        assert.match(messages[0], /^The flow stopped after Command 'cmdSave'\./);
     });
 
     it('should stop the body for every way a step can stop the flow', async function () {
