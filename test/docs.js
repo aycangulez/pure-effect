@@ -12,6 +12,8 @@ import {
     configureEffect,
     recordEffect,
     replayEffect,
+    recorder,
+    Ask,
     gen,
     step
 } from '../index.js';
@@ -409,6 +411,69 @@ describe('Documented sharp edges', function () {
         await runEffect(flow);
         await runEffect(flow);
         assert.equal(started, 2);
+    });
+
+    it('should run the finally of a branch elsewhere that stops for its own reason before a throw reaches it', async function () {
+        // Pinned deliberately: a throw stops no generator flow in its own Parallel, but it waits there for that
+        // Parallel's other branches, and a sibling in the enclosing Parallel that stops meanwhile, here on a declined
+        // card, still runs its finally. Which comes first depends on timing.
+        /** @type {string[]} */
+        const seen = [];
+        const sibling = gen(function* () {
+            try {
+                yield* step(
+                    Command(function cmdDeclined() {
+                        return new Promise((_, reject) => setTimeout(() => reject(new Error('declined')), 15));
+                    })
+                );
+            } finally {
+                seen.push('sibling finally');
+            }
+        });
+        const crashing = Parallel([
+            Command(function cmdSlowIgnoresSignal() {
+                return new Promise((resolve) => setTimeout(resolve, 40));
+            }),
+            Command(
+                function cmdFast() {},
+                () => {
+                    throw new Error('the real bug');
+                }
+            )
+        ]);
+        await assert.rejects(runEffect(Parallel([crashing, sibling(undefined)])), /^Error: the real bug$/);
+        assert.deepEqual(seen, ['sibling finally']);
+    });
+
+    it('should replay a cancelled branch past an Ask that production stopped it at', async function () {
+        // Pinned deliberately: a trace marks where a cancelled branch stopped only by its Commands, and an Ask
+        // consults none, so the replay carries the body past the Ask where production stopped it.
+        /** @type {string[]} */
+        const seen = [];
+        const branch = gen(function* () {
+            try {
+                yield* step(
+                    Command(function cmdSlowIgnoresSignal() {
+                        return new Promise((resolve) => setTimeout(resolve, 30));
+                    })
+                );
+                yield* step(Ask());
+                seen.push('after Ask');
+            } catch (e) {
+                seen.push('caught');
+                throw e;
+            }
+        });
+        const failing = Command(function cmdFail() {
+            return new Promise((_, reject) => setTimeout(() => reject(new Error('declined')), 5));
+        });
+        const flow = () => Parallel([branch(undefined), failing]);
+        const recording = recorder();
+        await runEffect(flow(), {}, { onStep: recording.onStep });
+        assert.deepEqual(seen, ['caught']);
+        seen.length = 0;
+        await replayEffect(flow(), JSON.parse(JSON.stringify(recording.toTrace())));
+        assert.deepEqual(seen, ['after Ask']);
     });
 });
 
