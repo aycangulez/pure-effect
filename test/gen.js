@@ -147,6 +147,17 @@ describe('gen', function () {
             assert.match(await messageOf(() => flow()), /its function returned the number 1/);
         });
 
+        it('should refuse a function that returns an async generator, a plain iterator or null', async function () {
+            // A bundler can turn an async function* into a plain function, which the check in gen cannot see.
+            const returns = [() => (async function* () {})(), () => [].values(), () => null];
+            for (const body of returns) {
+                assert.match(
+                    await messageOf(() => looseGen(body)()),
+                    /gen expects a generator function.*its function returned/
+                );
+            }
+        });
+
         it('should run the body up to its first step when the flow is built', function () {
             /** @type {string[]} */
             const seen = [];
@@ -340,6 +351,21 @@ describe('gen', function () {
             assert.deepEqual(root.next({ id: 1 }), Failure('taken'));
             assert.deepEqual(root.next(null), Success('free'));
             assert.equal(runs, 2);
+        });
+
+        it('should run the body again for a second branch walked from before a pure step', function () {
+            const flow = gen(function* () {
+                const a = yield* step(Command(function cmdA() {}));
+                yield* step(Success('pure'));
+                const b = yield* step(Command(function cmdB() {}));
+                return [a, b];
+            });
+            const root = /** @type {any} */ (flow(undefined));
+            root.next(1);
+            // Answering cmdA again runs the body again, so it asks for cmdB rather than taking 2 as cmdB's answer.
+            const again = root.next(2);
+            assert.equal(commandName(again), 'cmdB');
+            assert.deepEqual(again.next(3), Success([2, 3]));
         });
 
         it('should refuse a body that asks for a different step when it runs again', async function () {
@@ -583,6 +609,23 @@ describe('gen: stopping', function () {
         });
         assert.deepEqual(await runEffect(outer(undefined)), Success(['Failure', 'Success']));
         assert.deepEqual(seen, ['failing']);
+    });
+
+    it('should stop a generator flow used as an effectPipe step before another', async function () {
+        // effectPipe's chain copies the flow's nodes with no listener of its own, and has to keep the flow's.
+        const watched = gen(function* () {
+            try {
+                yield* step(boom('cmdSave'));
+            } finally {
+                seen.push('finally');
+            }
+        });
+        const piped = effectPipe(
+            () => watched(undefined),
+            (/** @type {any} */ value) => Success(value)
+        );
+        assert.equal((await runEffect(piped(undefined))).type, 'Failure');
+        assert.deepEqual(seen, ['finally']);
     });
 
     it('should keep the waiting flows on a root that effectPipe or gen copied', async function () {
