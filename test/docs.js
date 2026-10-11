@@ -49,7 +49,7 @@ describe('README examples', function () {
         configureEffect();
     });
 
-    // The Recording and API Reference sections call `configureEffect` themselves, so this suite
+    // The Recording in Production and Hooks sections call `configureEffect` themselves, so this suite
     // has to clean up after the examples as well as before them.
     afterEach(function () {
         configureEffect();

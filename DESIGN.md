@@ -184,7 +184,7 @@ Catching and retrying are alternatives. A miss caught inside the `cmd` function 
 Order:
 
 - Branches run through `runBounded`: `Promise.all` without a `limit`, and a pull-by-index worker pool with one, so results and paths follow array order either way.
-- Under `limit: 1` the pool is a sequential loop that stops at the first failure, unless `settled`. That is how the README's `Coming from async/await` translates a `for` loop, in two parts: a step that gets the list, then a `Parallel` that maps over it. A test therefore pins the order branches start in, as well as the order results return.
+- Under `limit: 1` the pool is a sequential loop that stops at the first failure, unless `settled`. That is how the README's `Writing Loops` translates a `for` loop, in two parts: a step that gets the list, then a `Parallel` that maps over it. A test therefore pins the order branches start in, as well as the order results return.
 
 Failure:
 
