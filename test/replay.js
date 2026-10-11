@@ -1967,7 +1967,12 @@ describe('Replaying a cancelled Parallel', function () {
         const flow = () => Parallel([slowBranch(), crashingBranch()]);
         const { crash, trace } = await recordCrash(flow);
         assert.ok(crash instanceof TypeError, 'production rejects with the throw');
-        assert.deepEqual(trace.trace.find((e) => e.path === '0p')?.result, { cancelled: true, branch: 1, branches: 2 });
+        assert.deepEqual(trace.trace.find((e) => e.path === '0p')?.result, {
+            cancelled: true,
+            branch: 1,
+            branches: 2,
+            threw: true
+        });
         await assertCrashReplays(flow, trace, crash);
     });
 
@@ -1987,7 +1992,13 @@ describe('Replaying a cancelled Parallel', function () {
         const flow = () => Parallel([decline, confirming]);
         const { crash, trace } = await recordCrash(flow);
         assert.ok(crash instanceof TypeError, 'production rejects with the throw, not the decline');
-        assert.deepEqual(trace.trace.find((e) => e.path === '0p')?.result, { cancelled: true, branch: 0, branches: 2 });
+        // The decline is the decision, and the throw that came after it is recorded too.
+        assert.deepEqual(trace.trace.find((e) => e.path === '0p')?.result, {
+            cancelled: true,
+            branch: 0,
+            branches: 2,
+            threw: true
+        });
         await assertCrashReplays(flow, trace, crash);
     });
 
@@ -1996,7 +2007,12 @@ describe('Replaying a cancelled Parallel', function () {
         // rejecting either way.
         const flow = () => Parallel([slowBranch(), crashingBranch()], { settled: true });
         const { crash, trace } = await recordCrash(flow);
-        assert.deepEqual(trace.trace.find((e) => e.path === '0p')?.result, { cancelled: true, branch: 1, branches: 2 });
+        assert.deepEqual(trace.trace.find((e) => e.path === '0p')?.result, {
+            cancelled: true,
+            branch: 1,
+            branches: 2,
+            threw: true
+        });
         await assertCrashReplays(flow, trace, crash);
     });
 
@@ -2021,7 +2037,12 @@ describe('Replaying a cancelled Parallel', function () {
         const flow = () => Parallel([lateCrash, earlyCrash]);
         const { crash, trace } = await recordCrash(flow);
         assert.match(crash.message, /toFixed/, "production rethrows the earlier branch's throw");
-        assert.deepEqual(trace.trace.find((e) => e.path === '0p')?.result, { cancelled: true, branch: 1, branches: 2 });
+        assert.deepEqual(trace.trace.find((e) => e.path === '0p')?.result, {
+            cancelled: true,
+            branch: 1,
+            branches: 2,
+            threw: true
+        });
         await assertCrashReplays(flow, trace, crash);
     });
 
@@ -2039,7 +2060,12 @@ describe('Replaying a cancelled Parallel', function () {
         });
         const flow = () => Parallel([confirming, decline]);
         const { trace } = await recordCrash(flow);
-        assert.deepEqual(trace.trace.find((e) => e.path === '0p')?.result, { cancelled: true, branch: 1, branches: 2 });
+        assert.deepEqual(trace.trace.find((e) => e.path === '0p')?.result, {
+            cancelled: true,
+            branch: 1,
+            branches: 2,
+            threw: true
+        });
         fixed = true;
         const before = io.calls;
         const { result } = await replayEffect(flow(), trace);

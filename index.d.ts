@@ -194,6 +194,9 @@ export declare function Command<R, T = R, E = unknown, Ctx = unknown>(
 /** The name a Command is known by in traces, replays and spans: `meta.name`, else `cmd.name`, else `'anonymous'`. */
 export declare function commandName(command: CommandState<any, any, any, any>): string;
 
+/** Reads the context passed to `runEffect`. With no argument it succeeds with the context; name its type as `Ask<AppCtx>()`. */
+export declare function Ask<Ctx = unknown>(): AskState<Ctx, never, Ctx>;
+
 /** Reads the context passed to `runEffect`. Give the value, error and context types, or none. */
 export declare function Ask<T = never, E = never, Ctx = unknown, N extends AnyEffect = Effect<T, E, Ctx>>(
     next: (context: Ctx) => N
@@ -1245,6 +1248,53 @@ export declare function effectPipe<
 >;
 // END effectPipe overloads.
 
+// The symbol and the iterator's yield type exist only in the declarations, never at runtime: together they are how
+// `effectGen` reads each step's Effect type out of the body's yield type.
+declare const stepEffect: unique symbol;
+declare const stepContext: unique symbol;
+
+/** A step for `yield*` inside `effectGen`, which gives back the Effect's value. Using it any other way throws. */
+// The context is also a function parameter, which TypeScript compares the opposite way to the Effect, so of two steps
+// it merges in a generator's yield type it can only drop the one that reads less context.
+export type Step<X extends AnyEffect, C = EffectContext<X>> = {
+    readonly [stepEffect]?: X;
+    readonly [stepContext]?: (context: C) => void;
+    [Symbol.iterator](): Generator<Step<X, C>, EffectValue<X>, unknown>;
+};
+
+/** Wraps an Effect for `yield*` inside `effectGen`: `const user = yield* step(findUser(email))`. */
+export declare function step<X extends AnyEffect>(effect: X): Step<X>;
+
+type StepEffectOf<Y> = Y extends Step<infer X, any> ? X : never;
+// An `any` return would match both branches and turn the error union into `any`, so it counts as a plain value.
+type GenIsAny<R> = 0 extends 1 & R ? true : false;
+type ReturnedEffect<R> = GenIsAny<R> extends true ? never : R extends AnyEffect ? R : never;
+type GenValue<R> = GenIsAny<R> extends true ? any : R extends AnyEffect ? EffectValue<R> : R;
+type GenError<Y, R> = EffectError<StepEffectOf<Y>> | EffectError<ReturnedEffect<R>>;
+// A step that reads no context gives `unknown`, which would erase the others in an intersection, so it is dropped. Each
+// context is boxed, so one that is itself a union is intersected whole rather than member by member.
+type GenNeeds<X> = X extends AnyEffect
+    ? EffectContext<X> extends infer C
+        ? unknown extends C
+            ? never
+            : { context: C }
+        : never
+    : never;
+type GenIntersection<U> = (U extends any ? (u: U) => void : never) extends (i: infer I) => void ? I : never;
+type GenContext<Y, R> = [GenNeeds<StepEffectOf<Y> | ReturnedEffect<R>>] extends [never]
+    ? unknown
+    : GenIntersection<GenNeeds<StepEffectOf<Y> | ReturnedEffect<R>>> extends { context: infer C }
+      ? C
+      : unknown;
+
+/**
+ * Builds a flow function from a generator function, written with `yield* step(effect)` where `async` code writes
+ * `await`. A plain return value is a `Success`; return a `Failure` to stop.
+ */
+export declare function effectGen<I, Y extends Step<any, any>, R>(
+    body: (input: I) => Generator<Y, R, unknown>
+): (input: I) => Effect<GenValue<R>, GenError<Y, R>, GenContext<Y, R>>;
+
 /**
  * Wraps each Command, and each `Parallel`. Call `op` and return its result; a hook that calls another passes `path` on.
  */
@@ -1256,12 +1306,12 @@ export type StepRunner = (
 ) => Promise<unknown>;
 
 /**
- * Which branch, if any, cancelled a `Parallel`, and how many branches it had; `branch: null` means an enclosing one
- * did. A replay refuses a `Parallel` whose count differs, and a decision without one is not checked.
+ * Which branch, if any, cancelled a `Parallel`, whether it threw, and how many branches it had; `branch: null` means an
+ * enclosing one did. A replay refuses a `Parallel` whose count differs, and a decision without one is not checked.
  */
 export type ParallelDecision =
     | { cancelled: false; branches?: number | undefined }
-    | { cancelled: true; branch: number | null; branches?: number | undefined };
+    | { cancelled: true; branch: number | null; branches?: number | undefined; threw?: true | undefined };
 
 /**
  * `flowName` is `context.flowName`, or `''` when the context has none. `initialInput` is what the flow was called with
@@ -1458,3 +1508,6 @@ export declare function timeTravel<T, E = unknown, Ctx = unknown>(
         version?: string | undefined;
     }
 ): Promise<SuccessState<T> | FailureState<E>>;
+
+// Only the declarations marked `export` are public; without this, a declaration file exports every top-level one.
+export {};

@@ -1,11 +1,27 @@
 // @ts-check
 
 import { strict as assert } from 'assert';
-import { Success, Failure, Command, Retry, Parallel, effectPipe, runEffect, configureEffect } from '../index.js';
+import {
+    Success,
+    Failure,
+    Command,
+    Retry,
+    Parallel,
+    effectPipe,
+    runEffect,
+    configureEffect,
+    recordEffect,
+    replayEffect,
+    recorder,
+    Ask,
+    effectGen,
+    step
+} from '../index.js';
 import * as lib from '../index.js';
 import ts from 'typescript';
 import { readFileSync } from 'node:fs';
 import { mock } from 'node:test';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { effectPipeOverloads, currentOverloads } from '../scripts/effect-pipe-overloads.js';
 import { errorOf } from './helpers.js';
 
@@ -34,7 +50,7 @@ describe('README examples', function () {
         configureEffect();
     });
 
-    // The Recording and API Reference sections call `configureEffect` themselves, so this suite
+    // The Recording in Production and Hooks sections call `configureEffect` themselves, so this suite
     // has to clean up after the examples as well as before them.
     afterEach(function () {
         configureEffect();
@@ -79,7 +95,17 @@ describe('README examples', function () {
         const [quickStart, ...rest] = sections.filter((section) => section.length > 0);
         const nested = (/** @type {string[]} */ section) =>
             section.reduceRight((inner, block) => `{\n${withoutImports(block)}\n${inner}}\n`, '');
-        const program = quickStart.map(withoutImports).join('\n') + '\n' + rest.map(nested).join('');
+        // The Quick Start shows one flow written two ways, and they must stay the same flow.
+        const sameFlow = `
+            for (const given of [input, { email: 'bad-email', password: 'password123' }]) {
+                const piped = await recordEffect(registerUserFlow, given);
+                const generated = await recordEffect(registerUserFlowGen, given);
+                assert.deepEqual(generated.result, piped.result);
+                const shape = (log) => log.trace.map(({ command, path, result }) => ({ command, path, result }));
+                assert.deepEqual(shape(generated.trace), shape(piped.trace));
+            }
+        `;
+        const program = quickStart.map(withoutImports).join('\n') + '\n' + sameFlow + '\n' + rest.map(nested).join('');
 
         // Everything the examples reach for that is not the library. These exist so the flows can be
         // built and walked, not to stand in for a real driver: every assertion the README makes is
@@ -91,7 +117,12 @@ describe('README examples', function () {
             });
         const stubs = {
             input: { email: 'test@test.com', password: 'password123' },
-            db: { findUser: async () => null, saveUser: async (/** @type {any} */ user) => user },
+            db: {
+                findUser: async () => null,
+                saveUser: async (/** @type {any} */ user) => ({ id: 1, ...user }),
+                createWorkspace: async (/** @type {number} */ ownerId) => ({ id: 'ws_1', ownerId, name: 'Personal' })
+            },
+            mailer: { sendWelcome: async () => ({ sent: true }) },
             app: { post: () => {} },
             it: () => {},
             fetch: () => {
@@ -119,6 +150,8 @@ describe('README examples', function () {
             sink: () => {},
             telemetryHooks: () => ({}),
             recordingHooks: () => ({}),
+            // Real: the Hooks example shows a scope reaching every hook, which only the real one does.
+            AsyncLocalStorage,
             // Real rather than stubbed: the async/await comparison shows the mocked test a plain
             // `async` function needs, and it should pass against that function the way it would for
             // a reader.
@@ -316,6 +349,160 @@ describe('Documented sharp edges', function () {
         assert.deepEqual(await runEffect(Command(pageSize)), Success(50));
         assert.deepEqual(await runEffect(Parallel([Command(pageSize)])), Success(['a signal']));
         assert.deepEqual(await runEffect(Parallel([Command(() => pageSize())])), Success([50]), 'wrapped, it works');
+    });
+
+    it("should run no generator flow's finally when the run is rejected", async function () {
+        // Pinned deliberately: a harness error, such as this TimeParadox, rejects the run without running the body's
+        // catch or finally, since a catch could otherwise hide the real error.
+        /** @type {string[]} */
+        const seen = [];
+        const recorded = effectGen(function* () {
+            yield* step(Command(function cmdFirst() {}));
+            yield* step(Command(function cmdSecond() {}));
+        });
+        const trace = (await recordEffect(() => recorded(undefined), undefined)).trace;
+        const changed = effectGen(function* () {
+            try {
+                yield* step(Command(function cmdFirst() {}));
+                yield* step(Parallel([Command(function cmdSecond() {})]));
+            } finally {
+                seen.push('finally');
+            }
+        });
+        const replay = await replayEffect(changed(undefined), trace);
+        assert.equal(/** @type {any} */ (replay.result).error.name, 'TimeParadox');
+        assert.deepEqual(seen, []);
+    });
+
+    it('should not notice a forgotten yield* when the step is only tested for truth', async function () {
+        // Pinned deliberately: JavaScript cannot trap a truth test, so the step is always truthy and its Command never
+        // runs, as a forgotten await leaves a Promise that is always truthy.
+        const flow = effectGen(function* () {
+            const found = step(Command(() => /** @type {{ id: number } | null} */ (null)));
+            return found ? 'taken' : 'free';
+        });
+        assert.deepEqual(await runEffect(flow(undefined)), Success('taken'));
+    });
+
+    it('should change a variable outside a generator body again when a test walks a second branch', function () {
+        // Pinned deliberately: a generator cannot be copied, so answering an earlier step again runs the body from
+        // the top, and code in it that changes something outside it does so again.
+        let logged = 0;
+        const flow = effectGen(function* () {
+            logged++;
+            const found = yield* step(Command(() => /** @type {{ id: number } | null} */ (null)));
+            return found ? 'taken' : 'free';
+        });
+        const root = /** @type {any} */ (flow(undefined));
+        root.next({ id: 1 });
+        root.next(null);
+        assert.equal(logged, 2);
+    });
+
+    it('should run a generator body again when one flow value is run twice', async function () {
+        // Pinned deliberately: the first run used up the body's generator, so the second starts the body from the
+        // top. Build the flow from its input for each run.
+        let started = 0;
+        const flow = effectGen(function* () {
+            started++;
+            return yield* step(
+                Command(function cmdOne() {
+                    return 1;
+                })
+            );
+        })(undefined);
+        await runEffect(flow);
+        await runEffect(flow);
+        assert.equal(started, 2);
+    });
+
+    it('should run the finally of a branch elsewhere that stops for its own reason before a throw reaches it', async function () {
+        // Pinned deliberately: a throw stops no generator flow in its own Parallel, but it waits there for that
+        // Parallel's other branches, and a sibling in the enclosing Parallel that stops meanwhile, here on a declined
+        // card, still runs its finally. Which comes first depends on timing.
+        /** @type {string[]} */
+        const seen = [];
+        const sibling = effectGen(function* () {
+            try {
+                yield* step(
+                    Command(function cmdDeclined() {
+                        return new Promise((_, reject) => setTimeout(() => reject(new Error('declined')), 15));
+                    })
+                );
+            } finally {
+                seen.push('sibling finally');
+            }
+        });
+        const crashing = Parallel([
+            Command(function cmdSlowIgnoresSignal() {
+                return new Promise((resolve) => setTimeout(resolve, 40));
+            }),
+            Command(
+                function cmdFast() {},
+                () => {
+                    throw new Error('the real bug');
+                }
+            )
+        ]);
+        await assert.rejects(runEffect(Parallel([crashing, sibling(undefined)])), /^Error: the real bug$/);
+        assert.deepEqual(seen, ['sibling finally']);
+    });
+
+    it('should replay a cancelled branch past an Ask that production stopped it at', async function () {
+        // Pinned deliberately: a trace marks where a cancelled branch stopped only by its Commands, and an Ask
+        // consults none, so the replay carries the body past the Ask where production stopped it.
+        /** @type {string[]} */
+        const seen = [];
+        const branch = effectGen(function* () {
+            try {
+                yield* step(
+                    Command(function cmdSlowIgnoresSignal() {
+                        return new Promise((resolve) => setTimeout(resolve, 30));
+                    })
+                );
+                yield* step(Ask());
+                seen.push('after Ask');
+            } catch (e) {
+                seen.push('caught');
+                throw e;
+            }
+        });
+        const failing = Command(function cmdFail() {
+            return new Promise((_, reject) => setTimeout(() => reject(new Error('declined')), 5));
+        });
+        const flow = () => Parallel([branch(undefined), failing]);
+        const recording = recorder();
+        await runEffect(flow(), {}, { onStep: recording.onStep });
+        assert.deepEqual(seen, ['caught']);
+        seen.length = 0;
+        await replayEffect(flow(), JSON.parse(JSON.stringify(recording.toTrace())));
+        assert.deepEqual(seen, ['after Ask']);
+    });
+
+    it('should lose an error passing through a body whose finally step a cancellation skips', async function () {
+        // Pinned deliberately: a step in a body's finally is unsupported. Here a nested flow's refusal is passing
+        // through the outer body when its finally yields a step; the cancellation reaches the body before that step
+        // starts, and the stop thrown into the paused finally replaces the pending error.
+        const refused = effectGen(function* () {
+            try {
+                yield* step(Failure('early'));
+            } finally {
+                yield* step(Command(function cmdInnerCleanup() {}));
+            }
+        });
+        const outer = effectGen(function* () {
+            try {
+                yield* step(refused(undefined));
+            } finally {
+                yield* step(Command(function cmdOuterCleanup() {}));
+            }
+        });
+        const failing = Command(function cmdFail() {
+            return new Promise((_, reject) => setTimeout(() => reject(new Error('declined')), 5));
+        });
+        const result = await runEffect(Parallel([failing, outer(undefined)], { limit: 1 }));
+        assert.equal(result.type, 'Failure');
+        assert.equal(/** @type {any} */ (result).error.message, 'declined');
     });
 });
 

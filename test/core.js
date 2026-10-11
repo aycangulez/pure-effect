@@ -817,6 +817,12 @@ describe('Constructor arguments', function () {
         );
     });
 
+    it('should succeed with the context when Ask is called with no argument', async function () {
+        // Only a call with no argument: the test above pins that an explicit undefined, usually a misspelt name,
+        // still throws.
+        assert.deepEqual(await runEffect(Ask(), { tenant: 't1' }), Success({ tenant: 't1' }));
+    });
+
     it('should reject the run rather than retry when a Command function builds a malformed Command', async function () {
         // The EffectTypeError is a harness error, so it is not taken for the I/O failing: no second attempt and
         // no fallback.

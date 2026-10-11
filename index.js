@@ -4,12 +4,14 @@
 //
 // 1. Types: the JSDoc shapes of the nodes a flow is made of.
 // 2. Building flows: the constructors; the checks, error messages and kinds of failure the later sections
-//    share, `checkOptions` and `Retry`'s defaults among them; and `effectPipe`, with the `chain` that joins its
-//    steps and the `flowInputs` it records for `onRun`.
+//    share, `checkOptions` and `Retry`'s defaults among them; `effectPipe`, with the `chain` that joins its
+//    steps, the stop listeners `chain` keeps for generator flows, and the `flowInputs` it records for `onRun`;
+//    and `step` and `effectGen`, which build a flow from a generator function.
 // 3. Configuration: the hook types and their defaults, `configureEffect` and its layers, and `chainHooks`, which
 //    merges them.
 // 4. Running flows: the helpers `Retry`, `Parallel` and Commands run on; `interpret`, which builds a run's
-//    `Runtime`, then `execute` and a function for each kind of node, which each take it; and `runEffect`.
+//    `Runtime`, then `stopAt`, which tells a waiting generator flow its step stopped, `execute` and a function
+//    for each kind of node, which each take it; and `runEffect`.
 // 5. Recording and replay: the trace format and replay errors, copying values and errors into a trace,
 //    `recorder` and `recordEffect`, then `fromTrace`, `replayEffect` and `timeTravel`, each followed by the
 //    functions it hands its parts to.
@@ -137,10 +139,14 @@ const commandName = (eff) => {
 
 /**
  * Reads the context object from the current `runEffect` call.
- * @param {(context: any) => Effect} next - Receives the context and returns the next Effect
+ * @param {...((context: any) => Effect)} args - `next`, which receives the context and returns the next Effect. With
+ *        no argument, the Ask succeeds with the context itself, as `yield* step(Ask())` reads it.
  * @returns {AskState}
  */
-const Ask = (next) => {
+const Ask = (...args) => {
+    // Only a call with no argument: an explicit `undefined` is usually a misspelt name.
+    if (args.length === 0) return { type: 'Ask', next: (/** @type {any} */ context) => Success(context) };
+    const [next] = args;
     if (typeof next !== 'function') {
         throw malformed(`Ask expects a function that receives the context, got ${describeArgument(next)}.`, next);
     }
@@ -486,16 +492,50 @@ const asEffect = (value, source) => {
  * @param {Effect} effect - The current Effect object
  * @param {(value: any) => Effect} fn - The next function to run if the current effect is a Success
  * @param {Effect} [from] - The node whose `next` returned `effect`, which an error names
+ * @param {StopListener} [onStop] - Set by `effectGen`: told when a Failure passes `fn`, and kept on each copy for
+ *        `execute`'s `stopAt`, which calls it when the copy itself stops the flow
  * @returns {Effect} The composed Effect
  */
-const chain = (effect, fn, from) => {
+const chain = (effect, fn, from, onStop) => {
     // Before reading `.type`, so a missing return is named rather than thrown as a bare TypeError.
     if (!isEffect(effect)) throw effectTypeError(effect, from ? nextOf(from) : 'A continuation');
     if (effect.type === 'Success') return asEffect(fn(effect.value), `Step '${fn.name || 'anonymous'}'`);
-    if (effect.type === 'Failure') return effect;
-    const next = (/** @type {any} */ value) => chain(effect.next(value), fn, effect);
+    if (effect.type === 'Failure') {
+        onStop?.(from);
+        return effect;
+    }
+    const next = (/** @type {any} */ value) => chain(effect.next(value), fn, effect, onStop);
     // A Command goes back through its constructor, which checks the function of one built by hand.
-    return effect.type === 'Command' ? Command(effect.cmd, next, effect.meta) : { ...effect, next };
+    const copy = effect.type === 'Command' ? Command(effect.cmd, next, effect.meta) : { ...effect, next };
+    const waiting = stopListeners.get(effect);
+    if (onStop) stopListeners.set(copy, [...(waiting ?? []), onStop]);
+    else if (waiting) stopListeners.set(copy, waiting);
+    return copy;
+};
+
+/**
+ * Told that the flow stopped at `node`, or at a Failure when `node` is undefined, so a generator flow waiting on it
+ * runs its `catch` and `finally` blocks.
+ * @typedef {(node: Effect | undefined) => void} StopListener
+ */
+
+/**
+ * The generator flows waiting on each node `chain` copied for them, innermost first. `chain` calls one when a Failure
+ * passes the continuation it guards, and `execute`'s `stopAt` calls them all when the node itself stops the flow.
+ * @type {WeakMap<Effect, StopListener[]>}
+ */
+const stopListeners = new WeakMap();
+
+/**
+ * Copies a flow's root, which `flowInputs` is keyed on, keeping the generator flows waiting on it.
+ * @param {Effect} tree
+ * @returns {Effect}
+ */
+const copyRoot = (tree) => {
+    const root = { ...tree };
+    const waiting = stopListeners.get(tree);
+    if (waiting) stopListeners.set(root, waiting);
+    return root;
 };
 
 /**
@@ -527,8 +567,407 @@ const effectPipe = (...fns) => {
     return (start) => {
         const tree = fns.reduce((eff, fn) => chain(eff, fn), /** @type {Effect} */ (Success(start)));
         // Keyed on a copy, since the last step can return an object other flows share, such as a constant Failure.
-        const root = { ...tree };
+        const root = copyRoot(tree);
         flowInputs.set(root, start);
+        return root;
+    };
+};
+
+/**
+ * Every marker a step's iterator yielded, so `effectGen` can tell one from a value the body yielded itself.
+ * @type {WeakSet<StepMarker>}
+ */
+const stepMarkers = new WeakSet();
+
+/**
+ * The markers `effectGen` received, so a step's iterator can tell `yield*` from a spread or a `for...of`.
+ * @type {WeakSet<StepMarker>}
+ */
+const claimedMarkers = new WeakSet();
+
+/**
+ * The Effect inside each step wrapper, so `effectGen` can name a step yielded or returned without `yield*`.
+ * @type {WeakMap<object, Effect>}
+ */
+const stepEffects = new WeakMap();
+
+/** @typedef {Readonly<{ effect: Effect }>} StepMarker */
+
+/**
+ * @param {any} value
+ * @returns {boolean}
+ */
+const isThenable = (value) => isObject(value) && typeof value.then === 'function';
+
+/**
+ * Names a step for a message, and for comparing one run of a body with the next.
+ * @param {Effect} effect
+ * @returns {string}
+ */
+const describeStep = (effect) =>
+    effect.type === 'Command'
+        ? `Command '${commandName(effect)}'`
+        : `${effect.type === 'Ask' ? 'an' : 'a'} ${effect.type}`;
+
+/**
+ * Wraps an Effect for `yield*` inside `effectGen`, which gives back the Effect's value. The wrapper is a proxy that throws
+ * when it is used as a value, and its iterator throws unless `effectGen` claimed what it yielded.
+ *
+ * @param {Effect} effect
+ * @returns {any}
+ */
+const step = (effect) => {
+    if (!isEffect(effect)) {
+        throw malformed(
+            isThenable(effect)
+                ? 'step expects an Effect, got a Promise: put the call in a Command, as in ' +
+                      'yield* step(Command(() => db.findUser(email))).'
+                : `step expects an Effect, got ${describeArgument(effect)}.`,
+            effect
+        );
+    }
+    /** @returns {Generator<StepMarker, any, any>} */
+    const iterate = function* () {
+        const marker = Object.freeze({ effect });
+        stepMarkers.add(marker);
+        try {
+            return yield marker;
+        } finally {
+            // Only `effectGen` claims a marker, so an unclaimed one means a spread, `Array.from` or a `for...of`.
+            if (!claimedMarkers.has(marker)) {
+                throw malformed(
+                    `step(${describeStep(effect)}) was iterated outside yield*; write yield* step(...).`,
+                    effect
+                );
+            }
+        }
+    };
+    const refuse = () => {
+        throw malformed(`step(${describeStep(effect)}) was used as a value; write yield* step(...).`, effect);
+    };
+    const inspectCustom = Symbol.for('nodejs.util.inspect.custom');
+    const hint = () => `[step: ${describeStep(effect)}, use with yield*]`;
+    // On the target as well, since Node's inspect reads a proxy's target without running its traps.
+    const target = Object.freeze(Object.defineProperty({}, inspectCustom, { value: hint }));
+    const wrapper = new Proxy(target, {
+        get: (_, key) => (key === Symbol.iterator ? iterate : key === inspectCustom ? hint : refuse()),
+        has: refuse,
+        ownKeys: refuse,
+        getOwnPropertyDescriptor: refuse,
+        set: refuse,
+        defineProperty: refuse,
+        deleteProperty: refuse
+    });
+    stepEffects.set(wrapper, effect);
+    return wrapper;
+};
+
+/** What an `async function*` inherits from, which `effectGen` refuses before it builds anything. */
+const asyncGeneratorFunction = Object.getPrototypeOf(async function* () {});
+
+/**
+ * A generator flow called with its input, which a re-run starts its body from again.
+ * @typedef {{ body: (input: any) => any, input: any }} GenFlow
+ */
+
+/**
+ * One run of a body: its generator, the position of the step it is waiting at, and whether it can still resume.
+ * @typedef {{ generator: Generator<any, any, any>, position: number, state: 'suspended' | 'done' }} BodyRun
+ */
+
+/**
+ * The answers a body was given before a position, newest first, each with the step it answered, so a re-run can feed
+ * them again and check the body asks for the same steps. Shared between continuations, never copied.
+ * @typedef {{ signature: string, answer: any, earlier: Trail } | null} Trail
+ */
+
+/**
+ * @typedef {(generator: Generator<any, any, any>) => IteratorResult<any, any>} Resume
+ */
+
+/**
+ * Starts a body. A function that returns anything but a synchronous generator is refused here, which covers a bundled
+ * `async function*` the prototype check in `effectGen` missed.
+ * @param {GenFlow} flow
+ * @returns {BodyRun}
+ */
+const startRun = (flow) => {
+    const generator = flow.body(flow.input);
+    const isGenerator =
+        isObject(generator) &&
+        ['next', 'throw', 'return'].every((name) => typeof generator[name] === 'function') &&
+        generator[Symbol.toStringTag] !== 'AsyncGenerator';
+    if (!isGenerator) {
+        throw malformed(
+            'effectGen expects a generator function, function* (input) { ... }; ' +
+                `its function returned ${describeValue(generator)}.`,
+            generator
+        );
+    }
+    return { generator, position: 0, state: 'suspended' };
+};
+
+/**
+ * Adds a hint to V8's error for `yield*` on a value that is not iterable, keeping the original as `cause`.
+ * @param {unknown} e
+ * @returns {unknown}
+ */
+const explainBodyThrow = (e) => {
+    // V8's two wordings; the second is not unique to yield*, so the hint is conditional.
+    const notIterable = [
+        /^yield\* .* is not iterable$/,
+        /^object is not iterable \(cannot read property Symbol\(Symbol\.iterator\)\)$/
+    ];
+    if (!(e instanceof TypeError) || hasMark(e, harnessError) || !notIterable.some((p) => p.test(e.message))) {
+        return e;
+    }
+    const error = malformed(
+        `A generator flow threw "${e.message}". If it came from yield* on an Effect, write yield* step(effect).`,
+        undefined
+    );
+    return Object.defineProperty(error, 'cause', { value: e, writable: true, configurable: true });
+};
+
+/**
+ * @param {BodyRun} run
+ * @param {Resume} resume
+ * @returns {IteratorResult<any, any>}
+ */
+const resumeBody = (run, resume) => {
+    try {
+        const result = resume(run.generator);
+        if (result.done) run.state = 'done';
+        return result;
+    } catch (e) {
+        run.state = 'done';
+        throw explainBodyThrow(e);
+    }
+};
+
+/**
+ * Takes the Effect out of what a body yielded, claiming its marker, or refuses what is not a step.
+ * @param {any} value
+ * @returns {Effect}
+ */
+const claimStep = (value) => {
+    // First, since reading anything from a step wrapper throws.
+    const unstarred = stepEffects.get(value);
+    if (unstarred) {
+        throw malformed(
+            `A generator flow yielded step(${describeStep(unstarred)}) without the star; write yield* step(...).`,
+            undefined
+        );
+    }
+    if (stepMarkers.has(value)) {
+        claimedMarkers.add(value);
+        return value.effect;
+    }
+    if (isEffect(value)) {
+        throw malformed(`A generator flow yielded ${describeArgument(value)}; write yield* step(effect).`, value);
+    }
+    if (isThenable(value)) {
+        throw malformed(
+            'A generator flow yielded a Promise; put the call in a Command and yield* step(command).',
+            value
+        );
+    }
+    throw malformed(`A generator flow yielded ${describeValue(value)}; it can only yield* step(effect).`, value);
+};
+
+/**
+ * What a body's `return` means: an Effect runs as it is, a plain value is a `Success`.
+ * @param {any} value
+ * @returns {Effect}
+ */
+const returnedEffect = (value) => {
+    if (stepEffects.has(value)) {
+        throw malformed(
+            'A generator flow returned step(...); write return yield* step(...), or return the Effect itself.',
+            undefined
+        );
+    }
+    if (isEffect(value)) return value;
+    if (isThenable(value)) {
+        throw malformed(
+            'A generator flow returned a Promise; put the call in a Command and return yield* step(command).',
+            value
+        );
+    }
+    return Success(value);
+};
+
+/**
+ * Runs a body again from the top, feeding it the answers in `trail`, and checks it asks for the same steps. A step it
+ * builds again but does not run, since its answer is known, is stopped as a skipped one is (`stopSkipped`), so a
+ * generator flow inside it that has already entered its `try` runs its `finally`.
+ * @param {GenFlow} flow
+ * @param {Trail} trail
+ * @param {string} signature - The step the body has to be waiting at once the answers are fed
+ * @returns {BodyRun} The new run, waiting at that step
+ */
+const rerun = (flow, trail, signature) => {
+    const run = startRun(flow);
+    /** @returns {Effect} The step the body asked for */
+    const expect = (/** @type {IteratorResult<any, any>} */ result, /** @type {string} */ wanted) => {
+        const effect = result.done ? undefined : claimStep(result.value);
+        const asked = effect && describeStep(effect);
+        if (!effect || asked !== wanted) {
+            const did = asked === undefined ? 'returned' : `asked for ${asked}`;
+            throw malformed(
+                `A generator flow ${did} where its earlier run asked for ${wanted}. Something in its ` +
+                    'body changes between runs, such as Date.now(), Math.random(), or a variable outside the body; ' +
+                    "make it a Command, or pass it in the flow's input.",
+                undefined
+            );
+        }
+        if (effect.type !== 'Success') stopSkipped(effect, Success(undefined), undefined);
+        return effect;
+    };
+    /** @type {{ signature: string, answer: any }[]} */
+    const answers = [];
+    for (let cell = trail; cell; cell = cell.earlier) answers.unshift(cell);
+    let result = resumeBody(run, (g) => g.next());
+    for (const { signature: asked, answer } of answers) {
+        const effect = expect(result, asked);
+        run.position++;
+        // A pure step's value is the one this run just computed, never an object the earlier run went on to change.
+        const value = effect.type === 'Success' ? effect.value : answer;
+        result = resumeBody(run, (g) => g.next(value));
+    }
+    expect(result, signature);
+    return run;
+};
+
+/**
+ * The run waiting at `position`: the live one if it is there, else a new one the earlier answers bring there, as
+ * when a test walks a second branch or a `Retry` repeats the flow.
+ * @param {GenFlow} flow
+ * @param {BodyRun} run
+ * @param {number} position
+ * @param {Trail} trail
+ * @param {string} signature
+ * @returns {BodyRun}
+ */
+const runAt = (flow, run, position, trail, signature) =>
+    run.state === 'suspended' && run.position === position ? run : rerun(flow, trail, signature);
+
+/**
+ * Resumes a body and turns what it does next into an Effect: the step it yields, chained back into the body, or what
+ * it returns.
+ * @param {GenFlow} flow
+ * @param {BodyRun} run
+ * @param {Trail} trail - The answers before the position the body resumes at
+ * @param {Resume} resume
+ * @returns {Effect}
+ */
+const advance = (flow, run, trail, resume) => {
+    for (;;) {
+        const result = resumeBody(run, resume);
+        if (result.done) return returnedEffect(result.value);
+        const effect = claimStep(result.value);
+        const position = run.position;
+        const signature = describeStep(effect);
+        const before = trail;
+        if (effect.type === 'Success') {
+            // Fed straight back rather than through `chain`, so a long run of pure steps does not grow the stack.
+            trail = { signature, answer: effect.value, earlier: before };
+            run.position = position + 1;
+            resume = (g) => g.next(effect.value);
+            continue;
+        }
+        return chain(
+            effect,
+            (answer) => continueBody(flow, run, position, before, signature, answer),
+            undefined,
+            (node) => stopBody(flow, run, position, before, signature, node)
+        );
+    }
+};
+
+/**
+ * Hands a step's answer to the body waiting at it.
+ * @param {GenFlow} flow
+ * @param {BodyRun} run
+ * @param {number} position
+ * @param {Trail} trail
+ * @param {string} signature
+ * @param {any} answer
+ * @returns {Effect}
+ */
+const continueBody = (flow, run, position, trail, signature, answer) => {
+    const current = runAt(flow, run, position, trail, signature);
+    current.position = position + 1;
+    return advance(flow, current, { signature, answer, earlier: trail }, (g) => g.next(answer));
+};
+
+/**
+ * Throws a stop into the body waiting at a step that stopped the flow, so its `catch` and `finally` blocks run. Only
+ * the stop coming back out is accepted: a body that swallows it, throws something else, or yields while stopping
+ * rejects the run.
+ * @param {GenFlow} flow
+ * @param {BodyRun} run
+ * @param {number} position
+ * @param {Trail} trail
+ * @param {string} signature
+ * @param {Effect | undefined} node - The node that stopped the flow; undefined for a Failure
+ */
+const stopBody = (flow, run, position, trail, signature, node) => {
+    const current = runAt(flow, run, position, trail, signature);
+    current.state = 'done';
+    const where = node && isPending(node) ? describeStep(node) : 'a Failure';
+    const advice = "return the error as data inside the Command's function, or use Retry's onExhausted.";
+    // Carries neither the error nor what kind of stop it was, so user code cannot branch on either.
+    const stop = Object.assign(
+        new Error(`The flow stopped ${node ? 'after' : 'at'} ${where}. Nothing can be caught here: ${advice}`),
+        {
+            name: 'FlowStopped'
+        }
+    );
+    try {
+        current.generator.throw(stop);
+    } catch (e) {
+        if (e === stop) return;
+        if (hasMark(e, harnessError)) throw e;
+        const error = malformed(
+            `A catch in a generator flow threw another error after ${where} stopped it; a catch around yield* ` +
+                'cannot recover, so let the stop pass.',
+            undefined
+        );
+        throw Object.defineProperty(error, 'cause', { value: e, writable: true, configurable: true });
+    }
+    throw malformed(
+        `A generator flow kept going after ${where} stopped it: a catch swallowed the stop, or a finally ran a ` +
+            `step. Nothing can be caught here: ${advice}`,
+        undefined
+    );
+};
+
+/**
+ * Builds a flow function from a generator function, which writes `yield* step(effect)` where `async` code writes
+ * `await`. Calling the flow function runs the body up to its first step, and the flow it returns is made of ordinary
+ * nodes, so it records, replays and tests as a pipeline does.
+ *
+ * @param {(input: any) => Generator<any, any, any>} body
+ * @returns {(input: any) => Effect}
+ */
+const effectGen = (body) => {
+    if (typeof body !== 'function') {
+        throw malformed(
+            `effectGen expects a generator function, function* (input) { ... }, got ${describeArgument(body)}.`,
+            body
+        );
+    }
+    if (Object.getPrototypeOf(body) === asyncGeneratorFunction) {
+        throw malformed(
+            'effectGen expects function*, not async function*: get each result with yield* step(command) instead of await.',
+            body
+        );
+    }
+    return (input) => {
+        const flow = { body, input };
+        // Keyed on a copy, as `effectPipe`'s root is, since a body can return a shared object.
+        const root = copyRoot(advance(flow, startRun(flow), null, (g) => g.next()));
+        flowInputs.set(root, input);
         return root;
     };
 };
@@ -708,8 +1147,10 @@ const cancelledBranch = () =>
 /**
  * Which branch, if any, cancelled a Parallel, and how many branches it had; `branch: null` means an enclosing Parallel
  * did. Timing decides it, so it is recorded as the Parallel's own step for a replay to hand back, and the count lets a
- * replay see a branch added or removed.
- * @typedef {{ cancelled: false, branches: number } | { cancelled: true, branch: number | null, branches: number }} ParallelDecision
+ * replay see a branch added or removed. `threw` says a branch threw, which marked the scope, so a replay stops no
+ * generator flow there, as production did not once the throw came.
+ * @typedef {{ cancelled: false, branches: number }
+ *   | { cancelled: true, branch: number | null, branches: number, threw?: true }} ParallelDecision
  */
 
 /**
@@ -747,8 +1188,10 @@ const asDecision = (value, branches) => {
     if (value.cancelled === false) return { cancelled: false, branches };
     if (value.cancelled !== true) return undefined;
     const { branch } = value;
-    if (branch === null) return { cancelled: true, branch: null, branches };
-    return isBranchIndex(branch, branches) ? { cancelled: true, branch, branches } : undefined;
+    if (branch !== null && !isBranchIndex(branch, branches)) return undefined;
+    return value.threw === true
+        ? { cancelled: true, branch, branches, threw: true }
+        : { cancelled: true, branch, branches };
 };
 
 /**
@@ -769,15 +1212,26 @@ const replayCutError = (path) =>
     );
 
 /**
+ * Cancellation scopes a branch's throw aborted, and the scopes linked under them. `stopAt` stops no generator flow
+ * under one, since the throw rejects the run.
+ * @type {WeakSet<AbortSignal>}
+ */
+const thrownScopes = new WeakSet();
+
+/**
  * A cancellation scope for one Parallel, linked to the enclosing one so cancellation nests.
  * @param {AbortSignal} [signal] - The enclosing Parallel's signal, if any
  * @returns {{ scope: AbortController, unlink: () => void }}
  */
 const linkedScope = (signal) => {
     const scope = new AbortController();
-    const relay = () => scope.abort();
+    if (signal && thrownScopes.has(signal)) thrownScopes.add(scope.signal);
+    const relay = () => {
+        if (signal && thrownScopes.has(signal)) thrownScopes.add(scope.signal);
+        scope.abort();
+    };
     if (signal) {
-        if (signal.aborted) scope.abort();
+        if (signal.aborted) relay();
         else signal.addEventListener('abort', relay, { once: true });
     }
     const unlink = () => {
@@ -883,6 +1337,37 @@ const interpret = async (effect, context = {}, callConfig = {}, fastRetry = fals
 };
 
 /**
+ * Tells the generator flows waiting on `node` that it stopped the flow, innermost first. The other end of the
+ * protocol is `chain`, which keeps the listeners on each node it copies. Returns `result`, for a `return` to pass on.
+ * Under a scope a throw cancelled it tells none, since the run is about to reject and a `catch` could hide why.
+ *
+ * @param {Effect} node
+ * @param {SuccessState | FailureState | IoFaultState} result
+ * @param {AbortSignal | undefined} signal
+ * @returns {SuccessState | FailureState | IoFaultState}
+ */
+const stopAt = (node, result, signal) => {
+    if (signal && thrownScopes.has(signal)) return result;
+    stopListeners.get(node)?.forEach((listener) => listener(node));
+    return result;
+};
+
+/**
+ * `stopAt` for a node a cancellation skipped, which also tells the generator flows built inside a skipped `Retry` or
+ * `Parallel`, innermost first, since each body ran up to its first step as it was built.
+ *
+ * @param {Effect} node
+ * @param {SuccessState | FailureState | IoFaultState} result
+ * @param {AbortSignal | undefined} signal
+ * @returns {SuccessState | FailureState | IoFaultState}
+ */
+const stopSkipped = (node, result, signal) => {
+    if (node.type === 'Retry') stopSkipped(node.effect, result, signal);
+    if (node.type === 'Parallel') node.effects.forEach((branch) => stopSkipped(branch, result, signal));
+    return stopAt(node, result, signal);
+};
+
+/**
  * Walks a subtree until it reaches a Success, a Failure or an I/O fault. Every node but `Ask` runs in its
  * own function, which returns a Success carrying the value for the node's `next`, or what stops the subtree.
  *
@@ -899,7 +1384,7 @@ const execute = async (runtime, eff, signal, path = '') => {
     let from;
     while (isPending(eff)) {
         // A Command already in flight cannot be stopped, but the next one never starts.
-        if (signal?.aborted) return cancelledBranch();
+        if (signal?.aborted) return stopSkipped(eff, cancelledBranch(), signal);
         if (eff.type === 'Ask') {
             from = eff;
             eff = eff.next(runtime.context);
@@ -912,7 +1397,7 @@ const execute = async (runtime, eff, signal, path = '') => {
                 : eff.type === 'Parallel'
                   ? await runParallel(runtime, eff, signal, stepPath)
                   : await runCommand(runtime, eff, signal, stepPath);
-        if (outcome.type !== 'Success') return outcome;
+        if (outcome.type !== 'Success') return stopAt(eff, outcome, signal);
         // Outside every catch: `next` and the pure steps it reaches are code, not I/O, so a throw there
         // rejects the run.
         from = eff;
@@ -985,8 +1470,12 @@ const runParallel = async (runtime, parallel, signal, stepPath) => {
     try {
         await runtime.onStep('Parallel', 'Parallel', op, branchPath);
     } catch (e) {
-        // A cut from `fromTrace`: production had already stopped the branch this Parallel is in.
-        if (hasMark(e, replayCut)) return cancelledBranch();
+        // A cut from `fromTrace`: production had already stopped the branch this Parallel is in, so it skipped this
+        // Parallel, and `stopSkipped` tells the flows built in its branches, as production's cancellation did.
+        if (hasMark(e, replayCut)) {
+            parallel.effects.forEach((branch) => stopSkipped(branch, cancelledBranch(), signal));
+            return cancelledBranch();
+        }
         throw e;
     }
     if (!branchRun) {
@@ -1057,7 +1546,8 @@ const runBranches = async (runtime, effects, options, signal, branchPath, record
         limit,
         signal,
         branchPath,
-        reproducing ? () => false : (threw, result) => threw || (!settled && result.type !== 'Success')
+        reproducing ? () => false : (threw, result) => threw || (!settled && result.type !== 'Success'),
+        reproducing && forced.threw === true
     );
     if (reproducing) {
         // A branch that threw has no result to check, and its throw is what is rethrown.
@@ -1079,6 +1569,8 @@ const runBranches = async (runtime, effects, options, signal, branchPath, record
             : cancelled
               ? { cancelled: true, branch: null, branches }
               : { cancelled: false, branches };
+    // A throw from any branch marked the scope, whichever branch cancelled the others first.
+    if (thrown !== undefined && decision.cancelled) decision.threw = true;
     return { results, decision, thrown };
 };
 
@@ -1093,6 +1585,7 @@ const runBranches = async (runtime, effects, options, signal, branchPath, record
  * @param {AbortSignal | undefined} signal
  * @param {string} branchPath
  * @param {(threw: boolean, result: SuccessState | FailureState | IoFaultState) => boolean} cancelsOthers
+ * @param {boolean} [recordedThrow] - A replay's recorded decision says a branch threw, so no generator flow stops
  * @returns {Promise<{
  *   results: (SuccessState | FailureState | IoFaultState)[],
  *   thrown: { error: unknown } | undefined,
@@ -1100,8 +1593,9 @@ const runBranches = async (runtime, effects, options, signal, branchPath, record
  *   cancelled: boolean
  * }>}
  */
-const settleBranches = async (runtime, effects, limit, signal, branchPath, cancelsOthers) => {
+const settleBranches = async (runtime, effects, limit, signal, branchPath, cancelsOthers, recordedThrow = false) => {
     const { scope, unlink } = linkedScope(signal);
+    if (recordedThrow) thrownScopes.add(scope.signal);
     /** @type {(SuccessState | FailureState | IoFaultState)[]} */
     const results = new Array(effects.length);
     // Held rather than rethrown, so every branch still settles and no `limit` worker stops early.
@@ -1118,6 +1612,7 @@ const settleBranches = async (runtime, effects, limit, signal, branchPath, cance
         // Read-then-abort is atomic here, so exactly one branch is the trigger.
         if (cancelsOthers(thrown[i] !== undefined, results[i])) {
             if (!scope.signal.aborted) triggered[i] = true;
+            if (thrown[i] !== undefined) thrownScopes.add(scope.signal);
             scope.abort();
         }
     };
@@ -2353,5 +2848,7 @@ export {
     recordEffect,
     replayEffect,
     timeTravel,
-    commandName
+    commandName,
+    effectGen,
+    step
 };

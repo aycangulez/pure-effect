@@ -12,6 +12,7 @@ npx mocha --grep "pattern"                        # run a single test by name; n
 npm run format                                    # Prettier over index.js, index.d.ts, examples/*.js, scripts/*.js, test/*.js, test/types.test-d.ts, README.md, CLAUDE.md, DESIGN.md, CHANGELOG.md, CONTRIBUTING.md
 npx tsd                                           # type-level gate over test/types.test-d.ts
 npx tsc -p jsconfig.json                          # strict tsc over index.js, test/*.js, test/types.test-d.ts, examples/*.js, and scripts/*.js, reading index.d.ts as a consumer; the same config VS Code uses
+npm run test:fuzz                                 # test/fuzz.js over twenty times as many seeds as npm test runs; CI runs it
 npm run test:ts-minimum                           # compiles index.d.ts and test/types.test-d.ts with TypeScript 5.1, the oldest the declarations support
 npm run generate                                  # rewrites effectPipe's overloads in index.d.ts from scripts/effect-pipe-overloads.js
 npx esbuild index.js --minify --format=esm | gzip -9 | wc -c    # the size the README claims
@@ -19,7 +20,7 @@ npx stryker run                                   # mutation testing: mutates in
 npx stryker run --mutate "index.js:120-180"       # the same, limited to the lines a change touched
 ```
 
-There is no build or lint step: the library ships as plain ES modules. Formatting is Prettier, configured in `.prettierrc`. CI (`.github/workflows/ci.yml`) runs `npm test` on Node 22, 24 and 26, Prettier's check, and `npm run test:ts-minimum`, on pull requests and on pushes to `main`; the TypeScript 5.1 check fetches 5.1 with `npx`, so it needs the network the first time. **Check `npm test` by its exit code**: a `tsd` failure prints neither "passing" nor "failing". After a structural edit to `index.d.ts`, compare the runtime exports against the declared ones rather than trusting the diff. `package.json` has a `files` list, so anything new that must ship is added there; `npm pack --dry-run` shows what would be published.
+There is no build or lint step: the library ships as plain ES modules. Formatting is Prettier, configured in `.prettierrc`. CI (`.github/workflows/ci.yml`) runs `npm test` on Node 22, 24 and 26, Prettier's check, `npm run test:ts-minimum` and `npm run test:fuzz`, on pull requests and on pushes to `main`; the TypeScript 5.1 check fetches 5.1 with `npx`, so it needs the network the first time. **Check `npm test` by its exit code**: a `tsd` failure prints neither "passing" nor "failing". After a structural edit to `index.d.ts`, compare the runtime exports against the declared ones rather than trusting the diff. `package.json` has a `files` list, so anything new that must ship is added there; `npm pack --dry-run` shows what would be published.
 
 Mutation testing stays out of CI. Run it after changing `index.js` or its tests. Its survivors are not a to-do list: most are equivalent mutants (arrays sized in advance, a check after a retry backoff that the loop repeats) or message wording, and a few flip between runs because some tests depend on timing. Two gaps are deliberate: whether each nested `Parallel` removes its listener from the enclosing signal, and the wording of `timeTravel`'s narration. Before calling a survivor new, apply the mutant by hand to the old code and the new and run the suite: one that survives both is an old gap, not a regression.
 
@@ -47,7 +48,7 @@ Mutation testing stays out of CI. Run it after changing `index.js` or its tests.
 
 ## Design rules
 
-pure-effect is a zero-dependency effect system for JavaScript implementing the "Functional Core, Imperative Shell" pattern: business logic returns plain data instead of executing side effects, so it is tested without mocks, and a recorded run can be fed back through the interpreter with no I/O at all. Everything is in `index.js`, and `index.d.ts` declares it. The exports are the constructors `Success`, `Failure`, `Command`, `Ask`, `Retry` and `Parallel`; `effectPipe`, which composes steps through the internal `chain`; `runEffect`; `configureEffect`; `commandName`; and `recorder`, `recordEffect`, `replayEffect` and `timeTravel`.
+pure-effect is a zero-dependency effect system for JavaScript implementing the "Functional Core, Imperative Shell" pattern: business logic returns plain data instead of executing side effects, so it is tested without mocks, and a recorded run can be fed back through the interpreter with no I/O at all. Everything is in `index.js`, and `index.d.ts` declares it. The exports are the constructors `Success`, `Failure`, `Command`, `Ask`, `Retry` and `Parallel`; `effectPipe`, which composes steps through the internal `chain`; `runEffect`; `configureEffect`; `commandName`; `effectGen` and `step`, which build a flow from a generator function; and `recorder`, `recordEffect`, `replayEffect` and `timeTravel`.
 
 ### Failures and throws
 
@@ -57,10 +58,17 @@ pure-effect is a zero-dependency effect system for JavaScript implementing the "
 
 ### Composition
 
-- Control structures stay in pipeline functions: an `if` or a loop never wraps a Command. A decision sits in a function that receives one value, and control that spans I/O is a node. No API may let control span a Command; `DESIGN.md`'s Overview says why.
-- A `Failure` carries only its error, untrimmed, and no node or outcome carries the flow's input. `effectPipe` records the input in the private `flowInputs` map, keyed on a copy of the root it returns, since the last step can return a shared object; `interpret` hands it to `onRun` as `initialInput`, which is how a hook-based recorder finds it. Only `effectPipe` records one.
+- Outside `effectGen`, control structures stay in pipeline functions: an `if` or a loop never wraps a Command. A decision sits in a function that receives one value, and control that spans I/O is a node. `effectGen` is the one API that lets control span a Command, and its body yields only Effects; `DESIGN.md`'s Overview says why.
+- A `Failure` carries only its error, untrimmed, and no node or outcome carries the flow's input. `effectPipe` records the input in the private `flowInputs` map, keyed on a copy of the root it returns, since the last step can return a shared object; `interpret` hands it to `onRun` as `initialInput`, which is how a hook-based recorder finds it. Only `effectPipe` and `effectGen` record one.
 - A Command's identity is `commandName(eff)`: a non-empty string `meta.name`, else `cmd.name`, else `'anonymous'`. Traces, replay matching, spans and tests all use it; never restate the rule.
 - Docs and examples thread minimal values between steps rather than a growing accumulator object.
+
+### Generator flows
+
+- `effectGen` is an adapter over `chain`, and the nodes it builds are ordinary ones. `chain`'s `onStop` and `execute`'s `stopAt` share the stop listeners; the comment at each end names the other, and `copyRoot` keeps them when a root is copied.
+- A step that stops the flow throws a `FlowStopped` error into the waiting body; only that error coming back out is accepted. A harness error stops no generator.
+- A mistake with `step` or `effectGen` is an `EffectTypeError` built by `malformed`, never a warning. Nodes stay plain data: no iterator and no proxy on a node.
+- A body that runs again is fed its earlier answers and checked against the steps it asked for before.
 
 ### Retry and Parallel
 
@@ -98,6 +106,7 @@ pure-effect is a zero-dependency effect system for JavaScript implementing the "
 - An optional option or hook field is declared `T | undefined`, since `undefined` keeps its default, and under `exactOptionalPropertyTypes` a field declared `T` refuses a value read from configuration. `tsd` runs with that flag, and a test compiles each example under it.
 - A doc comment in `index.d.ts` is a hover: a sentence or two about what a user needs. Its reasons go in `DESIGN.md`, and a non-obvious type trick gets a one-line `//` note above its doc comment.
 - Deliberate type errors are `// @ts-expect-error` directives, never `tsd`'s `expectError`, each on one line, small enough that only the intended mistake can fail it, with a reason.
+- `index.d.ts` ends with `export {}`, so only a declaration marked `export` is public; a helper type stays unmarked.
 - Change `effectPipe`'s overloads in `scripts/effect-pipe-overloads.js` and run `npm run generate`, **never by hand**.
 - Some declarations exist for a reason, and each is pinned in `test/types.test-d.ts`: `Retry`'s error and `RetryState`'s `R`, every `next` as a method signature, the `settled?: false` overloads, `Command`'s first and last overloads, `Failure`'s `const`, functions typed from their whole return (`AnyEffect`, `EffectValue`, `EffectError`, `EffectContext`), `commandName`'s parameter, `RunContext`, the context parameters `CheckedContext` keeps out of inference, `CommandInterceptor`, `redact`'s `any`, `Parallel`'s branch typing, and the `readonly` options of `RetryState` and `ParallelState`. Read `DESIGN.md`'s TypeScript section before changing one, and extend the tsd file when touching the recording, replay or `CallConfiguration` types.
 
@@ -115,7 +124,8 @@ pure-effect is a zero-dependency effect system for JavaScript implementing the "
 
 Each was weighed and decided. Do not propose them again as improvements or rank them as weaknesses; `DESIGN.md` gives the reasons.
 
-- No generator syntax: control structures stay in their own functions, and a generator lets an `if` or a loop span a Command.
+- Generator flows go through `step`: nodes stay plain data, so no iterable nodes and no proxy on a node.
+- A stop runs a generator's `catch` and `finally`; a swallowed stop, a different error, or a `yield*` during a stop rejects the run.
 - No catch: `Retry`'s per-use `onExhausted` is the only recovery, and only from an I/O fault.
 - `attempts: 0` throws.
 - No settled Command: a Command's `next` always receives its result, and an I/O error the flow handles is caught inside the Command's function.
@@ -126,7 +136,7 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 - No finalizer inside a flow: cleanup is a try/finally around `runEffect` in the shell.
 - Nested pipelines for dependent values are a TypeScript cost only.
 - No join helper: `pair(f)` was built and dropped.
-- No flows written as one function: `flow(fn)` was built and dropped.
+- No flows written as one function: `flow(fn)` was built and dropped; `effectGen` replaced it.
 - No loop helper: a loop is a step that gets the list, then `Parallel(list.map(f), { limit: 1 })`.
 - A `TimeParadox` after a flow changes shape is the design; an incident test is re-recorded when its flow changes shape.
 - A trace records results, never Command arguments.
@@ -147,7 +157,7 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 
 ## Tests
 
-The runtime tests are in `test/`, a file for each concern (`core`, `retry`, `parallel`, `hooks`, `recording`, `replay`, `examples` and `docs`), and a new test goes in the file for its concern. `test/helpers.js` holds what more than one file needs, including the user-registration domain that is their running example; `registerUserFlow` has the same shape as the README's Quick Start. `test/types.test-d.ts` holds the type-level tests, run by `tsd`.
+The runtime tests are in `test/`, a file for each concern (`core`, `retry`, `parallel`, `hooks`, `recording`, `replay`, `gen`, `fuzz`, `examples` and `docs`), and a new test goes in the file for its concern. `fuzz` runs seeded random flows as pipelines and with generator flows mixed in, and checks they do the same; run `npm run test:fuzz` after changing `chain`, `execute`, `Retry`, `Parallel`, replay or `gen`, and turn a failing seed into a test in the file for its concern. `test/helpers.js` holds what more than one file needs, including the user-registration domain that is their running example; `registerUserFlow` has the same shape as the README's Quick Start. `test/types.test-d.ts` holds the type-level tests, run by `tsd`.
 
 - Assert on the returned data, such as Commands, Failures and traces, rather than on side effects.
 - Reset the hooks in every suite with `beforeEach(() => configureEffect())`, a bare call; `configureEffect({})` adds an empty layer rather than resetting.

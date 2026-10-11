@@ -2,6 +2,14 @@
 
 All notable changes to pure-effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
+## [0.19.0] - 2026-10-11
+
+### Added
+
+- **Flows can be written as generator functions.** `effectGen(function* (input) { ... })` builds a flow function from a generator that writes `yield* step(effect)` where `async` code writes `await`, so `if`s and `for` loops wrap steps as they wrap `await`. A plain return value is the flow's `Success`, a returned `Failure` stops it, and a returned Effect runs. The flow is made of the same nodes a pipeline is, so it records, replays, retries and runs in a `Parallel` as one does, and a recorded trace of a generator flow matches its pipeline's. When a step stops the flow, the body's `catch` and `finally` blocks run; a `catch` that recovers or throws another error, or a `finally` that runs a step, rejects the run. `step` throws an `EffectTypeError` when it is used other than with `yield*`, and so do the other common mistakes: a missing star, a yielded Promise, and an `async function*`. TypeScript infers each step's value, the error union and the context from the body.
+- **A `Parallel` in which a branch threw records `threw: true` in its decision.** An `onStep` hook sees it in what `op` returns, and a replay of such a trace stops no generator flow, as production did not; a trace recorded without it replays as before.
+- **`Ask()` with no argument reads the context.** It succeeds with the context itself, so a generator flow reads it with `yield* step(Ask())`, and TypeScript names its type with `Ask<AppContext>()`. `Ask(undefined)` still throws, since an explicit `undefined` is usually a misspelt name.
+
 ## [0.18.0] - 2026-10-09
 
 ### Changed
@@ -261,6 +269,7 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 
 - Initial release: `Success`, `Failure`, `Command`, `effectPipe`, and `runEffect`.
 
+[0.19.0]: https://github.com/aycangulez/pure-effect/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/aycangulez/pure-effect/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/aycangulez/pure-effect/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/aycangulez/pure-effect/compare/v0.15.0...v0.16.0

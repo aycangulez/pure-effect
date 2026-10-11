@@ -37,6 +37,20 @@ jobs:
             # installed as a dev dependency would link its own tsc over the one the gate runs.
             - run: npm run test:ts-minimum
 
+    fuzz:
+        name: Fuzz (generator flows)
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: npm
+            - run: npm ci
+            # npm test runs test/fuzz.js at a small size; this runs it over twenty times as many seeds. A failure
+            # prints the seed and the command that reruns it.
+            - run: npm run test:fuzz
+
     lint:
         name: Format
         runs-on: ubuntu-latest

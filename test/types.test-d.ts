@@ -13,9 +13,12 @@ import {
     recordEffect,
     replayEffect,
     timeTravel,
-    commandName
+    commandName,
+    effectGen,
+    step
 } from '../index.js';
 import type {
+    Step,
     SuccessState,
     FailureState,
     CommandState,
@@ -164,6 +167,10 @@ expectType<SuccessState<User> | FailureState<string>>(failResult);
 
 const ask = Ask((ctx) => Success(ctx as User));
 expectType<AskState<User, never>>(ask);
+
+// With no argument, Ask succeeds with the context, typed by its one type argument.
+expectType<AskState<{ tenant: string }, never, { tenant: string }>>(Ask<{ tenant: string }>());
+expectType<AskState<unknown, never, unknown>>(Ask());
 
 const askFlow = effectPipe((input: User) => Ask((_ctx) => Success(input)));
 expectType<Effect<User, never>>(askFlow({ email: 'a@b.com', password: 'secret123' }));
@@ -507,9 +514,21 @@ type TwentyErrors =
 expectType<Effect<{ total: number }, TwentyErrors, AppCtx>>(twentySteps(0));
 
 // Twenty-one is past the ceiling. A pipeline is itself a step, so a longer one nests.
-const step = stepWith('e');
-const eleven = [step, step, step, step, step, step, step, step, step, step, step] as const;
-const ten = [step, step, step, step, step, step, step, step, step, step] as const;
+const oneStep = stepWith('e');
+const eleven = [
+    oneStep,
+    oneStep,
+    oneStep,
+    oneStep,
+    oneStep,
+    oneStep,
+    oneStep,
+    oneStep,
+    oneStep,
+    oneStep,
+    oneStep
+] as const;
+const ten = [oneStep, oneStep, oneStep, oneStep, oneStep, oneStep, oneStep, oneStep, oneStep, oneStep] as const;
 // @ts-expect-error typed for up to 20 steps; nest pipelines for more
 effectPipe(...eleven, ...ten);
 const nested = effectPipe(effectPipe(...eleven), effectPipe(...ten));
@@ -1009,3 +1028,146 @@ replayEffect(configured, traceLog, {
     onResolved: undefined
 });
 timeTravel(typedFlow, traceLog, { log: undefined, context: undefined, version: fromConfig.name });
+
+// --- step ---
+
+expectType<Step<CommandState<number, number, never, unknown>>>(step(Command(() => 1)));
+// @ts-expect-error step takes an Effect, not a Promise
+step(Promise.resolve(1));
+
+// --- effectGen ---
+
+type GenUser = { id: number; email: string };
+declare const findGenUser: (email: string) => Effect<GenUser | null, 'DB_DOWN', unknown>;
+declare const saveGenUser: (input: { email: string }) => Effect<GenUser, 'SAVE_FAILED', unknown>;
+declare const readTenant: Effect<string, never, { tenant: string }>;
+declare const readRequest: Effect<string, never, { requestId: string }>;
+
+// Each yield* is typed by its own step, the error union collects every step's and every returned Failure's, and the
+// context intersects what each step reads.
+const registerGen = effectGen(function* (input: { email: string }) {
+    const found = yield* step(findGenUser(input.email));
+    expectType<GenUser | null>(found);
+    if (found) return Failure('EMAIL_TAKEN');
+    const tenant = yield* step(readTenant);
+    const requestId = yield* step(readRequest);
+    const user = yield* step(saveGenUser(input));
+    return { user, tenant, requestId };
+});
+expectType<
+    Effect<
+        { user: GenUser; tenant: string; requestId: string },
+        'DB_DOWN' | 'SAVE_FAILED' | 'EMAIL_TAKEN',
+        { tenant: string } & { requestId: string }
+    >
+>(registerGen({ email: 'a@b.c' }));
+
+// A flow that reads no context needs none, and a step that reads none does not erase another's requirement.
+const noContext = effectGen(function* () {
+    return yield* step(Success(1));
+});
+expectType<Effect<number, never, unknown>>(noContext(undefined));
+const oneContext = effectGen(function* () {
+    yield* step(Success(1));
+    return yield* step(readTenant);
+});
+expectType<Effect<string, never, { tenant: string }>>(oneContext(undefined));
+
+// Returning an Effect runs it, and its value and error are the flow's.
+const returnsEffect = effectGen(function* (email: string) {
+    return findGenUser(email);
+});
+expectType<Effect<GenUser | null, 'DB_DOWN', unknown>>(returnsEffect('a@b.c'));
+
+// Retry, Parallel, Ask() and a nested effectGen flow all type through step; Retry adds its exhaustion to the errors.
+const composed = effectGen(function* (email: string) {
+    const retried = yield* step(Retry(findGenUser(email)));
+    expectType<GenUser | null>(retried);
+    const [a, b] = yield* step(Parallel([findGenUser(email), Success(2)]));
+    expectType<GenUser | null>(a);
+    expectType<number>(b);
+    const ctx = yield* step(Ask<{ tenant: string }>());
+    expectType<{ tenant: string }>(ctx);
+    const nested = yield* step(registerGen({ email }));
+    expectType<{ user: GenUser; tenant: string; requestId: string }>(nested);
+    return nested.user.id;
+});
+expectType<
+    Effect<
+        number,
+        'DB_DOWN' | 'SAVE_FAILED' | 'EMAIL_TAKEN' | RetryExhaustedError,
+        { tenant: string } & { requestId: string }
+    >
+>(composed('a@b.c'));
+
+// An effectGen flow is a step function, so it composes in effectPipe.
+effectPipe((email: string) => Success(email), returnsEffect);
+
+effectGen(function* () {
+    // @ts-expect-error yield* needs a step: a plain Effect is not iterable
+    yield* findGenUser('a');
+});
+// @ts-expect-error a plain yield of an Effect is not a step
+effectGen(function* () {
+    yield findGenUser('a');
+});
+effectGen(function* () {
+    // @ts-expect-error a step used as a value has no properties
+    return step(findGenUser('a')).id;
+});
+// @ts-expect-error an async generator is not a flow body
+effectGen(async function* () {
+    yield* step(findGenUser('a'));
+});
+
+// A body that returns an untyped value, such as a parsed row, keeps the errors of its steps; the returned value is any.
+declare const untypedRow: any;
+const returnsAny = effectGen(function* (email: string) {
+    yield* step(findGenUser(email));
+    return untypedRow;
+});
+expectType<Effect<any, 'DB_DOWN', unknown>>(returnsAny('a@b.c'));
+
+// Returning a step or a Promise compiles, since a type check that refuses them also refuses generic helpers; the
+// runtime refuses both with an EffectTypeError.
+
+// The helpers behind effectGen's types are internal, as is CheckedContext.
+// @ts-expect-error GenValue is not exported
+import type { GenValue } from '../index.js';
+// @ts-expect-error CheckedContext is not exported
+import type { CheckedContext } from '../index.js';
+
+// Two steps whose types differ only in how much context they read: TypeScript merges such members of a generator's
+// yield type, and the flow must still require the wider context.
+const readTenantOnly = Ask((c: { tenant: string }) => Success(c.tenant));
+const readTenantAndRequest = Ask((c: { tenant: string; requestId: string }) => Success(c.requestId));
+const bothContexts = effectGen(function* () {
+    const tenant = yield* step(readTenantOnly);
+    const requestId = yield* step(readTenantAndRequest);
+    return tenant + requestId;
+});
+runEffect(bothContexts(undefined), { tenant: 'acme', requestId: 'r1' });
+// @ts-expect-error the second step reads requestId
+runEffect(bothContexts(undefined), { tenant: 'acme' });
+
+// A context that is itself a union stays a union, rather than becoming the intersection of its members.
+type ModeEnv = { mode: 'test' } | { mode: 'prod'; apiKey: string };
+declare const modeEnv: ModeEnv;
+const readMode = effectGen(function* () {
+    return (yield* step(Ask<ModeEnv>())).mode;
+});
+expectType<Effect<'test' | 'prod', never, ModeEnv>>(readMode(undefined));
+runEffect(readMode(undefined), modeEnv);
+
+// Generic helpers that wrap a step or return a value of a type parameter compile, and type once instantiated.
+const timedStep = <T, E, C>(effect: Effect<T, E, C>) =>
+    effectGen(function* () {
+        return yield* step(effect);
+    });
+expectType<Effect<GenUser | null, 'DB_DOWN', unknown>>(timedStep(findGenUser('a@b.c'))(undefined));
+const auditThen = <T>(value: T) =>
+    effectGen(function* () {
+        yield* step(Command(() => Promise.resolve('logged')));
+        return value;
+    });
+expectType<Effect<number, never, unknown>>(auditThen(42)(undefined));
