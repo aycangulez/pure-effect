@@ -1249,11 +1249,11 @@ export declare function effectPipe<
 // END effectPipe overloads.
 
 // The symbol and the iterator's yield type exist only in the declarations, never at runtime: together they are how
-// `gen` reads each step's Effect type out of the body's yield type.
+// `effectGen` reads each step's Effect type out of the body's yield type.
 declare const stepEffect: unique symbol;
 declare const stepContext: unique symbol;
 
-/** A step for `yield*` inside `gen`, which gives back the Effect's value. Using it any other way throws. */
+/** A step for `yield*` inside `effectGen`, which gives back the Effect's value. Using it any other way throws. */
 // The context is also a function parameter, which TypeScript compares the opposite way to the Effect, so of two steps
 // it merges in a generator's yield type it can only drop the one that reads less context.
 export type Step<X extends AnyEffect, C = EffectContext<X>> = {
@@ -1262,7 +1262,7 @@ export type Step<X extends AnyEffect, C = EffectContext<X>> = {
     [Symbol.iterator](): Generator<Step<X, C>, EffectValue<X>, unknown>;
 };
 
-/** Wraps an Effect for `yield*` inside `gen`: `const user = yield* step(findUser(email))`. */
+/** Wraps an Effect for `yield*` inside `effectGen`: `const user = yield* step(findUser(email))`. */
 export declare function step<X extends AnyEffect>(effect: X): Step<X>;
 
 type StepEffectOf<Y> = Y extends Step<infer X, any> ? X : never;
@@ -1291,7 +1291,7 @@ type GenContext<Y, R> = [GenNeeds<StepEffectOf<Y> | ReturnedEffect<R>>] extends 
  * Builds a flow function from a generator function, written with `yield* step(effect)` where `async` code writes
  * `await`. A plain return value is a `Success`; return a `Failure` to stop.
  */
-export declare function gen<I, Y extends Step<any, any>, R>(
+export declare function effectGen<I, Y extends Step<any, any>, R>(
     body: (input: I) => Generator<Y, R, unknown>
 ): (input: I) => Effect<GenValue<R>, GenError<Y, R>, GenContext<Y, R>>;
 

@@ -48,7 +48,7 @@ Mutation testing stays out of CI. Run it after changing `index.js` or its tests.
 
 ## Design rules
 
-pure-effect is a zero-dependency effect system for JavaScript implementing the "Functional Core, Imperative Shell" pattern: business logic returns plain data instead of executing side effects, so it is tested without mocks, and a recorded run can be fed back through the interpreter with no I/O at all. Everything is in `index.js`, and `index.d.ts` declares it. The exports are the constructors `Success`, `Failure`, `Command`, `Ask`, `Retry` and `Parallel`; `effectPipe`, which composes steps through the internal `chain`; `runEffect`; `configureEffect`; `commandName`; `gen` and `step`, which build a flow from a generator function; and `recorder`, `recordEffect`, `replayEffect` and `timeTravel`.
+pure-effect is a zero-dependency effect system for JavaScript implementing the "Functional Core, Imperative Shell" pattern: business logic returns plain data instead of executing side effects, so it is tested without mocks, and a recorded run can be fed back through the interpreter with no I/O at all. Everything is in `index.js`, and `index.d.ts` declares it. The exports are the constructors `Success`, `Failure`, `Command`, `Ask`, `Retry` and `Parallel`; `effectPipe`, which composes steps through the internal `chain`; `runEffect`; `configureEffect`; `commandName`; `effectGen` and `step`, which build a flow from a generator function; and `recorder`, `recordEffect`, `replayEffect` and `timeTravel`.
 
 ### Failures and throws
 
@@ -58,16 +58,16 @@ pure-effect is a zero-dependency effect system for JavaScript implementing the "
 
 ### Composition
 
-- Outside `gen`, control structures stay in pipeline functions: an `if` or a loop never wraps a Command. A decision sits in a function that receives one value, and control that spans I/O is a node. `gen` is the one API that lets control span a Command, and its body yields only Effects; `DESIGN.md`'s Overview says why.
-- A `Failure` carries only its error, untrimmed, and no node or outcome carries the flow's input. `effectPipe` records the input in the private `flowInputs` map, keyed on a copy of the root it returns, since the last step can return a shared object; `interpret` hands it to `onRun` as `initialInput`, which is how a hook-based recorder finds it. Only `effectPipe` and `gen` record one.
+- Outside `effectGen`, control structures stay in pipeline functions: an `if` or a loop never wraps a Command. A decision sits in a function that receives one value, and control that spans I/O is a node. `effectGen` is the one API that lets control span a Command, and its body yields only Effects; `DESIGN.md`'s Overview says why.
+- A `Failure` carries only its error, untrimmed, and no node or outcome carries the flow's input. `effectPipe` records the input in the private `flowInputs` map, keyed on a copy of the root it returns, since the last step can return a shared object; `interpret` hands it to `onRun` as `initialInput`, which is how a hook-based recorder finds it. Only `effectPipe` and `effectGen` record one.
 - A Command's identity is `commandName(eff)`: a non-empty string `meta.name`, else `cmd.name`, else `'anonymous'`. Traces, replay matching, spans and tests all use it; never restate the rule.
 - Docs and examples thread minimal values between steps rather than a growing accumulator object.
 
 ### Generator flows
 
-- `gen` is an adapter over `chain`, and the nodes it builds are ordinary ones. `chain`'s `onStop` and `execute`'s `stopAt` share the stop listeners; the comment at each end names the other, and `copyRoot` keeps them when a root is copied.
+- `effectGen` is an adapter over `chain`, and the nodes it builds are ordinary ones. `chain`'s `onStop` and `execute`'s `stopAt` share the stop listeners; the comment at each end names the other, and `copyRoot` keeps them when a root is copied.
 - A step that stops the flow throws a `FlowStopped` error into the waiting body; only that error coming back out is accepted. A harness error stops no generator.
-- A mistake with `step` or `gen` is an `EffectTypeError` built by `malformed`, never a warning. Nodes stay plain data: no iterator and no proxy on a node.
+- A mistake with `step` or `effectGen` is an `EffectTypeError` built by `malformed`, never a warning. Nodes stay plain data: no iterator and no proxy on a node.
 - A body that runs again is fed its earlier answers and checked against the steps it asked for before.
 
 ### Retry and Parallel
@@ -136,7 +136,7 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 - No finalizer inside a flow: cleanup is a try/finally around `runEffect` in the shell.
 - Nested pipelines for dependent values are a TypeScript cost only.
 - No join helper: `pair(f)` was built and dropped.
-- No flows written as one function: `flow(fn)` was built and dropped; `gen` replaced it.
+- No flows written as one function: `flow(fn)` was built and dropped; `effectGen` replaced it.
 - No loop helper: a loop is a step that gets the list, then `Parallel(list.map(f), { limit: 1 })`.
 - A `TimeParadox` after a flow changes shape is the design; an incident test is re-recorded when its flow changes shape.
 - A trace records results, never Command arguments.

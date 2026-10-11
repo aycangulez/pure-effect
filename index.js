@@ -6,7 +6,7 @@
 // 2. Building flows: the constructors; the checks, error messages and kinds of failure the later sections
 //    share, `checkOptions` and `Retry`'s defaults among them; `effectPipe`, with the `chain` that joins its
 //    steps, the stop listeners `chain` keeps for generator flows, and the `flowInputs` it records for `onRun`;
-//    and `step` and `gen`, which build a flow from a generator function.
+//    and `step` and `effectGen`, which build a flow from a generator function.
 // 3. Configuration: the hook types and their defaults, `configureEffect` and its layers, and `chainHooks`, which
 //    merges them.
 // 4. Running flows: the helpers `Retry`, `Parallel` and Commands run on; `interpret`, which builds a run's
@@ -492,7 +492,7 @@ const asEffect = (value, source) => {
  * @param {Effect} effect - The current Effect object
  * @param {(value: any) => Effect} fn - The next function to run if the current effect is a Success
  * @param {Effect} [from] - The node whose `next` returned `effect`, which an error names
- * @param {StopListener} [onStop] - Set by `gen`: told when a Failure passes `fn`, and kept on each copy for
+ * @param {StopListener} [onStop] - Set by `effectGen`: told when a Failure passes `fn`, and kept on each copy for
  *        `execute`'s `stopAt`, which calls it when the copy itself stops the flow
  * @returns {Effect} The composed Effect
  */
@@ -574,19 +574,19 @@ const effectPipe = (...fns) => {
 };
 
 /**
- * Every marker a step's iterator yielded, so `gen` can tell one from a value the body yielded itself.
+ * Every marker a step's iterator yielded, so `effectGen` can tell one from a value the body yielded itself.
  * @type {WeakSet<StepMarker>}
  */
 const stepMarkers = new WeakSet();
 
 /**
- * The markers `gen` received, so a step's iterator can tell `yield*` from a spread or a `for...of`.
+ * The markers `effectGen` received, so a step's iterator can tell `yield*` from a spread or a `for...of`.
  * @type {WeakSet<StepMarker>}
  */
 const claimedMarkers = new WeakSet();
 
 /**
- * The Effect inside each step wrapper, so `gen` can name a step yielded or returned without `yield*`.
+ * The Effect inside each step wrapper, so `effectGen` can name a step yielded or returned without `yield*`.
  * @type {WeakMap<object, Effect>}
  */
 const stepEffects = new WeakMap();
@@ -610,8 +610,8 @@ const describeStep = (effect) =>
         : `${effect.type === 'Ask' ? 'an' : 'a'} ${effect.type}`;
 
 /**
- * Wraps an Effect for `yield*` inside `gen`, which gives back the Effect's value. The wrapper is a proxy that throws
- * when it is used as a value, and its iterator throws unless `gen` claimed what it yielded.
+ * Wraps an Effect for `yield*` inside `effectGen`, which gives back the Effect's value. The wrapper is a proxy that throws
+ * when it is used as a value, and its iterator throws unless `effectGen` claimed what it yielded.
  *
  * @param {Effect} effect
  * @returns {any}
@@ -633,7 +633,7 @@ const step = (effect) => {
         try {
             return yield marker;
         } finally {
-            // Only `gen` claims a marker, so an unclaimed one means a spread, `Array.from` or a `for...of`.
+            // Only `effectGen` claims a marker, so an unclaimed one means a spread, `Array.from` or a `for...of`.
             if (!claimedMarkers.has(marker)) {
                 throw malformed(
                     `step(${describeStep(effect)}) was iterated outside yield*; write yield* step(...).`,
@@ -662,7 +662,7 @@ const step = (effect) => {
     return wrapper;
 };
 
-/** What an `async function*` inherits from, which `gen` refuses before it builds anything. */
+/** What an `async function*` inherits from, which `effectGen` refuses before it builds anything. */
 const asyncGeneratorFunction = Object.getPrototypeOf(async function* () {});
 
 /**
@@ -687,7 +687,7 @@ const asyncGeneratorFunction = Object.getPrototypeOf(async function* () {});
 
 /**
  * Starts a body. A function that returns anything but a synchronous generator is refused here, which covers a bundled
- * `async function*` the prototype check in `gen` missed.
+ * `async function*` the prototype check in `effectGen` missed.
  * @param {GenFlow} flow
  * @returns {BodyRun}
  */
@@ -699,7 +699,7 @@ const startRun = (flow) => {
         generator[Symbol.toStringTag] !== 'AsyncGenerator';
     if (!isGenerator) {
         throw malformed(
-            'gen expects a generator function, function* (input) { ... }; ' +
+            'effectGen expects a generator function, function* (input) { ... }; ' +
                 `its function returned ${describeValue(generator)}.`,
             generator
         );
@@ -950,16 +950,16 @@ const stopBody = (flow, run, position, trail, signature, node) => {
  * @param {(input: any) => Generator<any, any, any>} body
  * @returns {(input: any) => Effect}
  */
-const gen = (body) => {
+const effectGen = (body) => {
     if (typeof body !== 'function') {
         throw malformed(
-            `gen expects a generator function, function* (input) { ... }, got ${describeArgument(body)}.`,
+            `effectGen expects a generator function, function* (input) { ... }, got ${describeArgument(body)}.`,
             body
         );
     }
     if (Object.getPrototypeOf(body) === asyncGeneratorFunction) {
         throw malformed(
-            'gen expects function*, not async function*: get each result with yield* step(command) instead of await.',
+            'effectGen expects function*, not async function*: get each result with yield* step(command) instead of await.',
             body
         );
     }
@@ -2849,6 +2849,6 @@ export {
     replayEffect,
     timeTravel,
     commandName,
-    gen,
+    effectGen,
     step
 };

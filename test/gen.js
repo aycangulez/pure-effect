@@ -16,14 +16,14 @@ import {
     replayEffect,
     recorder,
     commandName,
-    gen,
+    effectGen,
     step
 } from '../index.js';
 import { registerUserFlow, validateRegistration, db } from './helpers.js';
 
 // The same flow as `registerUserFlow`, written as a generator, with the same Command names so the two record the
 // same trace.
-const registerUserGen = gen(function* (/** @type {import('./helpers.js').User} */ input) {
+const registerUserGen = effectGen(function* (/** @type {import('./helpers.js').User} */ input) {
     yield* step(validateRegistration(input));
     const cmdFindUser = () => db.findUserByEmail(input.email);
     const found = yield* step(Command(cmdFindUser));
@@ -35,7 +35,7 @@ const registerUserGen = gen(function* (/** @type {import('./helpers.js').User} *
 
 // Untyped, for the tests that make a mistake on purpose, which the declarations refuse.
 const looseStep = /** @type {(effect: any) => any} */ (step);
-const looseGen = /** @type {(body: any) => (input?: any) => any} */ (gen);
+const looseGen = /** @type {(body: any) => (input?: any) => any} */ (effectGen);
 
 /**
  * The message a call throws, or rejects with.
@@ -127,19 +127,19 @@ describe('step', function () {
 
     it('should accept a node copied with spread', function () {
         const original = Command(function cmdFindUser() {});
-        const flow = gen(function* () {
+        const flow = effectGen(function* () {
             return yield* step({ ...original, meta: { name: 'renamed' } });
         });
         assert.equal(commandName(/** @type {any} */ (flow(undefined))), 'renamed');
     });
 });
 
-describe('gen', function () {
+describe('effectGen', function () {
     beforeEach(() => configureEffect());
 
     describe('building a flow', function () {
         it('should refuse a value that is not a function, and an async generator function', async function () {
-            assert.match(await messageOf(() => looseGen(42)), /gen expects a generator function/);
+            assert.match(await messageOf(() => looseGen(42)), /effectGen expects a generator function/);
             assert.match(await messageOf(() => looseGen(async function* () {})), /not async function\*/);
         });
 
@@ -149,12 +149,12 @@ describe('gen', function () {
         });
 
         it('should refuse a function that returns an async generator, a plain iterator or null', async function () {
-            // A bundler can turn an async function* into a plain function, which the check in gen cannot see.
+            // A bundler can turn an async function* into a plain function, which the check in effectGen cannot see.
             const returns = [() => (async function* () {})(), () => [].values(), () => null];
             for (const body of returns) {
                 assert.match(
                     await messageOf(() => looseGen(body)()),
-                    /gen expects a generator function.*its function returned/
+                    /effectGen expects a generator function.*its function returned/
                 );
             }
         });
@@ -162,7 +162,7 @@ describe('gen', function () {
         it('should run the body up to its first step when the flow is built', function () {
             /** @type {string[]} */
             const seen = [];
-            const flow = gen(function* () {
+            const flow = effectGen(function* () {
                 seen.push('before');
                 yield* step(Command(function cmdFirst() {}));
                 seen.push('after');
@@ -181,19 +181,19 @@ describe('gen', function () {
         it('should succeed with a plain value, and with undefined when it returns nothing', async function () {
             assert.deepEqual(
                 await runEffect(
-                    gen(function* () {
+                    effectGen(function* () {
                         return 1;
                     })(undefined)
                 ),
                 Success(1)
             );
-            assert.deepEqual(await runEffect(gen(function* () {})(undefined)), Success(undefined));
+            assert.deepEqual(await runEffect(effectGen(function* () {})(undefined)), Success(undefined));
         });
 
         it('should stop with a returned Failure', async function () {
             assert.deepEqual(
                 await runEffect(
-                    gen(function* () {
+                    effectGen(function* () {
                         return Failure('no');
                     })(undefined)
                 ),
@@ -208,7 +208,7 @@ describe('gen', function () {
                 });
             assert.deepEqual(
                 await runEffect(
-                    gen(function* () {
+                    effectGen(function* () {
                         return cmd();
                     })(undefined)
                 ),
@@ -216,7 +216,7 @@ describe('gen', function () {
             );
             assert.deepEqual(
                 await runEffect(
-                    gen(function* () {
+                    effectGen(function* () {
                         return yield* step(cmd());
                     })(undefined)
                 ),
@@ -245,14 +245,14 @@ describe('gen', function () {
         });
 
         it('should throw from the flow function when the body throws before its first step', async function () {
-            const flow = gen(function* () {
+            const flow = effectGen(function* () {
                 throw new Error('bug');
             });
             assert.match(await messageOf(() => flow(undefined)), /^bug$/);
         });
 
         it('should reject the run when the body throws after a step', async function () {
-            const flow = gen(function* () {
+            const flow = effectGen(function* () {
                 yield* step(Command(function cmdFirst() {}));
                 throw new Error('bug');
             });
@@ -329,7 +329,7 @@ describe('gen', function () {
     describe('running the body again', function () {
         it('should advance one run when the flow is walked straight through', function () {
             let runs = 0;
-            const flow = gen(function* () {
+            const flow = effectGen(function* () {
                 runs++;
                 const a = yield* step(Command(function cmdA() {}));
                 const b = yield* step(Command(function cmdB() {}));
@@ -343,7 +343,7 @@ describe('gen', function () {
 
         it('should run the body again for a second branch walked from one step', function () {
             let runs = 0;
-            const flow = gen(function* () {
+            const flow = effectGen(function* () {
                 runs++;
                 const found = yield* step(Command(() => /** @type {{ id: number } | null} */ (null)));
                 return found ? Failure('taken') : 'free';
@@ -355,7 +355,7 @@ describe('gen', function () {
         });
 
         it('should run the body again for a second branch walked from before a pure step', function () {
-            const flow = gen(function* () {
+            const flow = effectGen(function* () {
                 const a = yield* step(Command(function cmdA() {}));
                 yield* step(Success('pure'));
                 const b = yield* step(Command(function cmdB() {}));
@@ -372,7 +372,7 @@ describe('gen', function () {
         it('should hand a body that runs again the value its pure step computes now, not the earlier value', async function () {
             // Each attempt of a Retry builds a fresh order, as a retried async function would.
             let reserveCalls = 0;
-            const placeOrder = gen(function* () {
+            const placeOrder = effectGen(function* () {
                 const order = yield* step(Success({ lines: /** @type {number[]} */ ([]) }));
                 order.lines.push(
                     yield* step(
@@ -392,7 +392,7 @@ describe('gen', function () {
             assert.deepEqual(await runEffect(Retry(placeOrder(undefined), { attempts: 2, delay: 0 })), Success([10]));
 
             // One flow value in three branches: each runs its own body, with its own array.
-            const counted = gen(function* () {
+            const counted = effectGen(function* () {
                 const seen = yield* step(Success(/** @type {number[]} */ ([])));
                 seen.push(
                     yield* step(
@@ -409,7 +409,7 @@ describe('gen', function () {
         it('should let a body that runs again consume what its pure step built', async function () {
             // A queue the first run emptied must not be handed to the second.
             let saves = 0;
-            const importRows = gen(function* () {
+            const importRows = effectGen(function* () {
                 const queue = yield* step(Success(['a', 'b']));
                 const saved = [];
                 while (queue.length) {
@@ -433,7 +433,7 @@ describe('gen', function () {
 
         it('should refuse a body that asks for a different step when it runs again', async function () {
             let runs = 0;
-            const flow = gen(function* () {
+            const flow = effectGen(function* () {
                 yield* step(Command(function cmdA() {}));
                 runs++;
                 yield* step(Command(runs === 1 ? function cmdB() {} : function cmdC() {}));
@@ -450,7 +450,7 @@ describe('gen', function () {
 
         it('should say a body returned where its earlier run asked for a step', async function () {
             let runs = 0;
-            const flow = gen(function* () {
+            const flow = effectGen(function* () {
                 yield* step(Command(function cmdA() {}));
                 runs++;
                 if (runs > 1) return 'early';
@@ -467,13 +467,13 @@ describe('gen', function () {
 
         it('should keep a long run of pure steps off the stack, and finish a long loop of Commands quickly', async function () {
             this.timeout(10000);
-            const pure = gen(function* () {
+            const pure = effectGen(function* () {
                 let sum = 0;
                 for (let i = 0; i < 5000; i++) sum += yield* step(Success(i));
                 return sum;
             });
             assert.deepEqual(pure(undefined), Success(12497500));
-            const io = gen(function* () {
+            const io = effectGen(function* () {
                 let sum = 0;
                 for (let i = 0; i < 5000; i++)
                     sum += yield* step(
@@ -491,7 +491,7 @@ describe('gen', function () {
 
     describe('reading the context', function () {
         it('should read it with Ask()', async function () {
-            const flow = gen(function* () {
+            const flow = effectGen(function* () {
                 const { tenant } = /** @type {{ tenant: string }} */ (yield* step(Ask()));
                 return tenant;
             });
@@ -500,7 +500,7 @@ describe('gen', function () {
     });
 });
 
-describe('gen: stopping', function () {
+describe('effectGen: stopping', function () {
     beforeEach(() => configureEffect());
 
     /** @type {string[]} */
@@ -512,7 +512,7 @@ describe('gen: stopping', function () {
      * @param {import('../index.js').Effect<any, any, any>} effect
      */
     const watching = (effect) =>
-        gen(function* () {
+        effectGen(function* () {
             try {
                 return yield* step(effect);
             } catch (e) {
@@ -533,7 +533,7 @@ describe('gen: stopping', function () {
     it('should say which step the flow stopped after', async function () {
         /** @type {string[]} */
         const messages = [];
-        const flow = gen(function* () {
+        const flow = effectGen(function* () {
             try {
                 yield* step(boom('cmdSave'));
             } catch (e) {
@@ -566,7 +566,7 @@ describe('gen: stopping', function () {
     });
 
     it('should not throw into a body that returned its own Failure', async function () {
-        const flow = gen(function* () {
+        const flow = effectGen(function* () {
             try {
                 yield* step(Command(function cmdLook() {}));
                 return Failure('done');
@@ -579,7 +579,7 @@ describe('gen: stopping', function () {
     });
 
     it('should reject the run when a catch swallows the stop', async function () {
-        const flow = gen(function* () {
+        const flow = effectGen(function* () {
             try {
                 yield* step(boom('cmdSave'));
             } catch {
@@ -590,7 +590,7 @@ describe('gen: stopping', function () {
     });
 
     it('should reject the run when a catch throws another error, keeping it as the cause', async function () {
-        const flow = gen(function* () {
+        const flow = effectGen(function* () {
             try {
                 yield* step(boom('cmdSave'));
             } catch {
@@ -605,7 +605,7 @@ describe('gen: stopping', function () {
     });
 
     it('should reject the run when finally runs a step while stopping', async function () {
-        const flow = gen(function* () {
+        const flow = effectGen(function* () {
             try {
                 yield* step(boom('cmdSave'));
             } finally {
@@ -616,14 +616,14 @@ describe('gen: stopping', function () {
     });
 
     it('should stop nested flows innermost first, each once', async function () {
-        const inner = gen(function* () {
+        const inner = effectGen(function* () {
             try {
                 yield* step(boom('cmdSave'));
             } finally {
                 seen.push('inner');
             }
         });
-        const outer = gen(function* () {
+        const outer = effectGen(function* () {
             try {
                 yield* step(inner(undefined));
             } finally {
@@ -636,7 +636,7 @@ describe('gen: stopping', function () {
 
     it('should stop each attempt under Retry, starting the body afresh for the next', async function () {
         let calls = 0;
-        const flow = gen(function* () {
+        const flow = effectGen(function* () {
             seen.push('start');
             try {
                 return yield* step(
@@ -657,7 +657,7 @@ describe('gen: stopping', function () {
         // On the second attempt the outer body runs again to reach its step, building a new inner flow it does not
         // run, since the answer is already known. That inner body entered its try, so its finally has to run.
         let calls = 0;
-        const inner = gen(function* () {
+        const inner = effectGen(function* () {
             seen.push('inner enter');
             try {
                 return yield* step(
@@ -669,7 +669,7 @@ describe('gen: stopping', function () {
                 seen.push('inner finally');
             }
         });
-        const outer = gen(function* () {
+        const outer = effectGen(function* () {
             const a = yield* step(inner(undefined));
             const b = yield* step(
                 Command(function cmdB() {
@@ -685,7 +685,7 @@ describe('gen: stopping', function () {
     });
 
     it('should let the body go on when onExhausted recovers', async function () {
-        const flow = gen(function* () {
+        const flow = effectGen(function* () {
             const value = yield* step(
                 Retry(boom('cmdPrice'), { attempts: 1, delay: 0, onExhausted: () => Success('cached') })
             );
@@ -695,7 +695,7 @@ describe('gen: stopping', function () {
     });
 
     it('should stop a cancelled branch, the failing branch and the flow around them', async function () {
-        const slow = gen(function* () {
+        const slow = effectGen(function* () {
             try {
                 yield* step(Command(() => new Promise((resolve) => setTimeout(resolve, 20))));
                 yield* step(Command(function cmdAfter() {}));
@@ -703,14 +703,14 @@ describe('gen: stopping', function () {
                 seen.push('slow');
             }
         });
-        const failing = gen(function* () {
+        const failing = effectGen(function* () {
             try {
                 yield* step(boom('cmdBad'));
             } finally {
                 seen.push('failing');
             }
         });
-        const outer = gen(function* () {
+        const outer = effectGen(function* () {
             try {
                 yield* step(Parallel([slow(undefined), failing(undefined)]));
             } finally {
@@ -722,14 +722,14 @@ describe('gen: stopping', function () {
     });
 
     it('should stop a failed branch under settled while the flow around it goes on', async function () {
-        const failing = gen(function* () {
+        const failing = effectGen(function* () {
             try {
                 yield* step(boom('cmdBad'));
             } finally {
                 seen.push('failing');
             }
         });
-        const outer = gen(function* () {
+        const outer = effectGen(function* () {
             const outcomes = yield* step(Parallel([failing(undefined), Success(1)], { settled: true }));
             return outcomes.map((outcome) => outcome.type);
         });
@@ -739,7 +739,7 @@ describe('gen: stopping', function () {
 
     it('should stop a generator flow used as an effectPipe step before another', async function () {
         // effectPipe's chain copies the flow's nodes with no listener of its own, and has to keep the flow's.
-        const watched = gen(function* () {
+        const watched = effectGen(function* () {
             try {
                 yield* step(boom('cmdSave'));
             } finally {
@@ -756,7 +756,7 @@ describe('gen: stopping', function () {
 
     it('should run no catch or finally in a sibling branch when a branch throws, so the real error is kept', async function () {
         // A throw rejects the run, so it stops no generator flow, in its own branch or a sibling cancelled because of it.
-        const sibling = gen(function* () {
+        const sibling = effectGen(function* () {
             try {
                 yield* step(Command(() => new Promise((resolve) => setTimeout(resolve, 20))));
                 yield* step(Command(function cmdAfter() {}));
@@ -779,7 +779,7 @@ describe('gen: stopping', function () {
 
     it('should stop a generator flow inside a Retry or a Parallel in a branch cancelled before it started', async function () {
         // The body already ran up to its first step, inside its try, when the flow was built.
-        const opened = gen(function* () {
+        const opened = effectGen(function* () {
             try {
                 yield* step(Command(function cmdNever() {}));
             } finally {
@@ -797,12 +797,12 @@ describe('gen: stopping', function () {
 
     it('should replay a branch that threw without running a sibling catch or finally, as production did', async function () {
         // A sibling whose catch swallows the stop would otherwise replace the real error in the replay.
-        const sibling = gen(function* () {
+        const sibling = effectGen(function* () {
             try {
                 yield* step(Command(() => new Promise((resolve) => setTimeout(resolve, 20))));
                 yield* step(
                     Parallel([
-                        gen(function* () {
+                        effectGen(function* () {
                             try {
                                 yield* step(Command(function cmdNested() {}));
                             } finally {
@@ -837,7 +837,7 @@ describe('gen: stopping', function () {
     it('should replay a throw that came after another branch cancelled the Parallel to the same error', async function () {
         // A Failure cancels the others first; a branch's throw comes next and marks the scope, so production stops no
         // generator, and the replay, which knows only the order the trace gives it, must not either.
-        const swallowing = gen(function* () {
+        const swallowing = effectGen(function* () {
             try {
                 yield* step(Command(() => new Promise((resolve) => setTimeout(resolve, 20))));
                 return yield* step(Command(function cmdAfter() {}));
@@ -863,7 +863,7 @@ describe('gen: stopping', function () {
     });
 
     it('should replay a cancelled branch that skipped a Parallel of generator flows, running their finally as production did', async function () {
-        const leaf = gen(function* (/** @type {string} */ id) {
+        const leaf = effectGen(function* (/** @type {string} */ id) {
             try {
                 return yield* step(
                     Command(function cmdLeaf() {
@@ -875,7 +875,7 @@ describe('gen: stopping', function () {
             }
         });
         // Its slow step ignores the signal, so the branch reaches the Parallel after the cancellation, which skips it.
-        const branch = gen(function* () {
+        const branch = effectGen(function* () {
             yield* step(
                 Command(function cmdSlow() {
                     return new Promise((resolve) => setTimeout(resolve, 30));
@@ -897,8 +897,8 @@ describe('gen: stopping', function () {
         assert.deepEqual([...seen].sort(), ['leaf x finally', 'leaf y finally']);
     });
 
-    it('should keep the waiting flows on a root that effectPipe or gen copied', async function () {
-        const watched = gen(function* () {
+    it('should keep the waiting flows on a root that effectPipe or effectGen copied', async function () {
+        const watched = effectGen(function* () {
             try {
                 yield* step(boom('cmdSave'));
             } finally {
@@ -910,7 +910,7 @@ describe('gen: stopping', function () {
     });
 });
 
-describe('gen: the same as a pipeline', function () {
+describe('effectGen: the same as a pipeline', function () {
     beforeEach(() => configureEffect());
     beforeEach(() => db.users.clear());
 
@@ -968,7 +968,7 @@ describe('gen: the same as a pipeline', function () {
     });
 
     it('should hand onRun the input, so a hook-based recorder can rebuild the flow', async function () {
-        // recordEffect is handed the input itself, so only onRun shows that gen recorded it.
+        // recordEffect is handed the input itself, so only onRun shows that effectGen recorded it.
         /** @type {unknown} */
         let initialInput;
         await runEffect(
@@ -989,20 +989,20 @@ describe('gen: the same as a pipeline', function () {
             Command(function cmdDouble() {
                 return x * 2;
             });
-        const doubled = gen(function* (/** @type {number} */ x) {
+        const doubled = effectGen(function* (/** @type {number} */ x) {
             return yield* step(double(x));
         });
         const inPipe = effectPipe(doubled, (/** @type {number} */ x) => Success(x + 1));
         assert.deepEqual(await runEffect(inPipe(2)), Success(5));
-        const aroundPipe = gen(function* (/** @type {number} */ x) {
+        const aroundPipe = effectGen(function* (/** @type {number} */ x) {
             return (yield* step(effectPipe(double, double)(x))) + 1;
         });
         assert.deepEqual(await runEffect(aroundPipe(2)), Success(9));
     });
 });
 
-describe('gen: Kleisli laws', function () {
-    // `gen(function* (x) { return yield* step(f(x)) })` must be `f`, and `gen(function* (x) { return x })` must be
+describe('effectGen: Kleisli laws', function () {
+    // `effectGen(function* (x) { return yield* step(f(x)) })` must be `f`, and `effectGen(function* (x) { return x })` must be
     // `Success`, observed through runEffect, since two equivalent flows hold different closures.
     beforeEach(() => configureEffect());
 
@@ -1014,14 +1014,14 @@ describe('gen: Kleisli laws', function () {
     const context = { bonus: 5 };
 
     it('should treat a body that returns its input as Success', async function () {
-        const pure = gen(function* (/** @type {number} */ x) {
+        const pure = effectGen(function* (/** @type {number} */ x) {
             return x;
         });
         assert.deepEqual(await runEffect(pure(3)), Success(3));
     });
 
     it('should treat a body that returns one step as that step', async function () {
-        const lifted = gen(function* (/** @type {number} */ x) {
+        const lifted = effectGen(function* (/** @type {number} */ x) {
             return yield* step(f(x));
         });
         assert.deepEqual(await runEffect(lifted(3)), await runEffect(f(3)));
@@ -1029,14 +1029,14 @@ describe('gen: Kleisli laws', function () {
     });
 
     it('should give the same result nested as flat', async function () {
-        const flat = gen(function* (/** @type {number} */ x) {
+        const flat = effectGen(function* (/** @type {number} */ x) {
             const doubled = yield* step(f(x));
             return yield* step(g(doubled));
         });
-        const inner = gen(function* (/** @type {number} */ x) {
+        const inner = effectGen(function* (/** @type {number} */ x) {
             return yield* step(f(x));
         });
-        const nested = gen(function* (/** @type {number} */ x) {
+        const nested = effectGen(function* (/** @type {number} */ x) {
             const doubled = yield* step(inner(x));
             return yield* step(g(doubled));
         });

@@ -20,7 +20,7 @@ import {
     recorder,
     recordEffect,
     replayEffect,
-    gen,
+    effectGen,
     step
 } from '../index.js';
 
@@ -362,7 +362,7 @@ const buildGen = (spec, log) => {
         if (spec.ending === 'retFail') steps.push(() => Failure(`RF${spec.id}`));
         return /** @type {any} */ (effectPipe)(...steps)([]);
     }
-    const body = gen(function* () {
+    const body = effectGen(function* () {
         const me = ++log.bodyRun;
         log.events.push([me, spec.id, 'enter']);
         try {

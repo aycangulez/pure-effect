@@ -14,7 +14,7 @@ import {
     replayEffect,
     recorder,
     Ask,
-    gen,
+    effectGen,
     step
 } from '../index.js';
 import * as lib from '../index.js';
@@ -353,12 +353,12 @@ describe('Documented sharp edges', function () {
         // catch or finally, since a catch could otherwise hide the real error.
         /** @type {string[]} */
         const seen = [];
-        const recorded = gen(function* () {
+        const recorded = effectGen(function* () {
             yield* step(Command(function cmdFirst() {}));
             yield* step(Command(function cmdSecond() {}));
         });
         const trace = (await recordEffect(() => recorded(undefined), undefined)).trace;
-        const changed = gen(function* () {
+        const changed = effectGen(function* () {
             try {
                 yield* step(Command(function cmdFirst() {}));
                 yield* step(Parallel([Command(function cmdSecond() {})]));
@@ -374,7 +374,7 @@ describe('Documented sharp edges', function () {
     it('should not notice a forgotten yield* when the step is only tested for truth', async function () {
         // Pinned deliberately: JavaScript cannot trap a truth test, so the step is always truthy and its Command never
         // runs, as a forgotten await leaves a Promise that is always truthy.
-        const flow = gen(function* () {
+        const flow = effectGen(function* () {
             const found = step(Command(() => /** @type {{ id: number } | null} */ (null)));
             return found ? 'taken' : 'free';
         });
@@ -385,7 +385,7 @@ describe('Documented sharp edges', function () {
         // Pinned deliberately: a generator cannot be copied, so answering an earlier step again runs the body from
         // the top, and code in it that changes something outside it does so again.
         let logged = 0;
-        const flow = gen(function* () {
+        const flow = effectGen(function* () {
             logged++;
             const found = yield* step(Command(() => /** @type {{ id: number } | null} */ (null)));
             return found ? 'taken' : 'free';
@@ -400,7 +400,7 @@ describe('Documented sharp edges', function () {
         // Pinned deliberately: the first run used up the body's generator, so the second starts the body from the
         // top. Build the flow from its input for each run.
         let started = 0;
-        const flow = gen(function* () {
+        const flow = effectGen(function* () {
             started++;
             return yield* step(
                 Command(function cmdOne() {
@@ -419,7 +419,7 @@ describe('Documented sharp edges', function () {
         // card, still runs its finally. Which comes first depends on timing.
         /** @type {string[]} */
         const seen = [];
-        const sibling = gen(function* () {
+        const sibling = effectGen(function* () {
             try {
                 yield* step(
                     Command(function cmdDeclined() {
@@ -450,7 +450,7 @@ describe('Documented sharp edges', function () {
         // consults none, so the replay carries the body past the Ask where production stopped it.
         /** @type {string[]} */
         const seen = [];
-        const branch = gen(function* () {
+        const branch = effectGen(function* () {
             try {
                 yield* step(
                     Command(function cmdSlowIgnoresSignal() {
@@ -480,14 +480,14 @@ describe('Documented sharp edges', function () {
         // Pinned deliberately: a step in a body's finally is unsupported. Here a nested flow's refusal is passing
         // through the outer body when its finally yields a step; the cancellation reaches the body before that step
         // starts, and the stop thrown into the paused finally replaces the pending error.
-        const refused = gen(function* () {
+        const refused = effectGen(function* () {
             try {
                 yield* step(Failure('early'));
             } finally {
                 yield* step(Command(function cmdInnerCleanup() {}));
             }
         });
-        const outer = gen(function* () {
+        const outer = effectGen(function* () {
             try {
                 yield* step(refused(undefined));
             } finally {

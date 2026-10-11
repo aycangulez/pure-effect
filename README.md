@@ -73,9 +73,9 @@ async function registerUser(input) {
 The same flow can be written as a generator, with `yield* step(...)` where `async` code writes `await`. [Writing Flows as Generators](#writing-flows-as-generators) covers what to know.
 
 ```js
-import { gen, step } from 'pure-effect';
+import { effectGen, step } from 'pure-effect';
 
-const registerUserFlowGen = gen(function* (input) {
+const registerUserFlowGen = effectGen(function* (input) {
     yield* step(validateRegistration(input));
     yield* step(ensureEmailAvailable(input));
     return yield* step(saveUser(input));
@@ -84,7 +84,7 @@ const registerUserFlowGen = gen(function* (input) {
 
 ## How It Works
 
-A flow is a chain of pairs: an I/O call, and a `next` function that receives its answer and returns the next Command, a Success, or a Failure. `runEffect` walks the chain in a loop. A generator flow builds the same Commands: `gen` runs your function up to each `yield*` and continues it with the answer.
+A flow is a chain of pairs: an I/O call, and a `next` function that receives its answer and returns the next Command, a Success, or a Failure. `runEffect` walks the chain in a loop. A generator flow builds the same Commands: `effectGen` runs your function up to each `yield*` and continues it with the answer.
 
 Recording and replay hook into the one place where a Command's function is called. Recording writes down each answer. Replay supplies the recorded answer instead of making the call, so a replayed flow does no I/O.
 
@@ -230,14 +230,14 @@ A loop becomes a step that gets the list and a `Parallel` over it, as the table 
 
 ## Writing Flows as Generators
 
-A generator flow is written like `async` code, with `yield* step(...)` where `async` code writes `await`. `gen` turns it into the same Commands a pipeline builds, so recording, replay, `Retry`, `Parallel` and the tests above work the same for both. The Quick Start's `registerUserFlowGen` is one.
+A generator flow is written like `async` code, with `yield* step(...)` where `async` code writes `await`. `effectGen` turns it into the same Commands a pipeline builds, so recording, replay, `Retry`, `Parallel` and the tests above work the same for both. The Quick Start's `registerUserFlowGen` is one.
 
 ### Where a generator helps
 
 A generator earns its keep when a later step needs the results of more than one earlier step. Here the welcome email needs both the saved user and the workspace created for them, and each is a variable:
 
 ```js
-const onboardUser = gen(function* (input) {
+const onboardUser = effectGen(function* (input) {
     const user = yield* step(registerUserFlowGen(input));
 
     const cmdCreateWorkspace = () => db.createWorkspace(user.id);
@@ -255,7 +255,7 @@ assert.equal(onboarded.value.workspace.ownerId, onboarded.value.user.id);
 
 A pipeline would need a step that passes the user and the workspace on together; see [Composing Larger Flows](#composing-larger-flows). Keep decisions in step functions all the same, as `registerUserFlowGen` does, so each can be tested on its own.
 
-The body can run more than once: under a `Retry`, when one flow value is run twice, and when a test walks a second branch. So keep it to its own variables, and get `Date.now()` or a random ID from a Command. [Generator Flows in Depth](#generator-flows-in-depth) covers when it runs again, how a `catch` or `finally` in it behaves when a step stops the flow, and the mistakes `gen` catches.
+The body can run more than once: under a `Retry`, when one flow value is run twice, and when a test walks a second branch. So keep it to its own variables, and get `Date.now()` or a random ID from a Command. [Generator Flows in Depth](#generator-flows-in-depth) covers when it runs again, how a `catch` or `finally` in it behaves when a step stops the flow, and the mistakes `effectGen` catches.
 
 ### Testing a generator flow
 
@@ -830,7 +830,7 @@ The `Parallel`'s `next` receives what each body returned, in order, so a total o
 In a generator flow, the same loop can be a `for` loop over the list, with the body's steps inside it:
 
 ```js
-const payUnpaidGen = gen(function* (customerId) {
+const payUnpaidGen = effectGen(function* (customerId) {
     const invoices = yield* step(findUnpaidInvoices(customerId));
     for (const invoice of invoices) yield* step(payInvoice(invoice));
 });
@@ -947,7 +947,7 @@ A mistake after the first Command makes `runEffect` reject. That covers a missin
 
 ## Generator Flows in Depth
 
-What [Writing Flows as Generators](#writing-flows-as-generators) leaves out: when a body runs again, what a `catch` or `finally` in it can do, and the mistakes `gen` catches.
+What [Writing Flows as Generators](#writing-flows-as-generators) leaves out: when a body runs again, what a `catch` or `finally` in it can do, and the mistakes `effectGen` catches.
 
 ### What runs once, and what runs again
 
@@ -979,7 +979,7 @@ const unreliableDb = {
     }
 };
 
-const saveUser = gen(function* (user) {
+const saveUser = effectGen(function* (user) {
     try {
         const cmdSaveUser = () => unreliableDb.saveUser(user);
         return yield* step(Command(cmdSaveUser));
@@ -996,7 +996,7 @@ assert.equal(result.error.message, 'connection reset');
 A `catch` that returns or carries on, one that throws a different error, and a `finally` that runs another step all stop the run with an `EffectTypeError` that says so:
 
 ```js
-const saveLater = gen(function* (user) {
+const saveLater = effectGen(function* (user) {
     try {
         const cmdSaveUser = () => unreliableDb.saveUser(user);
         return yield* step(Command(cmdSaveUser));
@@ -1020,7 +1020,7 @@ Handle an error the flow expects inside the Command's function, and return it as
 | `const found = step(x)`, then `found.id` | an `EffectTypeError`: `step(...)` was used as a value |
 | `[...step(x)]` or `for (const v of step(x))` | an `EffectTypeError`: `step(...)` was iterated outside `yield*` |
 | `step(db.findUser(email))` | an `EffectTypeError`: put the call in a Command |
-| `gen(async function* () {})` | an `EffectTypeError`: write `function*` |
+| `effectGen(async function* () {})` | an `EffectTypeError`: write `function*` |
 
 In TypeScript, most of these do not compile; see [TypeScript](#typescript-typed-errors-and-context).
 
@@ -1076,10 +1076,10 @@ Every step's context counts, so a pipeline needs all the contexts its steps read
 
 ### Generator flows
 
-`gen` infers everything from the body. Each `yield*` is typed by its own step, the error union collects every step's errors and every `Failure` the body returns, and the context collects what every step reads:
+`effectGen` infers everything from the body. Each `yield*` is typed by its own step, the error union collects every step's errors and every `Failure` the body returns, and the context collects what every step reads:
 
 ```ts
-const registerUser = gen(function* (input: { email: string }) {
+const registerUser = effectGen(function* (input: { email: string }) {
     const found = yield* step(findUser(input.email)); // User | null
     if (found) return Failure('EMAIL_TAKEN');
     return yield* step(saveUser(input));
@@ -1227,7 +1227,7 @@ In either language, a Command a step builds and does not return never runs, and 
 
 Return the Command, and have its `next` return the value the rest of the pipeline needs.
 
-#### `gen(body)`
+#### `effectGen(body)`
 
 Returns a flow function, `(input) => Effect`, from a generator function, `function* (input) { ... }`. See [Writing Flows as Generators](#writing-flows-as-generators).
 
@@ -1238,7 +1238,7 @@ Returns a flow function, `(input) => Effect`, from a generator function, `functi
 
 #### `step(effect)`
 
-Wraps an Effect for `yield*` inside `gen`, which gives back its value: `const user = yield* step(findUser(email))`. Anything but an Effect throws an `EffectTypeError`, and so does using the result any other way than `yield*`.
+Wraps an Effect for `yield*` inside `effectGen`, which gives back its value: `const user = yield* step(findUser(email))`. Anything but an Effect throws an `EffectTypeError`, and so does using the result any other way than `yield*`.
 
 ### Running a flow
 
