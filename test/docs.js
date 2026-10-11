@@ -21,6 +21,7 @@ import * as lib from '../index.js';
 import ts from 'typescript';
 import { readFileSync } from 'node:fs';
 import { mock } from 'node:test';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { effectPipeOverloads, currentOverloads } from '../scripts/effect-pipe-overloads.js';
 import { errorOf } from './helpers.js';
 
@@ -149,6 +150,8 @@ describe('README examples', function () {
             sink: () => {},
             telemetryHooks: () => ({}),
             recordingHooks: () => ({}),
+            // Real: the Hooks example shows a scope reaching every hook, which only the real one does.
+            AsyncLocalStorage,
             // Real rather than stubbed: the async/await comparison shows the mocked test a plain
             // `async` function needs, and it should pass against that function the way it would for
             // a reader.
