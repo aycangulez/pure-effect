@@ -259,7 +259,7 @@ assert.equal(onboarded.value.workspace.ownerId, onboarded.value.user.id);
 
 A pipeline would need a step that passes the user and the workspace on together; see [Composing Larger Flows](#composing-larger-flows). Keep decisions in step functions all the same, as `registerUserFlowGen` does, so each can be tested on its own.
 
-The body can run more than once: under a `Retry`, when one flow value is run twice, and when a test walks a second branch. So keep it to its own variables, and get `Date.now()` or a random ID from a Command. [Generator Flows in Depth](#generator-flows-in-depth) covers when it runs again, how a `catch` or `finally` in it behaves when a step stops the flow, and the mistakes `effectGen` catches.
+The body can run more than once: from the top for each `Retry` attempt and each time one flow value is run, as an `async` function does when it is called again, and when a test walks a second branch. So keep it to its own variables, and get `Date.now()` or a random ID from a Command, so a replay gets the recorded one. [Generator Flows in Depth](#generator-flows-in-depth) covers when it runs again, how a `catch` or `finally` in it behaves when a step stops the flow, and the mistakes `effectGen` catches.
 
 ### Testing a generator flow
 
@@ -1053,7 +1053,7 @@ What [Writing Flows as Generators](#writing-flows-as-generators) leaves out: whe
 
 ### What runs once, and what runs again
 
-A run goes through the body once, top to bottom, as `async` code does. Anything that uses the flow a second time runs it again from the top, since a generator cannot be copied: running one flow value again, or putting it in two branches of a `Parallel`, so build the flow from its input for each run; a `Retry` around the flow, which starts the body afresh for each attempt, as a retried `async` function does; and a test that hands an earlier step a second answer, to walk another branch:
+A run goes through the body once, top to bottom, as `async` code does. Running the flow again starts the body again from the top, as calling an `async` function again does: a `Retry` around the flow builds it afresh from its input for each attempt, and one flow value run twice, or put in two branches of a `Parallel`, is built afresh for each, so every Command in one attempt or branch gets the same values. A test that hands an earlier step a second answer, to walk another branch, runs the body again from the top too, feeding it the answers before that step:
 
 ```js
 const flow = registerUserFlowGen(input);
@@ -1066,7 +1066,7 @@ assert.deepEqual(flow.next({ id: 1 }), Failure('Email already in use.'));
 assert.equal(commandName(flow.next(null)), 'cmdSaveUser');
 ```
 
-So keep the body to its own variables. When it runs again, it has to ask for the same steps in the same order, and a body that asks for a different one stops the run with an `EffectTypeError` naming both. `Date.now()`, a random ID, or a variable outside the body can change between runs: get the first two from a Command, as a pipeline does, and pass the third in the flow's input.
+So keep the body to its own variables. A body run again for a walk has to ask for the same steps in the same order, and one that asks for a different one stops with an `EffectTypeError` naming both. `Date.now()`, a random ID, or a variable outside the body can change between runs: get the first two from a Command, as a pipeline does, so a replay gets the recorded value, and pass the third in the flow's input.
 
 ### How a generator flow stops
 

@@ -400,8 +400,8 @@ describe('Documented sharp edges', function () {
     });
 
     it('should run a generator body again when one flow value is run twice', async function () {
-        // Pinned deliberately: the first run used up the body's generator, so the second starts the body from the
-        // top. Build the flow from its input for each run.
+        // Pinned deliberately: as calling an `async` function again does, the second run builds the flow again from
+        // its input, so code in the body that changes something outside it does so again.
         let started = 0;
         const flow = effectGen(function* () {
             started++;

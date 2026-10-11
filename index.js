@@ -5,13 +5,14 @@
 // 1. Types: the JSDoc shapes of the nodes a flow is made of.
 // 2. Building flows: the constructors; the checks, error messages and kinds of failure the later sections
 //    share, `checkOptions` and `Retry`'s defaults among them; `effectPipe`, with the `chain` that joins its
-//    steps, the stop listeners `chain` keeps for generator flows, and the `flowInputs` it records for `onRun`;
-//    and `step` and `effectGen`, which build a flow from a generator function.
+//    steps, the stop listeners and `restarts` `chain` keeps for generator flows, and the `flowInputs` it records
+//    for `onRun`; and `step` and `effectGen`, which build a flow from a generator function.
 // 3. Configuration: the hook types and their defaults, `configureEffect` and its layers, and `chainHooks`, which
 //    merges them.
 // 4. Running flows: the helpers `Retry`, `Parallel` and Commands run on; `interpret`, which builds a run's
-//    `Runtime`, then `stopAt`, which tells a waiting generator flow its step stopped, `execute` and a function
-//    for each kind of node, which each take it; and `runEffect`.
+//    `Runtime`, then `stopAt`, which tells a waiting generator flow its step stopped, `ownRun`, which builds a
+//    generator flow again for each execution after its first, `execute` and a function for each kind of node,
+//    which each take it; and `runEffect`.
 // 5. Recording and replay: the trace format and replay errors, copying values and errors into a trace,
 //    `recorder` and `recordEffect`, then `fromTrace`, `replayEffect` and `timeTravel`, each followed by the
 //    functions it hands its parts to.
@@ -510,6 +511,10 @@ const chain = (effect, fn, from, onStop) => {
     const waiting = stopListeners.get(effect);
     if (onStop) stopListeners.set(copy, [...(waiting ?? []), onStop]);
     else if (waiting) stopListeners.set(copy, waiting);
+    const restart = restarts.get(effect);
+    if (restart) {
+        restarts.set(copy, { built: restart.built, rebuild: () => chain(restart.rebuild(), fn, from, onStop) });
+    }
     return copy;
 };
 
@@ -527,7 +532,22 @@ const chain = (effect, fn, from, onStop) => {
 const stopListeners = new WeakMap();
 
 /**
- * Copies a flow's root, which `flowInputs` is keyed on, keeping the generator flows waiting on it.
+ * The body run a generator flow made as it was built, which the first execution of the flow takes over if nothing
+ * has used it. `claimed` is shared by every copy of the flow's root, so only one execution takes it over.
+ * @typedef {{ run: BodyRun, position: number, state: BodyRun['state'], claimed: boolean }} BuiltRun
+ */
+
+/**
+ * How to build each generator flow's root again from its input, and the run it was built with. `effectGen` sets one,
+ * `chain` and `copyRoot` keep it on their copies, and `execute`'s `ownRun` builds the flow again for every execution
+ * after the first, so a `Retry` or a reused flow value runs the body afresh, as a retried `async` function does.
+ * @type {WeakMap<Effect, { built: BuiltRun, rebuild: () => Effect }>}
+ */
+const restarts = new WeakMap();
+
+/**
+ * Copies a flow's root, which `flowInputs` is keyed on, keeping the generator flows waiting on it and how to build it
+ * again.
  * @param {Effect} tree
  * @returns {Effect}
  */
@@ -535,6 +555,8 @@ const copyRoot = (tree) => {
     const root = { ...tree };
     const waiting = stopListeners.get(tree);
     if (waiting) stopListeners.set(root, waiting);
+    const restart = restarts.get(tree);
+    if (restart) restarts.set(root, { built: restart.built, rebuild: () => copyRoot(restart.rebuild()) });
     return root;
 };
 
@@ -945,7 +967,8 @@ const stopBody = (flow, run, position, trail, signature, node) => {
 /**
  * Builds a flow function from a generator function, which writes `yield* step(effect)` where `async` code writes
  * `await`. Calling the flow function runs the body up to its first step, and the flow it returns is made of ordinary
- * nodes, so it records, replays and tests as a pipeline does.
+ * nodes, so it records, replays and tests as a pipeline does. The first execution of the flow takes over that run of
+ * the body, and every later one builds the flow again from its input, as calling an `async` function again does.
  *
  * @param {(input: any) => Generator<any, any, any>} body
  * @returns {(input: any) => Effect}
@@ -963,13 +986,18 @@ const effectGen = (body) => {
             body
         );
     }
-    return (input) => {
+    /** @param {any} input */
+    const build = (input) => {
         const flow = { body, input };
+        const run = startRun(flow);
         // Keyed on a copy, as `effectPipe`'s root is, since a body can return a shared object.
-        const root = copyRoot(advance(flow, startRun(flow), null, (g) => g.next()));
+        const root = copyRoot(advance(flow, run, null, (g) => g.next()));
         flowInputs.set(root, input);
+        const built = { run, position: run.position, state: run.state, claimed: false };
+        restarts.set(root, { built, rebuild: () => build(input) });
         return root;
     };
+    return build;
 };
 
 // #endregion
@@ -1362,9 +1390,35 @@ const stopAt = (node, result, signal) => {
  * @returns {SuccessState | FailureState | IoFaultState}
  */
 const stopSkipped = (node, result, signal) => {
+    // A generator flow another execution took over, or a test walked, is not this one's to stop.
+    const restart = restarts.get(node);
+    if (restart && !takeBuiltRun(restart.built)) return result;
     if (node.type === 'Retry') stopSkipped(node.effect, result, signal);
     if (node.type === 'Parallel') node.effects.forEach((branch) => stopSkipped(branch, result, signal));
     return stopAt(node, result, signal);
+};
+
+/**
+ * Takes over the run a generator flow made as it was built, if nothing has: no execution took it over, and no test
+ * walked it on from where it was built.
+ * @param {BuiltRun} built
+ * @returns {boolean} Whether the run was free
+ */
+const takeBuiltRun = (built) => {
+    const free = !built.claimed && built.run.position === built.position && built.run.state === built.state;
+    built.claimed = true;
+    return free;
+};
+
+/**
+ * The node to run in place of `eff`: `eff` itself, unless it is a generator flow's root whose built run is taken, when
+ * it is the flow built again from its input. The other end is `restarts`, which `effectGen` fills.
+ * @param {Effect} eff
+ * @returns {Effect}
+ */
+const ownRun = (eff) => {
+    const restart = restarts.get(eff);
+    return restart && !takeBuiltRun(restart.built) ? restart.rebuild() : eff;
 };
 
 /**
@@ -1385,6 +1439,11 @@ const execute = async (runtime, eff, signal, path = '') => {
     while (isPending(eff)) {
         // A Command already in flight cannot be stopped, but the next one never starts.
         if (signal?.aborted) return stopSkipped(eff, cancelledBranch(), signal);
+        const own = ownRun(eff);
+        if (own !== eff) {
+            eff = own;
+            continue;
+        }
         if (eff.type === 'Ask') {
             from = eff;
             eff = eff.next(runtime.context);

@@ -910,6 +910,132 @@ describe('effectGen: stopping', function () {
     });
 });
 
+describe('effectGen: running a flow again', function () {
+    beforeEach(() => configureEffect());
+
+    /** @type {string[]} */
+    let log = [];
+    let ids = 0;
+    let failures = 0;
+    beforeEach(() => {
+        log = [];
+        ids = 0;
+        failures = 0;
+    });
+
+    // Makes its ID in the body, which the docs advise against, so the log shows which run of the body built each
+    // Command.
+    const reserveAndCharge = effectGen(function* () {
+        const id = `id-${++ids}`;
+        const cmdReserve = () => log.push(`reserve ${id}`);
+        yield* step(Command(cmdReserve));
+        const cmdCharge = () => {
+            if (failures-- > 0) throw new Error('card network timeout');
+            log.push(`charge ${id}`);
+            return id;
+        };
+        return yield* step(Command(cmdCharge));
+    });
+
+    it('should run a flow once on the run its body made as the flow was built', async function () {
+        assert.deepEqual(await runEffect(reserveAndCharge(undefined)), Success('id-1'));
+        assert.equal(ids, 1);
+    });
+
+    it('should build the flow again for each Retry attempt, so an attempt hands every Command its own values', async function () {
+        failures = 1;
+        const result = await runEffect(Retry(reserveAndCharge(undefined), { attempts: 2, delay: 0 }));
+        assert.deepEqual(result, Success('id-2'));
+        assert.deepEqual(log, ['reserve id-1', 'reserve id-2', 'charge id-2']);
+    });
+
+    it('should build a flow value again for each run and each branch it is used in', async function () {
+        const flow = reserveAndCharge(undefined);
+        assert.deepEqual(await runEffect(Parallel([flow, flow])), Success(['id-1', 'id-2']));
+        assert.deepEqual(await runEffect(flow), Success('id-3'));
+        // Sorted, since the branches' Commands interleave.
+        assert.deepEqual([...log].sort(), [
+            'charge id-1',
+            'charge id-2',
+            'charge id-3',
+            'reserve id-1',
+            'reserve id-2',
+            'reserve id-3'
+        ]);
+    });
+
+    it('should build a walked flow again when it runs', async function () {
+        const flow = /** @type {any} */ (reserveAndCharge(undefined));
+        assert.equal(commandName(flow.next(1)), 'cmdCharge');
+        assert.deepEqual(await runEffect(flow), Success('id-2'));
+        assert.deepEqual(log, ['reserve id-2', 'charge id-2']);
+    });
+
+    it('should build a flow again when a walk stopped its body at the step it was built at', async function () {
+        // The walk stops the body without moving it on, and the run that follows takes the other branch.
+        const flow = effectGen(function* () {
+            const id = `id-${++ids}`;
+            const cmdFind = () => (log.push(`find ${id}`), null);
+            yield* step(Command(cmdFind, (found) => (found ? Failure('taken') : Success(found))));
+            const cmdSave = () => log.push(`save ${id}`);
+            yield* step(Command(cmdSave));
+            return id;
+        });
+        const root = /** @type {any} */ (flow(undefined));
+        assert.deepEqual(root.next({ id: 1 }), Failure('taken'));
+        assert.deepEqual(await runEffect(root), Success('id-2'));
+        assert.deepEqual(log, ['find id-2', 'save id-2']);
+    });
+
+    it('should build again a flow that effectPipe or another generator flow starts with', async function () {
+        const flows = [
+            () => effectPipe(reserveAndCharge, (/** @type {string} */ id) => Success(`paid ${id}`))(undefined),
+            () =>
+                effectGen(function* () {
+                    const id = yield* step(reserveAndCharge(undefined));
+                    return `paid ${id}`;
+                })(undefined)
+        ];
+        for (const build of flows) {
+            log = [];
+            ids = 0;
+            failures = 1;
+            const result = await runEffect(Retry(build(), { attempts: 2, delay: 0 }));
+            assert.deepEqual(result, Success('paid id-2'));
+            assert.deepEqual(log, ['reserve id-1', 'reserve id-2', 'charge id-2']);
+        }
+    });
+
+    it('should leave alone a flow another branch ran when a cancellation skips it', async function () {
+        /** @type {string[]} */
+        const seen = [];
+        const opened = effectGen(function* () {
+            seen.push('enter');
+            try {
+                return yield* step(Command(function cmdOpen() {}));
+            } finally {
+                seen.push('finally');
+            }
+        });
+        const flow = opened(undefined);
+        const result = await runEffect(Parallel([flow, boom('cmdBad'), flow], { limit: 1 }));
+        assert.equal(result.type, 'Failure');
+        assert.deepEqual(seen, ['enter', 'finally']);
+    });
+
+    it('should record a retried flow and replay it from JSON with no I/O', async function () {
+        failures = 1;
+        const flowFn = () => Retry(reserveAndCharge(undefined), { attempts: 2, delay: 0 });
+        const recorded = await recordEffect(flowFn, undefined);
+        assert.deepEqual(recorded.result, Success('id-2'));
+        log = [];
+        const replay = await replayEffect(flowFn(), JSON.parse(JSON.stringify(recorded.trace)));
+        assert.deepEqual(replay.result, recorded.result);
+        assert.deepEqual(replay.unreached, []);
+        assert.deepEqual(log, []);
+    });
+});
+
 describe('effectGen: the same as a pipeline', function () {
     beforeEach(() => configureEffect());
     beforeEach(() => db.users.clear());

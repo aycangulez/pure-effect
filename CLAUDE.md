@@ -36,6 +36,7 @@ Mutation testing stays out of CI. Run it after changing `index.js` or its tests.
 
 - The size figure lives in one place, the README's feature bullet. Re-measure it with the command above after changing `index.js`, and reword it when the number moves. **A commit message and a changelog entry never mention the size.**
 - A changelog entry and a commit message leave out documentation-only changes. A docs change that ships with a behaviour change goes unmentioned in both; one that ships alone gets no changelog entry, and its commit message says why the docs changed.
+- A commit message is one short line, with no body.
 - Changelog entries are ordered by importance within each section, most important first: a breaking change before the rest, then what affects the most users or changes what their runs do.
 - The README's `Load Tests` section is re-measured by nothing. A change to what it claims (isolation between concurrent runs, replay fidelity, memory held across runs, `Parallel`'s limit and ordering) means rerunning an equivalent experiment and updating the section, or cutting the claim.
 - Markdown prose has no hard line breaks. Write each paragraph and list item as one line; code blocks and table rows are untouched.
@@ -68,7 +69,7 @@ pure-effect is a zero-dependency effect system for JavaScript implementing the "
 - `effectGen` is an adapter over `chain`, and the nodes it builds are ordinary ones. `chain`'s `onStop` and `execute`'s `stopAt` share the stop listeners; the comment at each end names the other, and `copyRoot` keeps them when a root is copied.
 - A step that stops the flow throws a `FlowStopped` error into the waiting body; only that error coming back out is accepted. A harness error stops no generator.
 - A mistake with `step` or `effectGen` is an `EffectTypeError` built by `malformed`, never a warning. Nodes stay plain data: no iterator and no proxy on a node.
-- A body that runs again is fed its earlier answers and checked against the steps it asked for before.
+- Every execution of a generator flow but the first builds it again from its input: `execute`'s `ownRun` reads `restarts`, which `effectGen` fills and `chain` and `copyRoot` keep on their copies; the comment at each end names the other. A body walked down a second branch is fed its earlier answers and checked against the steps it asked for before.
 
 ### Retry and Parallel
 

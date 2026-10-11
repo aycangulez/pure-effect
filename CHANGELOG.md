@@ -2,6 +2,12 @@
 
 All notable changes to pure-effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
+## [Unreleased]
+
+### Changed
+
+- **Running a generator flow again builds it again from its input, as calling an `async` function again does.** A `Retry` around a generator flow repeated its first Command as the first attempt built it and built the rest again, so a value the body made, such as an ID or the time, was one value in the first Command and another in the next: a retried reservation and charge could go out under two different IDs. One flow value run twice, or put in two branches of a `Parallel`, mixed its runs the same way. Each `Retry` attempt, each run and each branch now builds the flow afresh, so every Command in it gets the same values, and the first takes over the body that ran as the flow was built, so a single run still runs the body once. A flow a test walked before running it is built afresh too. Getting such a value from a Command is still the way to replay it.
+
 ## [0.19.0] - 2026-10-11
 
 ### Added

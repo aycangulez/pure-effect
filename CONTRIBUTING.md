@@ -22,6 +22,7 @@ Thanks for taking the time. These are the rules a change has to follow.
 - **Keep README examples runnable.** The `README examples` suite executes every `js` block with its assertions live, so a fenced `js` block has to be real JavaScript: put a value shape in a `text` block, write out a placeholder rather than `...`, and add a stub to that suite for anything new an example reaches for outside the library.
 - **Keep the README's orientation sections short.** How It Works and the others are a few plain sentences. Where something is missing, add a sentence or two rather than restructuring the section.
 - **Add a changelog entry** under `Unreleased` in `CHANGELOG.md` for a change to what the library does or exports, placed by importance within its section: a breaking change before the rest, then what affects the most users or changes what their runs do. A documentation-only change gets no entry, and a commit message does not list the docs updated alongside a code change.
+- **Write each commit message as one short line,** with no body.
 
 ## What to know about the tests
 
