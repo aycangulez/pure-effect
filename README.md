@@ -949,7 +949,7 @@ assert.equal(fromLoop.result.error.retryExhausted, true);
 assert.deepEqual(fromLoop.result, fromParallel.result);
 ```
 
-It stops at the first invoice that fails, as the `Parallel` with `limit: 1` does. Use the `Parallel` instead when the loop is long, since a generator run keeps every step's result until it ends. Use it too when payments can overlap, with a higher `limit`, or when the loop has to keep going past a failure, with `settled: true`, since a `catch` in the body cannot recover. The two forms record differently, so a trace recorded from one replays against the other as a `TimeParadox`.
+It stops at the first invoice that fails, as the `Parallel` with `limit: 1` does. Use the `Parallel` instead when payments can overlap, with a higher `limit`, or when the loop has to keep going past a failure, with `settled: true`, since a `catch` in the body cannot recover. The two forms record differently, so a trace recorded from one replays against the other as a `TimeParadox`.
 
 Sometimes getting the list is a loop of its own. Paging through an API with a cursor is one: each request needs the cursor from the page before, so the requests cannot be listed in advance. Write that loop as an ordinary `async` function, call it from one Command, and map over the list it returns, as above:
 
@@ -1420,5 +1420,4 @@ Replays a trace and narrates each step with its recorded duration, naming any re
 - **Configuration belongs to one copy of the library.** `configureEffect` stores hooks in module state, so two copies of the library in one process (from a dual ESM and CJS setup, two versions in the dependency tree, or a worker thread) each have their own. Hooks configured in one do not apply to the other, and nothing warns you.
 - **A Command needs a name.** `meta.name` survives minification. `cmd.name` does not, unless the minifier is set to keep function names.
 - **A generator flow's body can run more than once,** and code in it that changes something outside it, such as a counter or a log line, does so again; see [What runs once, and what runs again](#what-runs-once-and-what-runs-again).
-- **A generator run keeps every step's result until it ends,** since running the body again needs them. A long loop that fetches large pages holds every page; write it as a pipeline whose `next` asks for the next page.
 - **A generator body's `finally` does not always run.** It does not run when a bug or a `TimeParadox` rejects the run. In a `Parallel` where one branch threw, another branch that stops for its own reason before the rejection reaches it may still run its `catch` and `finally`, depending on timing. A step in a body's `finally` is not supported: it runs when the body ends normally and is refused when a step stopped the body, but if an error is passing through the body when its `finally` reaches a step, and the flow is cancelled before that step starts, the error is lost. Put cleanup in a `try`/`finally` around `runEffect`.

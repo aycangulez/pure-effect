@@ -2,6 +2,8 @@
 
 import { strict as assert } from 'assert';
 import { inspect } from 'node:util';
+import v8 from 'node:v8';
+import vm from 'node:vm';
 import {
     Success,
     Failure,
@@ -1021,6 +1023,50 @@ describe('effectGen: running a flow again', function () {
         const result = await runEffect(Parallel([flow, boom('cmdBad'), flow], { limit: 1 }));
         assert.equal(result.type, 'Failure');
         assert.deepEqual(seen, ['enter', 'finally']);
+    });
+
+    it('should hold no earlier answer in a run, so a long loop keeps only the page it is on', async function () {
+        v8.setFlagsFromString('--expose-gc');
+        const gc = vm.runInNewContext('gc');
+        /** @type {WeakRef<object> | undefined} */
+        let firstPage;
+        let released = false;
+        const flow = effectGen(function* () {
+            for (let i = 0; i < 3; i++) {
+                const cmdFetchPage = async () => {
+                    const page = { items: [i] };
+                    if (i === 0) firstPage = new WeakRef(page);
+                    if (i === 2) {
+                        // A turn later, so the WeakRef no longer holds its target for the job that made it.
+                        await new Promise((resolve) => setImmediate(resolve));
+                        gc();
+                        released = firstPage?.deref() === undefined;
+                    }
+                    return page;
+                };
+                yield* step(Command(cmdFetchPage));
+            }
+        });
+        await runEffect(flow(undefined));
+        assert.equal(released, true);
+    });
+
+    it('should still walk a flow a run has used, down more than one branch', async function () {
+        const flow = /** @type {any} */ (reserveAndCharge(undefined));
+        assert.deepEqual(await runEffect(flow), Success('id-1'));
+        const charge = flow.next(1);
+        assert.equal(commandName(charge), 'cmdCharge');
+        assert.deepEqual(charge.next('a'), Success('a'));
+        assert.deepEqual(charge.next('b'), Success('b'));
+    });
+
+    it('should reject a run whose step a hook answered first, since the run keeps no answers to run the body again', async function () {
+        configureEffect({
+            onBeforeCommand: (command) => {
+                if (commandName(command) === 'cmdCharge') command.next('early');
+            }
+        });
+        await assert.rejects(runEffect(reserveAndCharge(undefined)), /answered again after a run had gone past it/);
     });
 
     it('should record a retried flow and replay it from JSON with no I/O', async function () {

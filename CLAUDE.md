@@ -69,7 +69,7 @@ pure-effect is a zero-dependency effect system for JavaScript implementing the "
 - `effectGen` is an adapter over `chain`, and the nodes it builds are ordinary ones. `chain`'s `onStop` and `execute`'s `stopAt` share the stop listeners; the comment at each end names the other, and `copyRoot` keeps them when a root is copied.
 - A step that stops the flow throws a `FlowStopped` error into the waiting body; only that error coming back out is accepted. A harness error stops no generator.
 - A mistake with `step` or `effectGen` is an `EffectTypeError` built by `malformed`, never a warning. Nodes stay plain data: no iterator and no proxy on a node.
-- Every execution of a generator flow but the first builds it again from its input: `execute`'s `ownRun` reads `restarts`, which `effectGen` fills and `chain` and `copyRoot` keep on their copies; the comment at each end names the other. A body walked down a second branch is fed its earlier answers and checked against the steps it asked for before.
+- Every execution of a generator flow but the first builds it again from its input: `execute`'s `ownRun` reads `restarts`, which `effectGen` fills and `chain` and `copyRoot` keep on their copies; the comment at each end names the other. A body walked down a second branch is fed its earlier answers and checked against the steps it asked for before; a run an execution owns keeps none (`droppedAnswers`), and `rerun` refuses to go past them.
 
 ### Retry and Parallel
 

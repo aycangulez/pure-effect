@@ -693,8 +693,9 @@ const asyncGeneratorFunction = Object.getPrototypeOf(async function* () {});
  */
 
 /**
- * One run of a body: its generator, the position of the step it is waiting at, and whether it can still resume.
- * @typedef {{ generator: Generator<any, any, any>, position: number, state: 'suspended' | 'done' }} BodyRun
+ * One run of a body: its generator, the position of the step it is waiting at, whether it can still resume, and
+ * whether an execution took it over (`takeBuiltRun`), which only ever moves it forward.
+ * @typedef {{ generator: Generator<any, any, any>, position: number, state: 'suspended' | 'done', owned: boolean }} BodyRun
  */
 
 /**
@@ -702,6 +703,13 @@ const asyncGeneratorFunction = Object.getPrototypeOf(async function* () {});
  * them again and check the body asks for the same steps. Shared between continuations, never copied.
  * @typedef {{ signature: string, answer: any, earlier: Trail } | null} Trail
  */
+
+/**
+ * Where a run an execution owns keeps its earlier answers: nowhere, since running it again builds the flow again from
+ * its input, so a long loop holds only the answer it is on. `rerun` refuses a trail that reaches it.
+ * @type {NonNullable<Trail>}
+ */
+const droppedAnswers = Object.freeze({ signature: '', answer: undefined, earlier: null });
 
 /**
  * @typedef {(generator: Generator<any, any, any>) => IteratorResult<any, any>} Resume
@@ -726,7 +734,7 @@ const startRun = (flow) => {
             generator
         );
     }
-    return { generator, position: 0, state: 'suspended' };
+    return { generator, position: 0, state: 'suspended', owned: false };
 };
 
 /**
@@ -847,7 +855,17 @@ const rerun = (flow, trail, signature) => {
     };
     /** @type {{ signature: string, answer: any }[]} */
     const answers = [];
-    for (let cell = trail; cell; cell = cell.earlier) answers.unshift(cell);
+    for (let cell = trail; cell; cell = cell.earlier) {
+        if (cell === droppedAnswers) {
+            throw malformed(
+                `A step of a generator flow was answered again after a run had gone past it, at ${signature}, and ` +
+                    'that run keeps no earlier answers to run the body again with. Walk a flow before running it, ' +
+                    'not a step a run handed a hook.',
+                undefined
+            );
+        }
+        answers.unshift(cell);
+    }
     let result = resumeBody(run, (g) => g.next());
     for (const { signature: asked, answer } of answers) {
         const effect = expect(result, asked);
@@ -862,7 +880,7 @@ const rerun = (flow, trail, signature) => {
 
 /**
  * The run waiting at `position`: the live one if it is there, else a new one the earlier answers bring there, as
- * when a test walks a second branch or a `Retry` repeats the flow.
+ * when a test walks a second branch.
  * @param {GenFlow} flow
  * @param {BodyRun} run
  * @param {number} position
@@ -919,7 +937,8 @@ const advance = (flow, run, trail, resume) => {
 const continueBody = (flow, run, position, trail, signature, answer) => {
     const current = runAt(flow, run, position, trail, signature);
     current.position = position + 1;
-    return advance(flow, current, { signature, answer, earlier: trail }, (g) => g.next(answer));
+    const after = current.owned ? droppedAnswers : { signature, answer, earlier: trail };
+    return advance(flow, current, after, (g) => g.next(answer));
 };
 
 /**
@@ -1407,6 +1426,7 @@ const stopSkipped = (node, result, signal) => {
 const takeBuiltRun = (built) => {
     const free = !built.claimed && built.run.position === built.position && built.run.state === built.state;
     built.claimed = true;
+    if (free) built.run.owned = true;
     return free;
 };
 
