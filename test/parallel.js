@@ -121,7 +121,7 @@ describe('Parallel cancellation', function () {
                             attempts++;
                             throw new Error('flaky');
                         }),
-                        { attempts: 5, delay: 100 }
+                        { retries: 5, delay: 100 }
                     )
                 ],
                 (/** @type {any} */ v) => Success(v)
@@ -145,7 +145,7 @@ describe('Parallel cancellation', function () {
                     Command(function cmdFlaky() {
                         throw new Error('ECONNRESET');
                     }),
-                    { attempts: 1, delay: 1500 }
+                    { retries: 1, delay: 1500 }
                 )
             ])
         );
@@ -169,7 +169,7 @@ describe('Parallel cancellation', function () {
                     Command(function cmdFetch(/** @type {AbortSignal | undefined} */ signal) {
                         return cancellableSleep(1000, signal);
                     }),
-                    { attempts: 1, delay: 1500 }
+                    { retries: 1, delay: 1500 }
                 )
             ])
         );
@@ -326,7 +326,7 @@ describe('Parallel limit and settled', function () {
         // and its path still names its place in the array.
         const meter = { inFlight: 0, peak: 0 };
         const effects = [tracked(meter, 'a', 20), tracked(meter, 'b', 1)];
-        const { trace } = await recordEffect(() => Parallel(effects, { limit: 2 }), null);
+        const { trace } = await recordEffect(Parallel(effects, { limit: 2 }));
         assert.deepEqual(
             trace.trace.map((e) => [e.path, e.result]),
             [
@@ -544,7 +544,7 @@ describe('Parallel limit and settled', function () {
                 ],
                 { limit: 1, settled: true }
             );
-        const { result, trace } = await recordEffect(flow, null);
+        const { result, trace } = await recordEffect(flow());
         const during = calls;
         const { result: replayed, unreached } = await replayEffect(flow(), trace);
         assert.equal(calls, during, 'replay must not execute a Command');

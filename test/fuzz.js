@@ -35,7 +35,7 @@ import {
  * @typedef {CmdSpec | { kind: 'ok', id: number } | { kind: 'fail', id: number } | { kind: 'ask', id: number }
  *   | { kind: 'seq', id: number, children: Spec[], useGen: boolean, ending: 'vals' | 'returnLast' | 'retFail',
  *       body: 'rethrow' | 'swallow' | 'cleanup', cleanup?: CmdSpec }
- *   | { kind: 'retry', id: number, child: Spec, attempts: number, fallback: Spec | null }
+ *   | { kind: 'retry', id: number, child: Spec, retries: number, fallback: Spec | null }
  *   | { kind: 'par', id: number, children: Spec[], settled: boolean, limit: number | undefined }} Spec
  */
 
@@ -125,7 +125,7 @@ const randomSpec = (rand, mode) => {
         }
         if (r < 0.7) {
             const child = node(depth + 1);
-            return { kind: 'retry', id, child, attempts: int(1, 3), fallback: rand() < 0.4 ? node(depth + 1) : null };
+            return { kind: 'retry', id, child, retries: int(1, 3), fallback: rand() < 0.4 ? node(depth + 1) : null };
         }
         const children = Array.from({ length: int(1, 4) }, () => node(depth + 1));
         return { kind: 'par', id, children, settled: rand() < 0.35, limit: rand() < 0.35 ? int(1, 3) : undefined };
@@ -250,7 +250,7 @@ const fallbackOf = (spec, build, log) => {
     return (/** @type {any} */ err) =>
         effectPipe(
             () => build(fallback, log),
-            (/** @type {any} */ v) => Success(['fb', v, err.attempts, err.lastError?.message ?? String(err.lastError)])
+            (/** @type {any} */ v) => Success(['fb', v, err.retries, err.lastError?.message ?? String(err.lastError)])
         )(undefined);
 };
 
@@ -264,7 +264,7 @@ const retryOf = (spec, build, log) =>
     // Typed loosely, since the fallback is optional and Retry's overloads tell a fallback from none by its presence.
     Retry(
         build(spec.child, log),
-        /** @type {any} */ ({ attempts: spec.attempts, delay: 0, onExhausted: fallbackOf(spec, build, log) })
+        /** @type {any} */ ({ retries: spec.retries, delay: 0, onExhausted: fallbackOf(spec, build, log) })
     );
 
 /**
@@ -556,7 +556,7 @@ const fuzz = async ({ name, firstSeed, count, harness = false, veto = false, rep
         if (replay && generated.ok) {
             const replayLog = newLog();
             // Recorded without the veto, which leaves no trace entry to replay.
-            const recorded = await recordEffect(() => buildGen(spec, newLog()), undefined, { context });
+            const recorded = await recordEffect(buildGen(spec, newLog()), { context });
             const replayed = await settle(() =>
                 replayEffect(buildGen(spec, replayLog), JSON.parse(JSON.stringify(recorded.trace)))
             );

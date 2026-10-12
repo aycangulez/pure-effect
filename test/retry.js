@@ -29,7 +29,7 @@ describe('Retry onExhausted', function () {
                         return Promise.reject(new Error('down'));
                     }),
                     {
-                        attempts: 2,
+                        retries: 2,
                         delay: 0,
                         onExhausted: (/** @type {any} */ err) => {
                             sawError = err;
@@ -46,7 +46,7 @@ describe('Retry onExhausted', function () {
         assert.deepEqual(result.value, { sku: 'sku-1', amount: 95, stale: true });
         assert.equal(liveCalls, 3, 'the primary still runs the full retry schedule first');
         assert.equal(sawError.retryExhausted, true);
-        assert.equal(sawError.attempts, 2);
+        assert.equal(sawError.retries, 2);
         assert.equal(sawError.lastError.message, 'down');
     });
 
@@ -55,7 +55,7 @@ describe('Retry onExhausted', function () {
             Command(function cmdPrimary() {
                 return Promise.reject('primary down');
             }),
-            { attempts: 1, delay: 0, onExhausted: () => Failure('cache empty') }
+            { retries: 1, delay: 0, onExhausted: () => Failure('cache empty') }
         );
         const result = /** @type {any} */ (await runEffect(flow));
         assert.equal(result.type, 'Failure');
@@ -75,7 +75,7 @@ describe('Retry onExhausted', function () {
                 throw new Error('slow branch failed');
             }),
             {
-                attempts: 1,
+                retries: 1,
                 delay: 0,
                 onExhausted: () => {
                     fallbackRuns++;
@@ -102,7 +102,7 @@ describe('Retry onExhausted', function () {
                     return Promise.reject(new Error('down'));
                 }),
                 {
-                    attempts: 1,
+                    retries: 1,
                     delay: 0,
                     onExhausted: () =>
                         Command(function cmdFetchCached() {
@@ -111,7 +111,7 @@ describe('Retry onExhausted', function () {
                         })
                 }
             );
-        const { result, trace } = await recordEffect(flow, 'sku-1');
+        const { result, trace } = await recordEffect(flow('sku-1'));
         assert.equal(result.type, 'Success');
         assert.ok(
             trace.trace.some((/** @type {any} */ e) => e.command === 'cmdFetchCached' && /f\//.test(e.path)),
@@ -131,18 +131,18 @@ describe('Retry onExhausted', function () {
                     return Promise.reject('nope');
                 }),
                 {
-                    attempts: 1,
+                    retries: 1,
                     delay: 0,
                     onExhausted: () =>
                         Retry(
                             Command(function cmdSecondary() {
                                 return Promise.reject('still nope');
                             }),
-                            { attempts: 2, delay: 200 }
+                            { retries: 2, delay: 200 }
                         )
                 }
             );
-        const { trace } = await recordEffect(flow, 1);
+        const { trace } = await recordEffect(flow(1));
         const started = Date.now();
         const { result: replayed } = /** @type {any} */ (await replayEffect(flow(1), trace));
         const elapsed = Date.now() - started;
@@ -151,7 +151,7 @@ describe('Retry onExhausted', function () {
     });
 });
 
-describe('Retry attempts and the removed global retry', function () {
+describe('Retry options and the removed global retry', function () {
     beforeEach(function () {
         configureEffect();
     });
@@ -161,21 +161,21 @@ describe('Retry attempts and the removed global retry', function () {
             return Promise.reject(new Error('down'));
         });
 
-    it('should refuse attempts that are not a positive integer as the Retry is built', function () {
-        // A Retry that does not retry is not a Retry. `attempts: 0` was also the one spelling that
+    it('should refuse retries that are not a positive integer as the Retry is built', function () {
+        // A Retry that does not retry is not a Retry. `retries: 0` was also the one spelling that
         // turned `onExhausted` into a plain catch at no cost, which is not what the option is for.
         // It was checked only when the Retry ran, after the Commands ahead of it, and as a plain TypeError,
         // while a misspelt name was an EffectTypeError as the flow was built.
-        for (const attempts of [0, -1, 1.5, '3', null]) {
-            assert.throws(() => Retry(failing(), { attempts: /** @type {any} */ (attempts) }), {
+        for (const retries of [0, -1, 1.5, '3', null]) {
+            assert.throws(() => Retry(failing(), { retries: /** @type {any} */ (retries) }), {
                 name: 'EffectTypeError',
-                message: /Retry 'attempts' must be a positive integer, received/
+                message: /Retry 'retries' must be a positive integer, received/
             });
         }
     });
 
-    it('should name the alternatives when it rejects attempts', function () {
-        assert.throws(() => Retry(failing(), { attempts: 0 }), /settled|data/);
+    it('should name the alternatives when it rejects retries: 0', function () {
+        assert.throws(() => Retry(failing(), { retries: 0 }), /settled|data/);
     });
 
     it('should refuse an onExhausted that is not a function as the Retry is built', function () {
@@ -190,14 +190,14 @@ describe('Retry attempts and the removed global retry', function () {
 
     it('should keep a frozen copy of the options a Retry or Parallel is built with', async function () {
         // A node kept the caller's own options object, which could change after the check, so the options were
-        // checked again on every run: a changed `attempts: 0` would make `onExhausted` a free catch.
+        // checked again on every run: a changed `retries: 0` would make `onExhausted` a free catch.
         let fallbacks = 0;
-        const given = { attempts: 1, delay: 0, onExhausted: () => (fallbacks++, Success('fallback')) };
+        const given = { retries: 1, delay: 0, onExhausted: () => (fallbacks++, Success('fallback')) };
         const retry = Retry(failing(), given);
-        given.attempts = 0;
-        assert.equal(retry.options.attempts, 1, "a change to the caller's object does not reach the node");
+        given.retries = 0;
+        assert.equal(retry.options.retries, 1, "a change to the caller's object does not reach the node");
         assert.throws(() => {
-            /** @type {any} */ (retry.options).attempts = 0;
+            /** @type {any} */ (retry.options).retries = 0;
         }, TypeError);
         assert.deepEqual(await runEffect(retry), Success('fallback'));
         assert.equal(fallbacks, 1);
@@ -219,7 +219,7 @@ describe('Retry attempts and the removed global retry', function () {
                 calls++;
                 return calls === 1 ? Promise.reject(new Error('down')) : Promise.resolve('ok');
             });
-        const result = await runEffect(Retry(flaky(), { attempts: 1, delay: 1 }));
+        const result = await runEffect(Retry(flaky(), { retries: 1, delay: 1 }));
         assert.deepEqual(result, Success('ok'));
         assert.equal(calls, 2);
     });
@@ -237,17 +237,17 @@ describe('Retry attempts and the removed global retry', function () {
     });
 
     it('should treat an option passed as undefined as unset', async function () {
-        // A config key that is absent arrives as undefined, and it used to override the default: `attempts`
-        // threw, and `backoff` made every wait after the first NaN milliseconds, which is no wait at all.
+        // A config key that is absent arrives as undefined, and it used to override the default: the retry
+        // count threw, and `backoff` made every wait after the first NaN milliseconds, which is no wait at all.
         /** @type {number[]} */
         const stamps = [];
         const timed = Command(function cmdTimed() {
             stamps.push(performance.now());
             return Promise.reject(new Error('down'));
         });
-        const result = await runEffect(Retry(timed, { attempts: undefined, delay: 20, backoff: undefined }));
+        const result = await runEffect(Retry(timed, { retries: undefined, delay: 20, backoff: undefined }));
         assert.equal(result.type, 'Failure');
-        assert.equal(stamps.length, 4, 'attempts keeps the default of three retries');
+        assert.equal(stamps.length, 4, 'retries keeps its default of three');
         const waits = stamps.slice(1).map((stamp, i) => stamp - stamps[i]);
         assert.ok(
             waits.every((ms) => ms >= 15),
@@ -266,14 +266,14 @@ describe('Retry attempts and the removed global retry', function () {
     });
 
     it('should refuse a retry key in configureEffect, as any key no hook has', function () {
-        assert.throws(() => configureEffect(/** @type {any} */ ({ retry: { attempts: 5 } })), {
+        assert.throws(() => configureEffect(/** @type {any} */ ({ retry: { retries: 5 } })), {
             name: 'TypeError',
             message: "configureEffect has no option named 'retry'; its options are onStep, onRun and onBeforeCommand."
         });
     });
 
     it('should refuse a retry key in a per-call config, as any key no hook has', async function () {
-        await assert.rejects(() => runEffect(Success(1), undefined, /** @type {any} */ ({ retry: { attempts: 5 } })), {
+        await assert.rejects(() => runEffect(Success(1), undefined, /** @type {any} */ ({ retry: { retries: 5 } })), {
             name: 'TypeError',
             message:
                 "runEffect's callConfig has no option named 'retry'; its options are onStep, onRun, onBeforeCommand and inherit."
@@ -298,7 +298,7 @@ describe('Retry attempts and the removed global retry', function () {
                 calls++;
                 return 1;
             }),
-            { attempts: 2, delay: 0 }
+            { retries: 2, delay: 0 }
         );
         assert.throws(
             () => configureEffect(/** @type {any} */ ({ onStep: 42 })),

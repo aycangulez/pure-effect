@@ -35,7 +35,7 @@ export type AskState<T, E = unknown, Ctx = unknown> = {
 // Every optional option and hook takes `undefined`, which keeps its default, under `exactOptionalPropertyTypes` too.
 export type RetryOptions = {
     /** Tries after the first, so `2` makes at most 3 calls. A positive integer, 3 by default. */
-    attempts?: number | undefined;
+    retries?: number | undefined;
     /** Milliseconds before the first retry, 100 by default. */
     delay?: number | undefined;
     /** Multiplies the wait before each later retry, so `2` doubles it. 1 by default, the same wait each time. */
@@ -58,8 +58,8 @@ export type RetryState<T, E = unknown, Ctx = unknown, R = T> = {
 export type RetryExhaustedError<Thrown = unknown> = {
     retryExhausted: true;
     lastError: Thrown;
-    /** The `attempts` option: tries after the first, so the retried steps ran one more time than this. */
-    attempts: number;
+    /** The `retries` option, so the retried steps ran one more time than this. */
+    retries: number;
 };
 
 export type ParallelOptions = {
@@ -82,7 +82,7 @@ export type ParallelState<
     effects: { [K in keyof T]: Effect<T[K], BranchError, Ctx> };
     next(values: [...V]): Effect<R, E, Ctx>;
     /** A frozen copy of the options the `Parallel` was built with. */
-    options?: Readonly<ParallelOptions>;
+    options: Readonly<ParallelOptions>;
 };
 
 export type Effect<T, E = unknown, Ctx = unknown> =
@@ -1300,7 +1300,7 @@ export declare function effectGen<I, Y extends Step<any, any>, R>(
  */
 export type StepRunner = (
     name: string,
-    type: string,
+    type: 'Command' | 'Parallel',
     op: (decision?: ParallelDecision) => Promise<unknown>,
     path: string
 ) => Promise<unknown>;
@@ -1367,7 +1367,7 @@ export type ReplayStep = {
     /** `meta.name`, `cmd.name`, or 'anonymous'; 'Parallel' for a `Parallel`'s step. */
     name: string;
     /** `'Command'`, or `'Parallel'` for a `Parallel`'s decision. */
-    type: string;
+    type: 'Command' | 'Parallel';
     /** The step's position in the flow, the same in every run; a Resolver should key off it. */
     path: string;
 };
@@ -1442,16 +1442,15 @@ export type RecordOptions<Ctx = unknown> = RecorderOptions & {
 };
 
 /**
- * Runs a flow for real and returns its outcome with a trace, which keeps the input's type for the replay. That type is
- * wrong when `redact` changes the input, or the trace marks it `unrecorded`.
+ * Runs a flow for real and returns its outcome with a trace. The trace holds the flow's input when `effectPipe` or
+ * `effectGen` built it.
  */
-export declare function recordEffect<I, T, E = unknown, Ctx = unknown>(
-    flowFn: (input: I) => Effect<T, E, Ctx>,
-    initialInput: I,
+export declare function recordEffect<T, E = unknown, Ctx = unknown>(
+    effect: Effect<T, E, Ctx>,
     ...options: unknown extends Ctx
         ? [options?: RecordOptions<CheckedContext<Ctx>>]
         : [options: RecordOptions<CheckedContext<Ctx>> & { context: RunContext<CheckedContext<Ctx>> }]
-): Promise<{ result: SuccessState<T> | FailureState<E>; trace: TraceLog<I, Ctx> & { initialInput: I } }>;
+): Promise<{ result: SuccessState<T> | FailureState<E>; trace: TraceLog<unknown, Ctx> }>;
 
 export interface ReplayOptions<Ctx = unknown> {
     /** Context for `Ask`; defaults to the one the trace recorded. */
@@ -1498,16 +1497,24 @@ export declare function replayEffect<T, E = unknown, Ctx = unknown>(
         : [options: ReplayOptions<CheckedContext<Ctx>> & { context: RunContext<CheckedContext<Ctx>> }]
 ): Promise<Omit<Replay<T, E>, 'unreached'> & { unreached?: TraceEntry[] }>;
 
-/** Replays a trace and logs each step with its recorded timing, warning about what will not replay as recorded. */
+export interface TimeTravelOptions<Ctx = unknown> {
+    /** Receives each narrated line; `console.log` by default. */
+    log?: ((...args: any[]) => void) | undefined;
+    /** Context for `Ask`; defaults to the one the trace recorded. */
+    context?: RunContext<Ctx> | undefined;
+    /** The build replaying the trace; a trace recorded at another build gets a warning. */
+    version?: string | undefined;
+}
+
+/**
+ * Replays a trace and logs each step with its recorded timing, warning about what will not replay as recorded. Returns
+ * what `replayEffect` returns for a trace.
+ */
 export declare function timeTravel<T, E = unknown, Ctx = unknown>(
     flowFn: (input: any) => Effect<T, E, Ctx>,
     traceLog: TraceLog,
-    options?: {
-        log?: ((...args: any[]) => void) | undefined;
-        context?: RunContext<CheckedContext<Ctx>> | undefined;
-        version?: string | undefined;
-    }
-): Promise<SuccessState<T> | FailureState<E>>;
+    options?: TimeTravelOptions<CheckedContext<Ctx>>
+): Promise<Replay<T, E>>;
 
 // Only the declarations marked `export` are public; without this, a declaration file exports every top-level one.
 export {};

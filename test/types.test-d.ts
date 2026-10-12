@@ -42,7 +42,8 @@ import type {
     ReplayOutcome,
     Resolver,
     ReplayOptions,
-    Replay
+    Replay,
+    TimeTravelOptions
 } from '../index.js';
 
 interface User {
@@ -185,7 +186,7 @@ const innerCmd = Command(
 // Retry with options preserves T. The error type is both of the things a Retry can contribute: an
 // abort the wrapped tree returned, which is not retried and leaves unwrapped, and the exhaustion
 // failure that follows an I/O fault the loop could not get past.
-const retried = Retry(innerCmd, { attempts: 3 });
+const retried = Retry(innerCmd, { retries: 3 });
 expectType<RetryState<number, RetryExhaustedError>>(retried);
 
 // Retry without options is valid
@@ -194,10 +195,12 @@ expectType<RetryState<number, RetryExhaustedError>>(retriedNoOpts);
 
 // A Retry or Parallel keeps a frozen copy of its options, so the types refuse a change that would throw when it runs.
 // @ts-expect-error a Retry's options are a frozen copy
-retried.options.attempts = 0;
+retried.options.retries = 0;
 const limited = Parallel([innerCmd], { limit: 2 });
 // @ts-expect-error a Parallel's options are a frozen copy
-if (limited.options) limited.options.limit = 0;
+limited.options.limit = 0;
+// Every constructor keeps its options, so a node's options are always there to read, as a Retry's are
+expectType<Readonly<ParallelOptions>>(Parallel([innerCmd]).options);
 
 // Retry in effectPipe preserves type flow
 const retryFlow = effectPipe((input: User) =>
@@ -206,7 +209,7 @@ const retryFlow = effectPipe((input: User) =>
             async () => ({ id: 1, ...input }) as SavedUser,
             (s) => Success(s)
         ),
-        { attempts: 2 }
+        { retries: 2 }
     )
 );
 expectType<Effect<SavedUser, RetryExhaustedError>>(retryFlow({ email: 'a@b.com', password: 'secret123' }));
@@ -216,7 +219,7 @@ expectType<Effect<SavedUser, RetryExhaustedError>>(retryFlow({ email: 'a@b.com',
 const retriedTyped = Retry(Success(1) as Effect<number, 'net_down'>);
 expectType<RetryState<number, 'net_down' | RetryExhaustedError>>(retriedTyped);
 
-const retryResult = await runEffect(Retry(Success(1) as Effect<number, 'flaky'>, { attempts: 1 }));
+const retryResult = await runEffect(Retry(Success(1) as Effect<number, 'flaky'>, { retries: 1 }));
 if (retryResult.type === 'Failure') {
     expectType<'flaky' | RetryExhaustedError>(retryResult.error);
     // An abort arrives as itself, so the union has to be narrowed before `lastError` is there.
@@ -229,7 +232,7 @@ if (retryResult.type === 'Failure') {
 
 // onExhausted consumes the exhaustion, so the fallback's error type is what remains
 const recovered = Retry(Success(1) as Effect<number, 'flaky'>, {
-    attempts: 1,
+    retries: 1,
     onExhausted: (err) => {
         expectType<RetryExhaustedError>(err);
         return Success(0) as Effect<number, 'cache_miss'>;
@@ -259,22 +262,22 @@ Retry(innerCmd).next('not a number');
 // function, as unknown, until the no-next case got its own overload.
 type Seat = { seat: string };
 const cmdHoldSeat = async (): Promise<Seat> => ({ seat: '12A' });
-const holdSeat = (): Effect<Seat, RetryExhaustedError> => Retry(Command(cmdHoldSeat), { attempts: 2 });
+const holdSeat = (): Effect<Seat, RetryExhaustedError> => Retry(Command(cmdHoldSeat), { retries: 2 });
 const holdSeatOnce = (): Effect<Seat, never> => Command(cmdHoldSeat);
 
 // @ts-expect-error retry options, onExhausted included, are per-use rather than configured
-configureEffect({ retry: { attempts: 2, onExhausted: () => Success(1) } });
+configureEffect({ retry: { retries: 2, onExhausted: () => Success(1) } });
 
 // RetryExhaustedError shape is usable for narrowing exhaustion failures, and its parameter annotates a
 // thrown type the caller already knows
 const exhaustedErr: RetryExhaustedError<Error> = {
     retryExhausted: true,
     lastError: new Error('boom'),
-    attempts: 3
+    retries: 3
 };
 expectType<true>(exhaustedErr.retryExhausted);
 expectType<Error>(exhaustedErr.lastError);
-expectType<number>(exhaustedErr.attempts);
+expectType<number>(exhaustedErr.retries);
 
 // --- error channel union across effectPipe steps ---
 
@@ -718,7 +721,7 @@ runEffect(Success(1));
 // flowName names a run in traces and spans, so a typed context takes it beside what the flow reads, while a key the
 // flow does not read is still refused
 runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { db: 'conn', flowName: 'signup' });
-recordEffect(ctxFlow, { email: 'a@b.c', password: 'x' }, { context: { db: 'conn', flowName: 'signup' } });
+recordEffect(ctxFlow({ email: 'a@b.c', password: 'x' }), { context: { db: 'conn', flowName: 'signup' } });
 replayEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), [], { context: { db: 'conn', flowName: 'signup' } });
 timeTravel(ctxFlow, { trace: [] }, { context: { db: 'conn', flowName: 'signup' } });
 // @ts-expect-error a key the flow does not read is still refused
@@ -740,7 +743,7 @@ const dbOnly: AppCtx = { db: 'conn' };
 // @ts-expect-error the variable's type lacks the tenant the flow reads
 runEffect(readsDbAndTenant('1'), dbOnly);
 // @ts-expect-error recordEffect checks its context the same way
-recordEffect(readsDbAndTenant, '1', { context: dbOnly });
+recordEffect(readsDbAndTenant('1'), { context: dbOnly });
 // @ts-expect-error so does a replay from a trace
 replayEffect(readsDbAndTenant('1'), [], { context: dbOnly });
 // @ts-expect-error and timeTravel
@@ -748,7 +751,7 @@ timeTravel(readsDbAndTenant, { trace: [] }, { context: dbOnly });
 // a variable with more than the flow reads still passes, as any object of a wider type does
 const dbTenantAndRegion = { db: 'conn', tenant: 'acme', region: 'eu' };
 runEffect(readsDbAndTenant('1'), dbTenantAndRegion);
-recordEffect(readsDbAndTenant, '1', { context: dbTenantAndRegion });
+recordEffect(readsDbAndTenant('1'), { context: dbTenantAndRegion });
 // A Resolver holds no context, so a replay from one needs it passed, as runEffect does; a trace carries its own.
 const answersNothing: Resolver = () => undefined;
 // @ts-expect-error the flow reads a context, and a Resolver has none to give it
@@ -822,7 +825,7 @@ configureEffect({ onStep: 'not-a-function' });
 runEffect(flow({ email: 'a@b.com', password: 'secret123' }), {}, { inherit: true });
 runEffect(flow({ email: 'a@b.com', password: 'secret123' }), {}, { inherit: false });
 // @ts-expect-error retry options are per-use, never per-call
-runEffect(flow({ email: 'a@b.com', password: 'secret123' }), {}, { retry: { attempts: 1 } });
+runEffect(flow({ email: 'a@b.com', password: 'secret123' }), {}, { retry: { retries: 1 } });
 // @ts-expect-error a boolean, not the old three-way string
 runEffect(flow({ email: 'a@b.com', password: 'secret123' }), {}, { inherit: 'all' });
 // @ts-expect-error `inherit` is a per-call option; the global wiring has nothing to inherit from
@@ -831,9 +834,11 @@ configureEffect({ inherit: true });
 // hook types are correctly shaped
 const myStep: StepRunner = async (name, type, op) => {
     expectType<string>(name);
-    expectType<string>(type);
+    expectType<'Command' | 'Parallel'>(type);
     return op();
 };
+// A hook that declares the step's type a plain string still fits, as one written before it was narrowed does
+const wideStep: StepRunner = async (name: string, type: string, op) => op();
 
 const myRun: RunWrapper = async (effect, op, flowName, initialInput) => {
     expectType<Effect<unknown>>(effect);
@@ -901,7 +906,7 @@ const rec = recorder({ redact: (value, name, kind) => value, maxEntries: 100, st
 expectType<StepRunner>(rec.onStep);
 expectType<TraceEntry[]>(rec.entries);
 expectType<TraceLog>(rec.toTrace());
-// toTrace keeps the types of the input and context it is given, as recordEffect's trace does
+// toTrace keeps the types of the input and context it is given
 const packaged = rec.toTrace({ initialInput: 1, flowName: 'f', context: { tenant: 't' }, version: 'v' });
 expectType<TraceLog<number, { tenant: string }>>(packaged);
 const typedHead: TraceLog<{ id: string }> = rec.toTrace({ initialInput: { id: 'a' } });
@@ -947,16 +952,16 @@ const narrowRedactor: RecorderOptions['redact'] = (value, name, kind: 'argument'
 // the README's redact spreads the value it is given
 recorder({ redact: (value, name, kind) => (kind === 'initialInput' ? { ...value, password: '[redacted]' } : value) });
 
-// recordEffect returns the typed outcome beside the trace, and types its context
+// recordEffect returns the typed outcome beside the trace, and types its context. A flow's type holds no input, so
+// the trace's input is unknown, as it is in a trace read back from storage.
 (async () => {
-    const recorded = await recordEffect(typedFlow, { email: 'a@b.c', password: 'x' }, { version: 'v1' });
+    const input: User = { email: 'a@b.c', password: 'x' };
+    const recorded = await recordEffect(typedFlow(input), { version: 'v1' });
     expectType<SuccessState<SavedUser> | FailureState<ValidationError | DbError>>(recorded.result);
-    // The trace keeps the input's type, so a replay rebuilds the flow from it with no cast
-    expectType<TraceLog<User, unknown> & { initialInput: User }>(recorded.trace);
-    expectType<User>(recorded.trace.initialInput);
-    const replayedFromMemory = await replayEffect(typedFlow(recorded.trace.initialInput), recorded.trace);
+    expectType<TraceLog<unknown, unknown>>(recorded.trace);
+    const replayedFromMemory = await replayEffect(typedFlow(input), recorded.trace);
     expectType<SuccessState<SavedUser> | FailureState<ValidationError | DbError>>(replayedFromMemory.result);
-    const withCtx = await recordEffect(ctxFlow, { email: 'a@b.c', password: 'x' }, { context: { db: 'conn' } });
+    const withCtx = await recordEffect(ctxFlow({ email: 'a@b.c', password: 'x' }), { context: { db: 'conn' } });
     expectType<SuccessState<{ email: string; password: string; conn: string }> | FailureState<never>>(withCtx.result);
     expectType<AppCtx | undefined>(withCtx.trace.context);
     // A trace read back from storage is untyped until the caller says otherwise
@@ -964,16 +969,17 @@ recorder({ redact: (value, name, kind) => (kind === 'initialInput' ? { ...value,
     expectType<unknown>(stored.initialInput);
 })();
 // @ts-expect-error context does not match the flow's Ctx
-recordEffect(ctxFlow, { email: 'a@b.c', password: 'x' }, { context: { db: 42 } });
+recordEffect(ctxFlow({ email: 'a@b.c', password: 'x' }), { context: { db: 42 } });
 // @ts-expect-error the flow reads AppCtx, so recording it needs a context
-recordEffect(ctxFlow, { email: 'a@b.c', password: 'x' });
-// @ts-expect-error the input has to be what the flow takes
-recordEffect(typedFlow, { email: 'a@b.c', pasword: 'x' });
+recordEffect(ctxFlow({ email: 'a@b.c', password: 'x' }));
+// @ts-expect-error a flow function is called with its input first
+recordEffect(typedFlow, { version: 'v1' });
 
 // a Resolver answers with a wrapped outcome or undefined for an unrecorded step
 const resolver: Resolver = (step) => {
     expectType<ReplayStep>(step);
     expectType<string>(step.name);
+    expectType<'Command' | 'Parallel'>(step.type);
     expectType<string>(step.path);
     return step.index === 0 ? { result: 1 } : undefined;
 };
@@ -993,10 +999,15 @@ const decisionResolver: Resolver = (step) =>
 // op takes an argument only when a replay passes it the recorded decision
 const passesDecision: StepRunner = async (name, type, op) => (type === 'Parallel' ? op({ cancelled: false }) : op());
 
-// timeTravel returns the bare outcome and takes the trace's own type
-expectType<Promise<SuccessState<SavedUser> | FailureState<ValidationError | DbError>>>(
+// timeTravel returns what replayEffect returns for a trace, and takes the trace's own type
+expectType<Promise<Replay<SavedUser, ValidationError | DbError>>>(
     timeTravel(typedFlow, traceLog, { log: () => {}, version: 'v1' })
 );
+// timeTravel's options are a named type, as replayEffect's are, and check the context against the flow's
+const narration: TimeTravelOptions<AppCtx> = { log: () => {}, context: { db: 'conn' }, version: 'v1' };
+timeTravel(ctxFlow, traceLog, narration);
+// @ts-expect-error the context has to be what the flow reads
+const misnarrated: TimeTravelOptions<AppCtx> = { context: { db: 42 } };
 // @ts-expect-error a bare entries array is replayEffect's shape, not timeTravel's
 timeTravel(typedFlow, traceLog.trace);
 
@@ -1006,7 +1017,7 @@ timeTravel(typedFlow, traceLog.trace);
 // from configuration is, where the declaration says only `T`. The runtime treats undefined as left out everywhere.
 declare const fromConfig: { count?: number; flag?: boolean; name?: string; hook?: StepRunner };
 const configured = Command(() => 1);
-Retry(configured, { attempts: fromConfig.count, delay: fromConfig.count, backoff: fromConfig.count });
+Retry(configured, { retries: fromConfig.count, delay: fromConfig.count, backoff: fromConfig.count });
 expectType<ParallelState<[number], [number], never>>(
     Parallel([Success(42)], { limit: fromConfig.count, settled: undefined })
 );
@@ -1019,7 +1030,7 @@ configureEffect({ onStep: fromConfig.hook, onRun: undefined, onBeforeCommand: un
 runEffect(configured, { flowName: fromConfig.name }, { onStep: fromConfig.hook, inherit: fromConfig.flag });
 const configuredRecorder = recorder({ redact: undefined, maxEntries: fromConfig.count, stack: fromConfig.flag });
 configuredRecorder.toTrace({ flowName: fromConfig.name, version: fromConfig.name });
-recordEffect((n: number) => Success(n), 1, { context: undefined, version: fromConfig.name, stack: fromConfig.flag });
+recordEffect(Success(1), { context: undefined, version: fromConfig.name, stack: fromConfig.flag });
 replayEffect(configured, traceLog, {
     context: undefined,
     fastRetry: fromConfig.flag,

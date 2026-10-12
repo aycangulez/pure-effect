@@ -17,7 +17,7 @@
 - **Getting started:** [Installation](#installation) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Testing Without Mocks](#testing-without-mocks) · [Coming from async/await](#coming-from-asyncawait) · [Writing Flows as Generators](#writing-flows-as-generators)
 - **Recording and replay:** [Time-Travel Debugging](#time-travel-debugging) · [Recording in Production](#recording-in-production) · [Hooks](#hooks)
 - **Building flows:** [Passing Runtime Context](#passing-runtime-context) · [Retrying Transient Failures](#retrying-transient-failures) · [Running Effects in Parallel](#running-effects-in-parallel) · [Composing Larger Flows](#composing-larger-flows) · [Writing Loops](#writing-loops) · [Which Errors Are Data](#which-errors-are-data) · [Generator Flows in Depth](#generator-flows-in-depth) · [TypeScript](#typescript-typed-errors-and-context)
-- **Reference:** [Why Pure Effect](#why-pure-effect) · [Load Tests](#load-tests) · [API Reference](#api-reference) · [Limitations](#limitations)
+- **Reference:** [Why Pure Effect](#why-pure-effect) · [API Reference](#api-reference) · [Limitations](#limitations)
 
 The six sections under Getting started are enough to write and test a flow. Come back to the rest when a flow needs it: recording, retries, loops, steps that run at the same time, or TypeScript.
 
@@ -145,7 +145,7 @@ Hand it a recorded run instead, and each Command gets what it returned the first
 import { recordEffect } from 'pure-effect';
 
 // A real run returns its result, and a trace of what each Command returned.
-const { result: live, trace } = await recordEffect(registerUserFlow, input);
+const { result: live, trace } = await recordEffect(registerUserFlow(input));
 
 // Anywhere else, with nothing connected, the same flow gets the same answers.
 const { result: replayed } = await replayEffect(registerUserFlow(trace.initialInput), trace);
@@ -282,7 +282,7 @@ Record what each Command returned, then feed those results back into the flow to
 import { recordEffect, replayEffect, timeTravel } from 'pure-effect';
 
 // Record a real run. The context's flowName names the flow in the trace.
-const { result, trace } = await recordEffect(checkoutFlow, input, {
+const { result, trace } = await recordEffect(checkoutFlow(input), {
     version: process.env.BUILD_ID,
     context: { flowName: 'checkout' }
 });
@@ -390,7 +390,7 @@ Put anything that varies between runs inside a Command. For replay, the current 
 To check a flow, record it, replay the trace, and compare the outcomes. A step that computes a fresh value shows up as a different final value, or as a `TimeParadox` if it changes which Commands run. A trace holds each result in the form JSON stores it, so this also catches a result your storage cannot keep, such as a `Date` the flow calls a method on:
 
 ```js
-const { result, trace } = await recordEffect(registerUserFlow, input);
+const { result, trace } = await recordEffect(registerUserFlow(input));
 const { result: replayed } = await replayEffect(registerUserFlow(input), trace);
 assert.deepEqual(replayed, result); // fails if a step computed a fresh value, or a result did not survive storage
 ```
@@ -441,7 +441,7 @@ What the example does with each run:
 - **When storage fails.** If `keep` or the sink throws, for example because storage is unreachable, the run keeps its own outcome and the error goes to `onSinkError`, which defaults to `console.error`.
 - **What it warns about.** The example warns through `onWarning`, once per flow, when it keeps a trace that was capped, one holding values it could not record, or one whose steps include any named `'anonymous'`.
 
-The example takes the input from `onRun`, which is handed it only for a flow `effectPipe` built, so build the outermost flow with `effectPipe`. A flow that starts with a bare `Command`, `Ask`, `Retry`, or `Parallel` records no input, and `timeTravel` would rebuild it from `undefined`. A one-step pipeline is enough, as in `runEffect(effectPipe(loadProfile)(userId))`. The example warns through `onWarning`, which defaults to `console.warn`, the first time it keeps a trace of such a flow, and `timeTravel` warns when it replays one.
+The example takes the input from `onRun`, which is handed it only for a flow `effectPipe` or `effectGen` built, so build the outermost flow with one of them. A flow that starts with a bare `Command`, `Ask`, `Retry`, or `Parallel` records no input, and `timeTravel` would rebuild it from `undefined`. A one-step pipeline is enough, as in `runEffect(effectPipe(loadProfile)(userId))`. The example warns through `onWarning`, which defaults to `console.warn`, the first time it keeps a trace of such a flow, and `timeTravel` warns when it replays one.
 
 The example also takes the context from the run's first Command, so a run that stops before any Command, for example at an `Ask` check, records no context. Such a run did no I/O, so running the flow again with its input and the context from your logs reproduces it.
 
@@ -611,7 +611,7 @@ A walk or a replay never runs a Command's function, so this is the test that cat
 `Retry` runs part of a flow again when a Command's function throws. A `Failure` a step returned is not retried: the flow decided to stop, so the `Failure` passes on at once, unchanged. Options are given where `Retry` is used, since they describe one dependency; to reuse settings, share an object:
 
 ```js
-const flakyNetwork = { attempts: 3, delay: 200, backoff: 2 };
+const flakyNetwork = { retries: 3, delay: 200, backoff: 2 };
 Retry(fetchPrice(sku), flakyNetwork);
 ```
 
@@ -625,23 +625,23 @@ const fetchWeather = (city) => {
         fetch(`https://example-weather-api.com/v1/current?city=${city}`).then((r) => r.json());
     return Retry(
         Command(cmdFetchWeather, (data) => (data.error ? Failure(data.error) : Success(data))),
-        { attempts: 3, delay: 200, backoff: 2 } // 200ms, 400ms, 800ms
+        { retries: 3, delay: 200, backoff: 2 } // 200ms, 400ms, 800ms
     );
 };
 
 const weatherFn = fetchWeather('Tokyo');
 assert.equal(weatherFn.type, 'Retry');
-assert.equal(weatherFn.options.attempts, 3);
+assert.equal(weatherFn.options.retries, 3);
 ```
 
 **Wrap the Command that fails, not the pipeline.** Each attempt runs everything inside the `Retry` again, including Commands that already succeeded:
 
 ```js
 // Dangerous: a flaky receipt step charges the customer again on every attempt.
-Retry(effectPipe(chargeCard, sendReceipt)(order), { attempts: 3 });
+Retry(effectPipe(chargeCard, sendReceipt)(order), { retries: 3 });
 
 // Correct: only the step that fails transiently is retried.
-effectPipe(chargeCard, (charge) => Retry(sendReceipt(charge), { attempts: 3 }))(order);
+effectPipe(chargeCard, (charge) => Retry(sendReceipt(charge), { retries: 3 }))(order);
 ```
 
 Wrapping a pipeline is safe only when every Command in it is idempotent (safe to run more than once).
@@ -652,7 +652,7 @@ Wrapping a pipeline is safe only when every Command in it is idempotent (safe to
 // Dangerous: `next` continues the booking, so every later step is inside the Retry.
 Retry(
     Command(cmdHoldSeat, (seat) => chargeCard(trip, seat)),
-    { attempts: 2 }
+    { retries: 2 }
 );
 ```
 
@@ -661,7 +661,7 @@ If a later Command's function throws, the `Retry` holds the seat and charges the
 ```js
 // Safe: the tree the Retry repeats is that one Command.
 effectPipe(
-    () => Retry(Command(cmdHoldSeat), { attempts: 2 }),
+    () => Retry(Command(cmdHoldSeat), { retries: 2 }),
     (seat) => chargeCard(trip, seat)
 );
 ```
@@ -669,7 +669,7 @@ effectPipe(
 When every attempt fails, `runEffect` returns a `Failure` with this error:
 
 ```text
-{ retryExhausted: true, lastError: <the last error>, attempts: 3 }
+{ retryExhausted: true, lastError: <the last error>, retries: 3 }
 ```
 
 In TypeScript, a `Retry` adds `RetryExhaustedError` to the error union, beside the errors of the steps it wraps. `lastError` is typed `unknown`, since it is whatever the Command's function threw, so check it before using it, for example with `instanceof Error`.
@@ -679,8 +679,8 @@ In TypeScript, a `Retry` adds `RetryExhaustedError` to the error union, beside t
 ```js
 const fetchPrice = (sku) =>
     Retry(fetchLivePrice(sku), {
-        attempts: 3,
-        onExhausted: (err) => fetchCachedPrice(sku) // err = { retryExhausted, lastError, attempts }
+        retries: 3,
+        onExhausted: (err) => fetchCachedPrice(sku) // err = { retryExhausted, lastError, retries }
     });
 ```
 
@@ -918,7 +918,7 @@ const findUnpaidInvoices = (customerId) => {
 // Second part: the loop's body, a flow of its own for one invoice.
 const chargeInvoice = (invoice) => {
     const cmdChargeInvoice = () => payments.charge(invoice);
-    return Retry(Command(cmdChargeInvoice), { attempts: 3 });
+    return Retry(Command(cmdChargeInvoice), { retries: 3 });
 };
 
 const sendReceipt = (receipt) => {
@@ -1046,7 +1046,7 @@ Retry(
     Command(function cmdFetchPrice() {
         return pricing.get(sku);
     }),
-    { attempts: 3 }
+    { retries: 3 }
 );
 ```
 
@@ -1257,25 +1257,6 @@ For a step that returns its Command directly, as in `ensureEmailAvailable(input)
 
 **When to use something else:** If your code does little async I/O, or testing and debugging production are not problems for you, plain async/await is simpler.
 
-## Load Tests
-
-Timings are from Node 22 on a MacBook Pro with M4 Pro CPU:
-
-**A web service under load.** A `node:http` service ran signup and checkout flows, where each checkout was a `Parallel` of a retried stock reservation and a card charge, with the OpenTelemetry and recording examples installed.
-
-- 800 requests at once, across 4 tenants: every response and every recorded trace belonged to its own request, and no tenant, user, or request ID crossed between runs.
-- The ~3,500 telemetry spans formed 800 request traces, with every span inside its own request's trace.
-- Side effects matched the outcomes: 320 charges and 320 orders, and 80 declined cards stopped 30 stock reservations that were still running.
-- 30,000 runs in a row kept memory between 10 and 11 MB, and left nothing running afterwards.
-- A background worker that ran 20,000 jobs in one flow, looping through a Command's `next`, finished in under ~400 ms without holding on to memory.
-- Stopping the server with flows still running, or clients hanging up mid-request: every flow that had started finished and was recorded, with no unhandled rejections.
-
-**Batches and parallel work.**
-
-- A settled `Parallel` over 200 records with `limit: 7` never had more than 7 records in flight, and returned the outcomes in order.
-- 5,000 branches in one `Parallel` ran in ~25 ms.
-- Running a Command through `runEffect` costs about 0.2 microseconds, against 0.06 for a plain `await`.
-
 ## API Reference
 
 Every `options` argument and hook configuration below throws for a name it does not read or a value it cannot use, so a misspelt option fails instead of running with its default. `Retry` and `Parallel` throw an `EffectTypeError` where they are built.
@@ -1324,10 +1305,10 @@ Returns `{ type: 'Ask', next }`. Passes the `context` from `runEffect` into `nex
 
 Returns `{ type: 'Retry', effect, options, next }`. See [Retrying Transient Failures](#retrying-transient-failures).
 
-- `options.attempts`: retries after the first try, a positive integer (default `3`). Anything else throws, `0` included: to handle an outcome without retrying, branch on it in the Command's `next`, or isolate a failing branch with `Parallel`'s `settled`.
+- `options.retries`: tries after the first, a positive integer (default `3`), so `2` makes at most three calls. Anything else throws, `0` included: to handle an outcome without retrying, branch on it in the Command's `next`, or isolate a failing branch with `Parallel`'s `settled`.
 - `options.delay`: milliseconds before the first retry, a finite number of 0 or more (default `100`).
 - `options.backoff`: the multiplier applied to the delay on each attempt, a finite number of 0 or more (default `1`, flat).
-- `options.onExhausted(error)`: a fallback Effect to run when every attempt has failed, given `{ retryExhausted, lastError, attempts }`. Its success feeds `next`; its failure is returned unwrapped. Per use only.
+- `options.onExhausted(error)`: a fallback Effect to run when every attempt has failed, given `{ retryExhausted, lastError, retries }`. Its success feeds `next`; its failure is returned unwrapped. Per use only.
 - An option set to `undefined` keeps its default.
 
 #### `Parallel(effects, next?, options?)`
@@ -1395,7 +1376,7 @@ Adds a layer of hooks for the whole process and returns a function that removes 
 - Several configurations passed to one call form one layer.
 - `configureEffect()` with no arguments removes every layer, and a call whose arguments are all `undefined` changes nothing.
 - Throws a `TypeError`, before installing anything, for a configuration that is not an object, a key other than the three below (`retry` included), or a hook that is not a function (`null` included).
-- `onRun(effect, pipeline, flowName, initialInput)`: wraps the whole run once, retries included. It must `await pipeline()` and return its result. `initialInput` is what the flow was called with when `effectPipe` built it, and `undefined` otherwise; pass it on to any hook it calls.
+- `onRun(effect, pipeline, flowName, initialInput)`: wraps the whole run once, retries included. It must `await pipeline()` and return its result. `initialInput` is what the flow was called with when `effectPipe` or `effectGen` built it, and `undefined` otherwise; pass it on to any hook it calls.
 - `onStep(name, type, op, path)`: wraps each Command, and each `Parallel` with `name` and `type` both `'Parallel'`. It must `await op()` and return its result, and pass `path` on to any hook it calls, since a replay matches steps on it.
     - For a Command, `op()` returns a promise, even for a synchronous function. Returning a value without calling `op()` answers for the Command, which is how replay works, and throwing without calling it counts as the Command failing.
     - A throw after `op()` succeeded, or `undefined` in place of its value (a forgotten `return` or `await`), is a bug in the hook: the run rejects, and `Retry` does not run the Command again.
@@ -1427,9 +1408,9 @@ Returns `{ onStep, entries, toTrace }`, a hook that records every step of a run,
 - `options.stack`: record stack traces for thrown errors (off by default).
 - A value `redact` throws on, or one JSON cannot hold, is left out and marked `unrecorded`: on its entry, or for the input and context in the trace's `unrecorded`, as in `{ context: 'copy' }`. A replay stops there with a `ReplayError` rather than hand the flow a stand-in. See [Recording in Production](#recording-in-production) for what a copy keeps.
 
-#### `recordEffect(flowFn, initialInput, options?)`
+#### `recordEffect(effect, options?)`
 
-Runs a flow for real while recording, returning `{ result, trace }`. Accepts `recorder` options plus `context` and `version`. For tests and scripts; to record an application without changing call sites, use the wiring in [`examples/recording-example.js`](https://github.com/aycangulez/pure-effect/blob/main/examples/recording-example.js), which gives each run its own recorder.
+Runs a flow for real while recording, returning `{ result, trace }`. The trace holds the flow's input when `effectPipe` or `effectGen` built it, so `timeTravel` can build the flow again. Accepts `recorder` options plus `context` and `version`. For tests and scripts; to record an application without changing call sites, use the wiring in [`examples/recording-example.js`](https://github.com/aycangulez/pure-effect/blob/main/examples/recording-example.js), which gives each run its own recorder.
 
 #### `replayEffect(effect, traceOrResolver, options?)`
 
@@ -1450,7 +1431,7 @@ Runs a flow with each Command answered from a trace instead of run, and returns 
 
 #### `timeTravel(flowFn, traceLog, options?)`
 
-Replays a trace and narrates each step with its recorded duration. Returns the flow's outcome; for the unreached entries as data, use `replayEffect`.
+Replays a trace and narrates each step with its recorded duration. Returns `{ result, unreached }`, as `replayEffect` does for a trace.
 
 - Names any recorded steps that were never reached.
 - Warns when the trace's `version` differs from `options.version`, and when steps are named `'anonymous'`.

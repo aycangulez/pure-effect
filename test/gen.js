@@ -121,7 +121,7 @@ describe('step', function () {
                 tries++;
                 return looseStep(Success(1)).id;
             }),
-            { attempts: 2, delay: 0 }
+            { retries: 2, delay: 0 }
         );
         await assert.rejects(runEffect(flow), /was used as a value/);
         assert.equal(tries, 1);
@@ -391,7 +391,7 @@ describe('effectGen', function () {
                 );
                 return order.lines;
             });
-            assert.deepEqual(await runEffect(Retry(placeOrder(undefined), { attempts: 2, delay: 0 })), Success([10]));
+            assert.deepEqual(await runEffect(Retry(placeOrder(undefined), { retries: 2, delay: 0 })), Success([10]));
 
             // One flow value in three branches: each runs its own body, with its own array.
             const counted = effectGen(function* () {
@@ -428,7 +428,7 @@ describe('effectGen', function () {
                 return saved;
             });
             assert.deepEqual(
-                await runEffect(Retry(importRows(undefined), { attempts: 1, delay: 0 })),
+                await runEffect(Retry(importRows(undefined), { retries: 1, delay: 0 })),
                 Success(['a', 'b'])
             );
         });
@@ -556,7 +556,7 @@ describe('effectGen: stopping', function () {
             'a Failure yielded as the flow is built': Failure('early'),
             "a Failure from a step's next": failingNext,
             'a Failure inside a Retry': Retry(failingNext),
-            'a Retry out of attempts': Retry(boom('cmdFlaky'), { attempts: 1, delay: 0 }),
+            'a Retry out of attempts': Retry(boom('cmdFlaky'), { retries: 1, delay: 0 }),
             'a failing Parallel branch': Parallel([Success(1), failingNext])
         };
         for (const [way, effect] of Object.entries(ways)) {
@@ -651,7 +651,7 @@ describe('effectGen: stopping', function () {
                 seen.push('finally');
             }
         });
-        assert.deepEqual(await runEffect(Retry(flow(undefined), { attempts: 3, delay: 0 })), Success('ok'));
+        assert.deepEqual(await runEffect(Retry(flow(undefined), { retries: 3, delay: 0 })), Success('ok'));
         assert.deepEqual(seen, ['start', 'finally', 'start', 'finally', 'start', 'finally']);
     });
 
@@ -681,7 +681,7 @@ describe('effectGen: stopping', function () {
             );
             return [a, b];
         });
-        assert.deepEqual(await runEffect(Retry(outer(undefined), { attempts: 1, delay: 0 })), Success(['a', 'b']));
+        assert.deepEqual(await runEffect(Retry(outer(undefined), { retries: 1, delay: 0 })), Success(['a', 'b']));
         const entered = seen.filter((event) => event === 'inner enter').length;
         assert.equal(seen.filter((event) => event === 'inner finally').length, entered);
     });
@@ -689,7 +689,7 @@ describe('effectGen: stopping', function () {
     it('should let the body go on when onExhausted recovers', async function () {
         const flow = effectGen(function* () {
             const value = yield* step(
-                Retry(boom('cmdPrice'), { attempts: 1, delay: 0, onExhausted: () => Success('cached') })
+                Retry(boom('cmdPrice'), { retries: 1, delay: 0, onExhausted: () => Success('cached') })
             );
             return `${value}!`;
         });
@@ -946,7 +946,7 @@ describe('effectGen: running a flow again', function () {
 
     it('should build the flow again for each Retry attempt, so an attempt hands every Command its own values', async function () {
         failures = 1;
-        const result = await runEffect(Retry(reserveAndCharge(undefined), { attempts: 2, delay: 0 }));
+        const result = await runEffect(Retry(reserveAndCharge(undefined), { retries: 2, delay: 0 }));
         assert.deepEqual(result, Success('id-2'));
         assert.deepEqual(log, ['reserve id-1', 'reserve id-2', 'charge id-2']);
     });
@@ -1002,7 +1002,7 @@ describe('effectGen: running a flow again', function () {
             log = [];
             ids = 0;
             failures = 1;
-            const result = await runEffect(Retry(build(), { attempts: 2, delay: 0 }));
+            const result = await runEffect(Retry(build(), { retries: 2, delay: 0 }));
             assert.deepEqual(result, Success('paid id-2'));
             assert.deepEqual(log, ['reserve id-1', 'reserve id-2', 'charge id-2']);
         }
@@ -1071,8 +1071,8 @@ describe('effectGen: running a flow again', function () {
 
     it('should record a retried flow and replay it from JSON with no I/O', async function () {
         failures = 1;
-        const flowFn = () => Retry(reserveAndCharge(undefined), { attempts: 2, delay: 0 });
-        const recorded = await recordEffect(flowFn, undefined);
+        const flowFn = () => Retry(reserveAndCharge(undefined), { retries: 2, delay: 0 });
+        const recorded = await recordEffect(flowFn());
         assert.deepEqual(recorded.result, Success('id-2'));
         log = [];
         const replay = await replayEffect(flowFn(), JSON.parse(JSON.stringify(recorded.trace)));
@@ -1116,9 +1116,9 @@ describe('effectGen: the same as a pipeline', function () {
     });
 
     it('should record the same trace, and replay it from JSON with no I/O', async function () {
-        const piped = await recordEffect(registerUserFlow, input);
+        const piped = await recordEffect(registerUserFlow(input));
         db.users.clear();
-        const generated = await recordEffect(registerUserGen, input);
+        const generated = await recordEffect(registerUserGen(input));
         /** @param {import('../index.js').TraceEntry[]} trace */
         const shape = (trace) => trace.map(({ command, path }) => ({ command, path }));
         assert.deepEqual(shape(generated.trace.trace), shape(piped.trace.trace));

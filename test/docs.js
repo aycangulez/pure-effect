@@ -98,8 +98,8 @@ describe('README examples', function () {
         // The Quick Start shows one flow written two ways, and they must stay the same flow.
         const sameFlow = `
             for (const given of [input, { email: 'bad-email', password: 'password123' }]) {
-                const piped = await recordEffect(registerUserFlow, given);
-                const generated = await recordEffect(registerUserFlowGen, given);
+                const piped = await recordEffect(registerUserFlow(given));
+                const generated = await recordEffect(registerUserFlowGen(given));
                 assert.deepEqual(generated.result, piped.result);
                 const shape = (log) => log.trace.map(({ command, path, result }) => ({ command, path, result }));
                 assert.deepEqual(shape(generated.trace), shape(piped.trace));
@@ -197,7 +197,7 @@ describe('Documented sharp edges', function () {
                         (/** @type {any} */ v) => Success(v)
                     )
             )({ order: 1 }),
-            { attempts: 3, delay: 0 }
+            { retries: 3, delay: 0 }
         );
 
         const result = await runEffect(effect);
@@ -226,7 +226,7 @@ describe('Documented sharp edges', function () {
                             throw new Error('gateway exploded');
                         })
                 ),
-                { attempts: 2, delay: 0 }
+                { retries: 2, delay: 0 }
             );
 
         const result = await runEffect(saga(() => {}));
@@ -249,7 +249,7 @@ describe('Documented sharp edges', function () {
                         ledger.seats++;
                         return Promise.resolve({ holdId: 'seat_1' });
                     }),
-                    { attempts: 2, delay: 0 }
+                    { retries: 2, delay: 0 }
                 ),
             () =>
                 Command(function cmdCharge() {
@@ -291,12 +291,12 @@ describe('Documented sharp edges', function () {
         };
 
         const caught = attempt(true);
-        const caughtResult = await runEffect(Retry(caught.step, { attempts: 3, delay: 0 }));
+        const caughtResult = await runEffect(Retry(caught.step, { retries: 3, delay: 0 }));
         assert.equal(caughtResult.type, 'Failure');
         assert.equal(caught.calls(), 1, 'a caught rejection is an abort, so the Retry never tries again');
 
         const thrown = attempt(false);
-        const thrownResult = await runEffect(Retry(thrown.step, { attempts: 3, delay: 0 }));
+        const thrownResult = await runEffect(Retry(thrown.step, { retries: 3, delay: 0 }));
         assert.equal(thrownResult.type, 'Failure');
         assert.equal(thrown.calls(), 4, 'letting it throw is what makes it an I/O fault the Retry acts on');
     });
@@ -360,7 +360,7 @@ describe('Documented sharp edges', function () {
             yield* step(Command(function cmdFirst() {}));
             yield* step(Command(function cmdSecond() {}));
         });
-        const trace = (await recordEffect(() => recorded(undefined), undefined)).trace;
+        const trace = (await recordEffect(recorded(undefined))).trace;
         const changed = effectGen(function* () {
             try {
                 yield* step(Command(function cmdFirst() {}));

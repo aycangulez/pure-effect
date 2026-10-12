@@ -2,12 +2,16 @@
 
 All notable changes to pure-effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
-## [0.20.0] - 2026-10-12
+## [0.20.0] - 2026-10-13
 
 ### Changed
 
+- **Breaking: `recordEffect` takes the flow already called with its input, as `runEffect` and `replayEffect` do.** Write `recordEffect(checkoutFlow(input), options)` where you wrote `recordEffect(checkoutFlow, input, options)`. The trace still holds the input of a flow `effectPipe` or `effectGen` built, so `timeTravel` builds the flow again from it, and a flow built some other way records none, as it does when recorded in production. A call written the old way is refused as a flow passed without its input. In TypeScript the trace's `initialInput` is now `unknown`, as it is in a trace read back from storage.
+- **Breaking: `Retry`'s `attempts` option is renamed `retries`, and so is the exhaustion's field.** It always counted the tries after the first, so `retries: 2` makes at most three calls, which the old name hid. `attempts` is refused as an option `Retry` does not have, as the flow is built, and `onExhausted` receives `{ retryExhausted, lastError, retries }`.
+- **Breaking: `timeTravel` returns `{ result, unreached }`, as `replayEffect` does for a trace,** rather than the outcome alone, so a test can check the steps it narrated as never reached.
 - **Running a generator flow again builds it again from its input, as calling an `async` function again does.** A `Retry` around a generator flow repeated its first Command as the first attempt built it and built the rest again, so a value the body made, such as an ID or the time, was one value in the first Command and another in the next: a retried reservation and charge could go out under two different IDs. One flow value run twice, or put in two branches of a `Parallel`, mixed its runs the same way. Each `Retry` attempt, each run and each branch now builds the flow afresh, so every Command in it gets the same values, and the first takes over the body that ran as the flow was built, so a single run still runs the body once. A flow a test walked before running it is built afresh too. Getting such a value from a Command is still the way to replay it.
 - **A long loop in a generator flow no longer holds every earlier result.** Each step kept the answers before it, so the body could be run again, and a loop over 2,000 pages of 10,000 items held about 160 MB at its last page. Now that running a flow again builds it again, a run keeps only the answer it is on, as a pipeline does; a body a test walks keeps its answers, as walking a second branch needs them. An `onBeforeCommand` hook that answers the Command it was handed, by calling its `next`, now makes the run reject with an `EffectTypeError` when the interpreter reaches that step's answer, since the run keeps no earlier answers to run the body again with.
+- **TypeScript: a step's `type` is `'Command' | 'Parallel'`, a `Parallel`'s `options` are always present, and `timeTravel`'s options are the named `TimeTravelOptions`.** An `onStep` hook and a `Resolver` can switch on the step's type, and a hook that declares it a plain `string` still fits.
 
 ## [0.19.0] - 2026-10-11
 
