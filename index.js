@@ -5,13 +5,14 @@
 // 1. Types: the JSDoc shapes of the nodes a flow is made of.
 // 2. Building flows: the constructors; the checks, error messages and kinds of failure the later sections
 //    share, `checkOptions` and `Retry`'s defaults among them; `effectPipe`, with the `chain` that joins its
-//    steps, the stop listeners `chain` keeps for generator flows, and the `flowInputs` it records for `onRun`;
-//    and `step` and `effectGen`, which build a flow from a generator function.
+//    steps, the stop listeners and `restarts` `chain` keeps for generator flows, and the `flowInputs` it records
+//    for `onRun` and `recordEffect`; and `step` and `effectGen`, which build a flow from a generator function.
 // 3. Configuration: the hook types and their defaults, `configureEffect` and its layers, and `chainHooks`, which
 //    merges them.
 // 4. Running flows: the helpers `Retry`, `Parallel` and Commands run on; `interpret`, which builds a run's
-//    `Runtime`, then `stopAt`, which tells a waiting generator flow its step stopped, `execute` and a function
-//    for each kind of node, which each take it; and `runEffect`.
+//    `Runtime`, then `stopAt`, which tells a waiting generator flow its step stopped, `ownRun`, which builds a
+//    generator flow again for each execution after its first, `execute` and a function for each kind of node,
+//    which each take it; and `runEffect`.
 // 5. Recording and replay: the trace format and replay errors, copying values and errors into a trace,
 //    `recorder` and `recordEffect`, then `fromTrace`, `replayEffect` and `timeTravel`, each followed by the
 //    functions it hands its parts to.
@@ -47,7 +48,7 @@
  * @typedef {{
  *   type: 'Retry',
  *   effect: Effect,
- *   options: Readonly<{ attempts?: number, delay?: number, backoff?: number, onExhausted?: (error: any) => Effect }>,
+ *   options: Readonly<{ retries?: number, delay?: number, backoff?: number, onExhausted?: (error: any) => Effect }>,
  *   next: (value: any) => Effect
  * }} RetryState
  */
@@ -162,12 +163,12 @@ const Ask = (...args) => {
  *
  * @param {Effect} effect - The inner Effect tree to retry
  * @param {Object} [options] - Merged over the defaults when it runs; an option set to `undefined` keeps its default.
- * @param {number} [options.attempts] - Retries after the first try, a positive integer
+ * @param {number} [options.retries] - Tries after the first, a positive integer
  * @param {number} [options.delay] - Ms before the first retry, a finite number of 0 or more
  * @param {number} [options.backoff] - Multiplier applied to the delay on each later retry, a finite number of 0 or
  *        more
  * @param {(error: any) => Effect} [options.onExhausted] - Builds a fallback from `{ retryExhausted, lastError,
- *        attempts }` once every attempt has failed. Its success feeds `next`; its failure propagates unwrapped.
+ *        retries }` once every attempt has failed. Its success feeds `next`; its failure propagates unwrapped.
  * @returns {RetryState}
  */
 const Retry = (effect, options) => {
@@ -175,7 +176,7 @@ const Retry = (effect, options) => {
     if (typeof options === 'number') {
         const got = describeArgument(options);
         throw malformed(
-            `Retry's options must be an object, got ${got}: write Retry(effect, { attempts: ${options} }).`,
+            `Retry's options must be an object, got ${got}: write Retry(effect, { retries: ${options} }).`,
             options
         );
     }
@@ -317,7 +318,7 @@ const checkOptions = (options, source, rules, raise = (message) => new TypeError
 };
 
 /** What `Retry` uses for an option left out or set to `undefined`. */
-const defaultRetryOptions = { attempts: 3, delay: 100, backoff: 1 };
+const defaultRetryOptions = { retries: 3, delay: 100, backoff: 1 };
 
 /**
  * Checked when the Retry is built, which keeps a frozen copy of the options, so they cannot change before it runs.
@@ -325,7 +326,7 @@ const defaultRetryOptions = { attempts: 3, delay: 100, backoff: 1 };
  */
 const retryOptionRules = {
     // Not 0, which would make `onExhausted` a catch.
-    attempts: [
+    retries: [
         isPositiveInteger,
         'a positive integer',
         "To handle an outcome without retrying, branch on it as data in the Command's next, or isolate a failing " +
@@ -510,6 +511,10 @@ const chain = (effect, fn, from, onStop) => {
     const waiting = stopListeners.get(effect);
     if (onStop) stopListeners.set(copy, [...(waiting ?? []), onStop]);
     else if (waiting) stopListeners.set(copy, waiting);
+    const restart = restarts.get(effect);
+    if (restart) {
+        restarts.set(copy, { built: restart.built, rebuild: () => chain(restart.rebuild(), fn, from, onStop) });
+    }
     return copy;
 };
 
@@ -527,7 +532,22 @@ const chain = (effect, fn, from, onStop) => {
 const stopListeners = new WeakMap();
 
 /**
- * Copies a flow's root, which `flowInputs` is keyed on, keeping the generator flows waiting on it.
+ * The body run a generator flow made as it was built, which the first execution of the flow takes over if nothing
+ * has used it. `claimed` is shared by every copy of the flow's root, so only one execution takes it over.
+ * @typedef {{ run: BodyRun, position: number, state: BodyRun['state'], claimed: boolean }} BuiltRun
+ */
+
+/**
+ * How to build each generator flow's root again from its input, and the run it was built with. `effectGen` sets one,
+ * `chain` and `copyRoot` keep it on their copies, and `execute`'s `ownRun` builds the flow again for every execution
+ * after the first, so a `Retry` or a reused flow value runs the body afresh, as a retried `async` function does.
+ * @type {WeakMap<Effect, { built: BuiltRun, rebuild: () => Effect }>}
+ */
+const restarts = new WeakMap();
+
+/**
+ * Copies a flow's root, which `flowInputs` is keyed on, keeping the generator flows waiting on it and how to build it
+ * again.
  * @param {Effect} tree
  * @returns {Effect}
  */
@@ -535,12 +555,14 @@ const copyRoot = (tree) => {
     const root = { ...tree };
     const waiting = stopListeners.get(tree);
     if (waiting) stopListeners.set(root, waiting);
+    const restart = restarts.get(tree);
+    if (restart) restarts.set(root, { built: restart.built, rebuild: () => copyRoot(restart.rebuild()) });
     return root;
 };
 
 /**
- * The input each flow `effectPipe` built was called with, keyed on the flow's root, for `interpret` to hand `onRun`.
- * Kept off the flow, so no node or outcome carries it.
+ * The input each flow `effectPipe` or `effectGen` built was called with, keyed on the flow's root, for `interpret` to
+ * hand `onRun` and for `recordEffect` to store in its trace. Kept off the flow, so no node or outcome carries it.
  * @type {WeakMap<Effect, any>}
  */
 const flowInputs = new WeakMap();
@@ -671,8 +693,9 @@ const asyncGeneratorFunction = Object.getPrototypeOf(async function* () {});
  */
 
 /**
- * One run of a body: its generator, the position of the step it is waiting at, and whether it can still resume.
- * @typedef {{ generator: Generator<any, any, any>, position: number, state: 'suspended' | 'done' }} BodyRun
+ * One run of a body: its generator, the position of the step it is waiting at, whether it can still resume, and
+ * whether an execution took it over (`takeBuiltRun`), which only ever moves it forward.
+ * @typedef {{ generator: Generator<any, any, any>, position: number, state: 'suspended' | 'done', owned: boolean }} BodyRun
  */
 
 /**
@@ -680,6 +703,13 @@ const asyncGeneratorFunction = Object.getPrototypeOf(async function* () {});
  * them again and check the body asks for the same steps. Shared between continuations, never copied.
  * @typedef {{ signature: string, answer: any, earlier: Trail } | null} Trail
  */
+
+/**
+ * Where a run an execution owns keeps its earlier answers: nowhere, since running it again builds the flow again from
+ * its input, so a long loop holds only the answer it is on. `rerun` refuses a trail that reaches it.
+ * @type {NonNullable<Trail>}
+ */
+const droppedAnswers = Object.freeze({ signature: '', answer: undefined, earlier: null });
 
 /**
  * @typedef {(generator: Generator<any, any, any>) => IteratorResult<any, any>} Resume
@@ -704,7 +734,7 @@ const startRun = (flow) => {
             generator
         );
     }
-    return { generator, position: 0, state: 'suspended' };
+    return { generator, position: 0, state: 'suspended', owned: false };
 };
 
 /**
@@ -825,7 +855,17 @@ const rerun = (flow, trail, signature) => {
     };
     /** @type {{ signature: string, answer: any }[]} */
     const answers = [];
-    for (let cell = trail; cell; cell = cell.earlier) answers.unshift(cell);
+    for (let cell = trail; cell; cell = cell.earlier) {
+        if (cell === droppedAnswers) {
+            throw malformed(
+                `A step of a generator flow was answered again after a run had gone past it, at ${signature}, and ` +
+                    'that run keeps no earlier answers to run the body again with. Walk a flow before running it, ' +
+                    'not a step a run handed a hook.',
+                undefined
+            );
+        }
+        answers.unshift(cell);
+    }
     let result = resumeBody(run, (g) => g.next());
     for (const { signature: asked, answer } of answers) {
         const effect = expect(result, asked);
@@ -840,7 +880,7 @@ const rerun = (flow, trail, signature) => {
 
 /**
  * The run waiting at `position`: the live one if it is there, else a new one the earlier answers bring there, as
- * when a test walks a second branch or a `Retry` repeats the flow.
+ * when a test walks a second branch.
  * @param {GenFlow} flow
  * @param {BodyRun} run
  * @param {number} position
@@ -897,7 +937,8 @@ const advance = (flow, run, trail, resume) => {
 const continueBody = (flow, run, position, trail, signature, answer) => {
     const current = runAt(flow, run, position, trail, signature);
     current.position = position + 1;
-    return advance(flow, current, { signature, answer, earlier: trail }, (g) => g.next(answer));
+    const after = current.owned ? droppedAnswers : { signature, answer, earlier: trail };
+    return advance(flow, current, after, (g) => g.next(answer));
 };
 
 /**
@@ -945,7 +986,8 @@ const stopBody = (flow, run, position, trail, signature, node) => {
 /**
  * Builds a flow function from a generator function, which writes `yield* step(effect)` where `async` code writes
  * `await`. Calling the flow function runs the body up to its first step, and the flow it returns is made of ordinary
- * nodes, so it records, replays and tests as a pipeline does.
+ * nodes, so it records, replays and tests as a pipeline does. The first execution of the flow takes over that run of
+ * the body, and every later one builds the flow again from its input, as calling an `async` function again does.
  *
  * @param {(input: any) => Generator<any, any, any>} body
  * @returns {(input: any) => Effect}
@@ -963,13 +1005,18 @@ const effectGen = (body) => {
             body
         );
     }
-    return (input) => {
+    /** @param {any} input */
+    const build = (input) => {
         const flow = { body, input };
+        const run = startRun(flow);
         // Keyed on a copy, as `effectPipe`'s root is, since a body can return a shared object.
-        const root = copyRoot(advance(flow, startRun(flow), null, (g) => g.next()));
+        const root = copyRoot(advance(flow, run, null, (g) => g.next()));
         flowInputs.set(root, input);
+        const built = { run, position: run.position, state: run.state, claimed: false };
+        restarts.set(root, { built, rebuild: () => build(input) });
         return root;
     };
+    return build;
 };
 
 // #endregion
@@ -978,7 +1025,7 @@ const effectGen = (body) => {
 /**
  * Wraps one Command, or one Parallel, whose `op` runs the branches and returns the decision, so a hook must call it.
  * Only a replay passes `op` an argument, the recorded decision. `path` is the step's position in the Effect tree.
- * @typedef {(name: string, type: string, op: function, path?: string) => Promise<any>} StepRunner
+ * @typedef {(name: string, type: 'Command' | 'Parallel', op: function, path?: string) => Promise<any>} StepRunner
  */
 /** @type StepRunner */
 const defaultStepRunner = async (name, type, op) => await op();
@@ -1362,9 +1409,36 @@ const stopAt = (node, result, signal) => {
  * @returns {SuccessState | FailureState | IoFaultState}
  */
 const stopSkipped = (node, result, signal) => {
+    // A generator flow another execution took over, or a test walked, is not this one's to stop.
+    const restart = restarts.get(node);
+    if (restart && !takeBuiltRun(restart.built)) return result;
     if (node.type === 'Retry') stopSkipped(node.effect, result, signal);
     if (node.type === 'Parallel') node.effects.forEach((branch) => stopSkipped(branch, result, signal));
     return stopAt(node, result, signal);
+};
+
+/**
+ * Takes over the run a generator flow made as it was built, if nothing has: no execution took it over, and no test
+ * walked it on from where it was built.
+ * @param {BuiltRun} built
+ * @returns {boolean} Whether the run was free
+ */
+const takeBuiltRun = (built) => {
+    const free = !built.claimed && built.run.position === built.position && built.run.state === built.state;
+    built.claimed = true;
+    if (free) built.run.owned = true;
+    return free;
+};
+
+/**
+ * The node to run in place of `eff`: `eff` itself, unless it is a generator flow's root whose built run is taken, when
+ * it is the flow built again from its input. The other end is `restarts`, which `effectGen` fills.
+ * @param {Effect} eff
+ * @returns {Effect}
+ */
+const ownRun = (eff) => {
+    const restart = restarts.get(eff);
+    return restart && !takeBuiltRun(restart.built) ? restart.rebuild() : eff;
 };
 
 /**
@@ -1385,6 +1459,11 @@ const execute = async (runtime, eff, signal, path = '') => {
     while (isPending(eff)) {
         // A Command already in flight cannot be stopped, but the next one never starts.
         if (signal?.aborted) return stopSkipped(eff, cancelledBranch(), signal);
+        const own = ownRun(eff);
+        if (own !== eff) {
+            eff = own;
+            continue;
+        }
         if (eff.type === 'Ask') {
             from = eff;
             eff = eff.next(runtime.context);
@@ -1423,9 +1502,9 @@ const runRetry = async (runtime, retry, signal, stepPath) => {
         ...defaultRetryOptions,
         ...Object.fromEntries(given)
     });
-    const { attempts, onExhausted } = opts;
+    const { retries, onExhausted } = opts;
     let lastError;
-    for (let attempt = 0; attempt <= attempts; attempt++) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
         // `fastRetry` waits for no time rather than skipping the wait, so branches replayed by timing still
         // interleave.
         if (attempt > 0) {
@@ -1438,7 +1517,7 @@ const runRetry = async (runtime, retry, signal, stepPath) => {
         if (result.type !== 'IoFault') return result;
         lastError = result.error;
     }
-    const exhausted = { retryExhausted: true, lastError, attempts };
+    const exhausted = { retryExhausted: true, lastError, retries };
     // A fault too, so an enclosing Retry retries this one.
     if (typeof onExhausted !== 'function') return IoFault(exhausted);
     if (signal?.aborted) return cancelledBranch();
@@ -1748,7 +1827,7 @@ const runEffect = (effect, context, callConfig) => interpret(effect, context, ca
  * position in completion order, which is not stable for a flow with a `Parallel`. A step whose `type` is 'Parallel'
  * asks for the recorded decision and does not advance `index`; an answer that holds no decision replays that
  * Parallel by timing.
- * @typedef {{ index: number, name: string, type: string, path?: string }} ReplayStep
+ * @typedef {{ index: number, name: string, type: 'Command' | 'Parallel', path?: string }} ReplayStep
  */
 
 /**
@@ -2123,24 +2202,26 @@ const packTrace = (settings, meta, entries, dropped) => {
 };
 
 /**
- * Runs a flow for real while recording it, and returns the outcome and a replayable trace. Convenient in tests and
- * scripts; to record an application, give each run its own recorder, as examples/recording-example.js does.
+ * Runs a flow for real while recording it, and returns the outcome and a replayable trace. The trace holds the input
+ * of a flow `effectPipe` or `effectGen` built, read from `flowInputs`. Convenient in tests and scripts; to record an
+ * application, give each run its own recorder, as examples/recording-example.js does.
  *
- * @param {(input: any) => Effect} flowFn - Builds the Effect tree from its input
- * @param {any} initialInput - The value the flow is called with; stored so a replay can rebuild it
+ * @param {Effect} effect - The flow, called with its input
  * @param {RecorderOptions & { context?: any, version?: string }} [options] - Recorder options, plus the
  *        `context` given to `runEffect` (stored so `Ask` can be replayed) and a build id
  * @returns {Promise<{ result: SuccessState | FailureState, trace: TraceLog }>}
  */
-const recordEffect = async (flowFn, initialInput, options = {}) => {
+const recordEffect = async (effect, options = {}) => {
+    // Before the options, so a call written the old way, with the flow function and its input, is named as that.
+    asEffect(effect, 'The flow');
     checkOptions(options, 'recordEffect', { context: null, version: null, ...recorderOptionRules });
-    checkFlowFn(flowFn, 'recordEffect');
     const { context = {}, version, ...recorderOptions } = options ?? {};
     const rec = recorder(recorderOptions);
     // Before the run, so a Command that writes to the input or the context cannot rewrite what the trace received.
+    const initialInput = flowInputs.get(effect);
     const head = rec.toTrace({ initialInput, flowName: context?.flowName, context, version });
     // Merged over the global wiring, so recording inside an instrumented application keeps its spans.
-    const result = await runEffect(flowFn(initialInput), context, { onStep: rec.onStep });
+    const result = await runEffect(effect, context, { onStep: rec.onStep });
     const { dropped, trace } = rec.toTrace();
     return { result, trace: { ...head, dropped, trace } };
 };
@@ -2719,8 +2800,7 @@ const replayHook = ({ resolve, missing, onResolved, onMissing, droppedEntries })
  * @param {(...args: any[]) => void} [options.log] - Defaults to `console.log`
  * @param {any} [options.context] - Overrides the context stored on the trace
  * @param {string} [options.version] - Current build id; warns when it differs from the trace's
- * @returns {Promise<SuccessState | FailureState>} The flow's outcome. For the unreached entries as data, use
- *          `replayEffect`.
+ * @returns {Promise<Replay>} `{ result, unreached }`, as `replayEffect` returns for a trace
  */
 const timeTravel = async (flowFn, traceLog, options = {}) => {
     checkOptions(options, 'timeTravel', { log: [isFunction, 'a function'], context: null, version: null });
@@ -2757,7 +2837,7 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
     log(result.type === 'Failure' ? `Error: ${formatForLog(result.error)}` : `Result: ${formatForLog(result.value)}`);
     const warning = unreachedWarning(result, unreached);
     if (warning !== undefined) log(warning);
-    return result;
+    return { result, unreached };
 };
 
 /**
@@ -2775,8 +2855,8 @@ const traceWarnings = (traceLog, trace, version) => {
     }
     if (traceLog.initialInput === undefined) {
         warnings.push(
-            'Warning: the trace holds no initial input, so the flow is rebuilt from undefined. A recorder ' +
-                'installed as a hook finds the input only on a flow built with effectPipe.'
+            'Warning: the trace holds no initial input, so the flow is rebuilt from undefined. A trace holds ' +
+                'the input only of a flow built with effectPipe or effectGen.'
         );
     }
     const anonymous = trace.filter((e) => e.command === 'anonymous').length;

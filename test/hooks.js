@@ -408,7 +408,7 @@ describe('Per-call inherit', function () {
         /** @type {string[]} */
         const log = [];
         configureEffect({ onStep: tagStep(log, 'global') });
-        const { result, trace } = await recordEffect(() => cmd('a'), null);
+        const { result, trace } = await recordEffect(cmd('a'));
         assert.equal(result.type, 'Success');
         assert.deepEqual(log, ['global:before', 'global:after'], 'tracing kept running');
         assert.equal(trace.trace.length, 1, 'and the run was recorded');
@@ -424,7 +424,7 @@ describe('Per-call inherit', function () {
                 (/** @type {any} */ r) => Success(r),
                 { name: 'cmdA' }
             );
-        const { trace } = await recordEffect(flow, null);
+        const { trace } = await recordEffect(flow());
         configureEffect(globalWiring(log));
         const { result } = await replayEffect(flow(), trace);
         assert.equal(result.type, 'Success');
@@ -442,7 +442,7 @@ describe('Per-call inherit', function () {
                 (/** @type {any} */ r) => Success(r),
                 { name: 'cmdA' }
             );
-        const { trace } = await recordEffect(flow, null);
+        const { trace } = await recordEffect(flow());
         configureEffect(globalWiring(log));
         const { result } = await replayEffect(flow(), trace, { hooks: true });
         assert.equal(result.type, 'Success');
@@ -494,7 +494,7 @@ describe('Where a throw comes from', function () {
                     calls++;
                     return 'ok';
                 }),
-                { attempts: 3, delay: 0, onExhausted: () => Success('fallback') }
+                { retries: 3, delay: 0, onExhausted: () => Success('fallback') }
             ),
             {}
         );
@@ -517,7 +517,7 @@ describe('Where a throw comes from', function () {
                     throw bug;
                 }
             ),
-            { attempts: 2, delay: 0 }
+            { retries: 2, delay: 0 }
         );
         await assert.rejects(runEffect(flow), (e) => e === bug);
         assert.equal(calls, 1, 'the I/O succeeded, so it is not repeated for a bug that followed it');
@@ -592,7 +592,7 @@ describe('Where a throw comes from', function () {
                     return Success(v);
                 }
             );
-        const { trace } = await recordEffect(flow, null);
+        const { trace } = await recordEffect(flow());
         broken = true;
         await assert.rejects(replayEffect(flow(), trace), TypeError);
     });
@@ -605,7 +605,7 @@ describe('Where a throw comes from', function () {
                     calls++;
                     throw new Error('socket reset');
                 }),
-                { attempts: 2, delay: 0 }
+                { retries: 2, delay: 0 }
             )
         );
         assert.equal(/** @type {any} */ (result).error.retryExhausted, true);
@@ -628,7 +628,7 @@ describe('Where a throw comes from', function () {
                 charges++;
                 return { charged: true };
             }),
-            { attempts: 2, delay: 0, onExhausted: () => Success({ charged: false }) }
+            { retries: 2, delay: 0, onExhausted: () => Success({ charged: false }) }
         );
         await assert.rejects(runEffect(flow), (e) => e === exporterFull);
         assert.equal(charges, 1, 'a Command that succeeded is not repeated for a hook that failed after it');
@@ -714,7 +714,7 @@ describe('Where a throw comes from', function () {
                     await new Promise((r) => setTimeout(r, 5));
                     throw new Error('socket reset');
                 }),
-                { attempts: 1, delay: 0 }
+                { retries: 1, delay: 0 }
             )
         );
         assert.equal(/** @type {any} */ (result).error.retryExhausted, true);
@@ -791,7 +791,7 @@ describe('Where a throw comes from', function () {
                     calls++;
                     return 'ok';
                 }),
-                { attempts: 2, delay: 0 }
+                { retries: 2, delay: 0 }
             )
         );
         assert.equal(/** @type {any} */ (result).error.retryExhausted, true);
@@ -816,7 +816,7 @@ describe('Where a throw comes from', function () {
                     calls++;
                     throw new Error('socket reset');
                 }),
-                { attempts: 2, delay: 0 }
+                { retries: 2, delay: 0 }
             )
         );
         assert.equal(calls, 3, 'the Command failed, so the wrapped error is still an I/O fault');
@@ -844,7 +844,7 @@ describe('Where a throw comes from', function () {
                     calls++;
                     throw new Error('sync');
                 }),
-                { attempts: 1, delay: 0 }
+                { retries: 1, delay: 0 }
             )
         );
         assert.equal(

@@ -83,9 +83,9 @@ describe('Core', function () {
             () => 'x',
             (r) => Success(r)
         );
-        const effect = Retry(inner, { attempts: 5 });
+        const effect = Retry(inner, { retries: 5 });
         assert.equal(effect.type, 'Retry');
-        assert.deepEqual(effect.options, { attempts: 5 });
+        assert.deepEqual(effect.options, { retries: 5 });
         assert.strictEqual(effect.effect, inner);
         assert.equal(typeof effect.next, 'function');
     });
@@ -100,7 +100,7 @@ describe('Core', function () {
                 },
                 (r) => Success(r)
             ),
-            { attempts: 3, delay: 0 }
+            { retries: 3, delay: 0 }
         );
         const result = await runEffect(effect);
         assert.equal(result.type, 'Success');
@@ -116,14 +116,14 @@ describe('Core', function () {
                 },
                 (/** @type {any} */ r) => Success(r)
             ),
-            { attempts: 2, delay: 0 }
+            { retries: 2, delay: 0 }
         );
         const result = await runEffect(effect);
         assert.equal(result.type, 'Failure');
         if (result.type !== 'Failure') throw new Error('expected Failure');
         const error = /** @type {import('../index.js').RetryExhaustedError<Error>} */ (result.error);
         assert.equal(error.retryExhausted, true);
-        assert.equal(error.attempts, 2);
+        assert.equal(error.retries, 2);
         assert.equal(error.lastError.message, 'boom');
     });
 
@@ -139,7 +139,7 @@ describe('Core', function () {
                 },
                 (r) => Success(r)
             ),
-            { attempts: 3, delay: 30, backoff: 2 }
+            { retries: 3, delay: 30, backoff: 2 }
         );
         const result = await runEffect(effect);
         const elapsed = Date.now() - start;
@@ -157,7 +157,7 @@ describe('Core', function () {
                 Command(function cmdFirstTry() {
                     return 'ok';
                 }),
-                { attempts: 2, delay: 300 }
+                { retries: 2, delay: 300 }
             )
         );
         assert.deepEqual(result, Success('ok'));
@@ -174,7 +174,7 @@ describe('Core', function () {
                         },
                         (r) => Success(r)
                     ),
-                    { attempts: 2, delay: 0 }
+                    { retries: 2, delay: 0 }
                 ),
             (upper) => Success(`${upper}!`)
         );
@@ -273,7 +273,7 @@ describe('Core', function () {
         /** @type {(left: number) => import('../index.js').Effect<string>} */
         const poll = (left) =>
             effectPipe(
-                (/** @type {number} */ n) => Retry(fetchPage(n), { attempts: 1, delay: 0 }),
+                (/** @type {number} */ n) => Retry(fetchPage(n), { retries: 1, delay: 0 }),
                 (/** @type {number} */ n) => (n === 0 ? Success('done') : poll(n - 1))
             )(left);
         const job = effectPipe(poll, (status) => Success(`${status} after 50,000 pages`));
@@ -323,7 +323,7 @@ describe('Kleisli laws', function () {
                 calls.push(`increment:${x}`);
                 return x + 1;
             }),
-            { attempts: 2, delay: 0 }
+            { retries: 2, delay: 0 }
         );
     // The steps fail in different ways, so each loop over them needs one error type that covers them all.
     /** @typedef {(x: number) => import('../index.js').Effect<number, unknown, any>} LawStep */
@@ -763,7 +763,7 @@ describe('Constructor arguments', function () {
         assert.doesNotThrow(() => parallel([Success(1)], { limit: 1 }, null));
     });
 
-    it('should refuse a Retry given the step instead of its Effect, or a bare number of attempts', function () {
+    it('should refuse a Retry given the step instead of its Effect, or a bare number of retries', function () {
         const fetchPrice = () => Success(1);
         assert.match(
             messageFrom(() => Retry(/** @type {any} */ (fetchPrice))),
@@ -771,11 +771,11 @@ describe('Constructor arguments', function () {
         );
         assert.match(
             messageFrom(() => Retry(Success(1), /** @type {any} */ (3))),
-            /Retry\(effect, \{ attempts: 3 \}\)/
+            /Retry\(effect, \{ retries: 3 \}\)/
         );
         assert.doesNotMatch(
             messageFrom(() => Retry(Success(1), /** @type {any} */ ('fast'))),
-            /attempts/
+            /retries/
         );
     });
 
@@ -795,10 +795,15 @@ describe('Constructor arguments', function () {
         );
         assert.match(
             messageFrom(() => Retry(Success(1), /** @type {any} */ ({ attemps: 5 }))),
-            /Retry has no option named 'attemps'; its options are attempts, delay, backoff and onExhausted\./
+            /Retry has no option named 'attemps'; its options are retries, delay, backoff and onExhausted\./
+        );
+        // The name before 0.20.0, which counted the retries rather than the attempts.
+        assert.match(
+            messageFrom(() => Retry(Success(1), /** @type {any} */ ({ attempts: 2 }))),
+            /Retry has no option named 'attempts'; its options are retries,/
         );
         // An option set to undefined is still one it reads, which is how an absent config key arrives.
-        assert.doesNotThrow(() => Retry(Success(1), { attempts: undefined, delay: undefined }));
+        assert.doesNotThrow(() => Retry(Success(1), { retries: undefined, delay: undefined }));
         assert.doesNotThrow(() => Parallel(effects, { limit: undefined, settled: undefined }));
     });
 
@@ -944,7 +949,7 @@ describe('Command identity', function () {
                     )
             )(input);
 
-        const { result, trace } = await recordEffect(flow, { id: 'x1' });
+        const { result, trace } = await recordEffect(flow({ id: 'x1' }));
         assert.deepEqual(
             trace.trace.map((e) => e.command),
             ['readRow', 'writeRow'],
@@ -1027,7 +1032,7 @@ describe('The flow input', function () {
 
     it('should hand onRun the flow input through a Retry-headed sub-pipeline', async function () {
         const viaRetry = (/** @type {any} */ i) =>
-            effectPipe((/** @type {string} */ id) => Retry(lookup(id), { attempts: 1, delay: 0 }))(i.customerId);
+            effectPipe((/** @type {string} */ id) => Retry(lookup(id), { retries: 1, delay: 0 }))(i.customerId);
         const tree = effectPipe(viaRetry, (/** @type {any} */ r) => Success(r))(input);
         assert.deepEqual(await inputSeenByOnRun(tree), input, 'the flow input, not the sub-pipeline input');
     });
@@ -1081,7 +1086,7 @@ describe('The flow input', function () {
 
     it('should hand onRun the input under a replay that runs the hooks', async function () {
         const flow = effectPipe((/** @type {any} */ i) => lookup(i.customerId));
-        const { trace } = await recordEffect(flow, input);
+        const { trace } = await recordEffect(flow(input));
         /** @type {any} */
         let seen;
         configureEffect({
@@ -1130,7 +1135,7 @@ describe('The flow input', function () {
                 Command(() => {
                     throw new Error('down');
                 }),
-                { attempts: 1, delay: 0, onExhausted: () => failingSub(i) }
+                { retries: 1, delay: 0, onExhausted: () => failingSub(i) }
             );
         const result = await runEffect(effectPipe(withFallback, (/** @type {any} */ v) => Success(v))(input));
         assert.deepEqual(result, Failure('bad'));
@@ -1157,7 +1162,7 @@ describe('The flow input', function () {
         const down = Command(() => {
             throw new Error('down');
         });
-        const exhausted = await runEffect(effectPipe(() => Retry(down, { attempts: 1, delay: 0 }))(input));
+        const exhausted = await runEffect(effectPipe(() => Retry(down, { retries: 1, delay: 0 }))(input));
         assert.equal(exhausted.type, 'Failure');
         assert.equal('initialInput' in exhausted, false, 'an exhausted Retry');
         const veto = new Error('rate limited');
@@ -1213,7 +1218,7 @@ describe('Failure provenance', function () {
 
     it('should not retry an abort from a pure step', async function () {
         let runs = 0;
-        const result = await runEffect(Retry(effectPipe(abortingStep(() => runs++))(null), { attempts: 3, delay: 0 }));
+        const result = await runEffect(Retry(effectPipe(abortingStep(() => runs++))(null), { retries: 3, delay: 0 }));
         assert.equal(result.type, 'Failure');
         assert.equal(result.error, 'invalid input', 'an abort arrives unwrapped');
         assert.equal(runs, 1);
@@ -1229,7 +1234,7 @@ describe('Failure provenance', function () {
                 },
                 (found) => (found ? Failure('email taken') : Success('free'))
             );
-        const result = await runEffect(Retry(effectPipe(guard)(null), { attempts: 3, delay: 0 }));
+        const result = await runEffect(Retry(effectPipe(guard)(null), { retries: 3, delay: 0 }));
         assert.equal(result.type, 'Failure');
         assert.equal(result.error, 'email taken');
         assert.equal(lookups, 1, 'the answer cannot change, so it is asked for once');
@@ -1242,7 +1247,7 @@ describe('Failure provenance', function () {
                 calls++;
                 return Promise.reject(new Error('socket reset'));
             });
-        const result = await runEffect(Retry(flaky(), { attempts: 3, delay: 0 }));
+        const result = await runEffect(Retry(flaky(), { retries: 3, delay: 0 }));
         assert.equal(result.type, 'Failure');
         assert.equal(calls, 4);
         assert.equal(/** @type {any} */ (result).error.retryExhausted, true);
@@ -1253,7 +1258,7 @@ describe('Failure provenance', function () {
         let fallbacks = 0;
         const result = await runEffect(
             Retry(effectPipe(abortingStep(() => {}))(null), {
-                attempts: 1,
+                retries: 1,
                 delay: 0,
                 onExhausted: () => {
                     fallbacks++;
@@ -1272,7 +1277,7 @@ describe('Failure provenance', function () {
                 Command(function cmdFlaky() {
                     return Promise.reject(new Error('socket reset'));
                 }),
-                { attempts: 1, delay: 0, onExhausted: () => Success('cached') }
+                { retries: 1, delay: 0, onExhausted: () => Success('cached') }
             )
         );
         assert.deepEqual(result, Success('cached'));
@@ -1286,7 +1291,7 @@ describe('Failure provenance', function () {
                     calls++;
                     return Promise.reject('a string');
                 }),
-                { attempts: 2, delay: 0 }
+                { retries: 2, delay: 0 }
             )
         );
         assert.equal(calls, 3);
@@ -1298,7 +1303,7 @@ describe('Failure provenance', function () {
         let faults = 0;
         const abortBranch = () =>
             Retry(Parallel([effectPipe(abortingStep(() => aborts++))(null), Success(1)]), {
-                attempts: 3,
+                retries: 3,
                 delay: 0
             });
         const faultBranch = () =>
@@ -1310,7 +1315,7 @@ describe('Failure provenance', function () {
                     }),
                     Success(1)
                 ]),
-                { attempts: 2, delay: 0 }
+                { retries: 2, delay: 0 }
             );
         const aborted = await runEffect(abortBranch());
         assert.equal(/** @type {any} */ (aborted).error, 'invalid input');
@@ -1338,7 +1343,7 @@ describe('Failure provenance', function () {
                     ),
                 (/** @type {any[]} */ outcomes) => outcomes[0]
             );
-            const result = await runEffect(Retry(flow(input), { attempts: 2, delay: 0 }));
+            const result = await runEffect(Retry(flow(input), { retries: 2, delay: 0 }));
             assert.equal(calls, 1, `not retried with input ${input}`);
             assert.equal(/** @type {any} */ (result).error.message, 'down', 'and not wrapped as an exhaustion');
         }
@@ -1352,9 +1357,9 @@ describe('Failure provenance', function () {
                     calls++;
                     return Promise.reject(new Error('down'));
                 }),
-                { attempts: 1, delay: 0 }
+                { retries: 1, delay: 0 }
             );
-        await runEffect(Retry(inner(), { attempts: 1, delay: 0 }));
+        await runEffect(Retry(inner(), { retries: 1, delay: 0 }));
         assert.equal(calls, 4, 'two attempts of the inner Retry, twice');
     });
 

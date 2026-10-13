@@ -26,7 +26,7 @@ describe('Recording', function () {
                 return Promise.reject(new Error('charge declined', { cause: new Error('card expired') }));
             });
 
-        const { result, trace } = await recordEffect(flow, { id: 'cause' });
+        const { result, trace } = await recordEffect(flow({ id: 'cause' }));
         assert.equal(result.type, 'Failure');
 
         // The trace must survive JSON, which is where a non-enumerable cause would silently vanish.
@@ -47,7 +47,7 @@ describe('Recording', function () {
                 );
             });
 
-        const { trace } = await recordEffect(flow, { id: 'chain' });
+        const { trace } = await recordEffect(flow({ id: 'chain' }));
         const stored = JSON.parse(JSON.stringify(trace));
         const { result: replayed } = await replayEffect(flow(stored.initialInput), stored);
         const error = /** @type {any} */ (errorOf(replayed));
@@ -65,7 +65,7 @@ describe('Recording', function () {
             Command(function cmdRequest() {
                 return Promise.reject(outer);
             });
-        const { trace } = await recordEffect(flow, { id: 'loop' });
+        const { trace } = await recordEffect(flow({ id: 'loop' }));
         assert.equal(trace.trace.length, 1, 'the step is recorded');
         const { result: replayed } = await replayEffect(flow({ id: 'loop' }), JSON.parse(JSON.stringify(trace)));
         const error = /** @type {any} */ (errorOf(replayed));
@@ -83,7 +83,7 @@ describe('Recording', function () {
             Command(function cmdBoth() {
                 return Promise.reject(new AggregateError([shared, shared], 'both failed'));
             });
-        const { trace } = await recordEffect(flow, { id: 'twice' });
+        const { trace } = await recordEffect(flow({ id: 'twice' }));
         const { result: replayed } = await replayEffect(flow({ id: 'twice' }), JSON.parse(JSON.stringify(trace)));
         const errors = /** @type {any} */ (errorOf(replayed)).errors;
         assert.deepEqual(
@@ -98,7 +98,7 @@ describe('Recording', function () {
             Command(function cmdCall() {
                 return Promise.reject({ code: 'E_TIMEOUT', retryable: true });
             });
-        const { result, trace } = await recordEffect(flow, null);
+        const { result, trace } = await recordEffect(flow());
         for (const stored of [trace, JSON.parse(JSON.stringify(trace))]) {
             const { result: replayed } = await replayEffect(flow(), stored);
             assert.ok(!(errorOf(replayed) instanceof Error), 'not turned into an Error');
@@ -123,7 +123,7 @@ describe('Recording', function () {
                         return 'shipped';
                     })
             );
-        const { result, trace } = await recordEffect(flow(true), { orderId: 1 });
+        const { result, trace } = await recordEffect(flow(true)({ orderId: 1 }));
         assert.deepEqual(result, Failure(undefined));
         shipped = 0;
         for (const stored of [trace, JSON.parse(JSON.stringify(trace))]) {
@@ -141,15 +141,15 @@ describe('Recording', function () {
                 Command(function cmdFlaky() {
                     return Promise.reject();
                 }),
-                { attempts: 2, delay: 0 }
+                { retries: 2, delay: 0 }
             );
-        const { result, trace } = await recordEffect(flow, null);
+        const { result, trace } = await recordEffect(flow());
         const { result: replayed, unreached } = await replayEffect(flow(), JSON.parse(JSON.stringify(trace)));
         assert.deepEqual(replayed, result);
         assert.deepEqual(/** @type {any} */ (replayed).error, {
             retryExhausted: true,
             lastError: undefined,
-            attempts: 2
+            retries: 2
         });
         assert.deepEqual(unreached, [], 'every recorded attempt was replayed');
     });
@@ -159,7 +159,7 @@ describe('Recording', function () {
             Command(function cmdVerifyIdentity() {
                 return Promise.reject(new Error('SSN does not match'));
             });
-        const { trace } = await recordEffect(flow, null, {
+        const { trace } = await recordEffect(flow(), {
             redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
                 kind === 'error' ? undefined : value
         });
@@ -192,7 +192,7 @@ describe('Recording', function () {
                 );
             });
 
-        const { result, trace } = await recordEffect(flow, { id: 'agg' });
+        const { result, trace } = await recordEffect(flow({ id: 'agg' }));
         const stored = JSON.parse(JSON.stringify(trace));
         const { result: replayed } = await replayEffect(flow(stored.initialInput), stored);
         const error = /** @type {any} */ (errorOf(replayed));
@@ -215,7 +215,7 @@ describe('Recording', function () {
                 Command(function cmdSave() {
                     return Promise.reject(Object.assign(new Error('validation failed'), { errors }));
                 });
-            const { result, trace } = await recordEffect(flow, { id: 'val' });
+            const { result, trace } = await recordEffect(flow({ id: 'val' }));
             const stored = JSON.parse(JSON.stringify(trace));
             const { result: replayed } = await replayEffect(flow(stored.initialInput), stored);
             const error = /** @type {any} */ (errorOf(replayed));
@@ -237,7 +237,7 @@ describe('Recording', function () {
                 return Promise.reject(e);
             });
 
-        const { result, trace } = await recordEffect(flow, { id: 'deq' });
+        const { result, trace } = await recordEffect(flow({ id: 'deq' }));
         const stored = JSON.parse(JSON.stringify(trace));
         const { result: replayed } = await replayEffect(flow({ id: 'deq' }), stored);
         assert.deepEqual(replayed, result);
@@ -253,7 +253,7 @@ describe('Recording', function () {
             Command(function cmdCharge() {
                 return Promise.reject(Object.assign(new Error('nope'), { name: 'GatewayError' }));
             });
-        const { trace } = await recordEffect(flow, { id: 'named' });
+        const { trace } = await recordEffect(flow({ id: 'named' }));
         const { result: replayed } = await replayEffect(flow({ id: 'named' }), JSON.parse(JSON.stringify(trace)));
         const error = /** @type {any} */ (errorOf(replayed));
         assert.equal(error.name, 'GatewayError');
@@ -273,7 +273,7 @@ describe('Recording', function () {
                 e.cause = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
                 return Promise.reject(e);
             });
-        const { result, trace } = await recordEffect(flow, { id: 'assigned' });
+        const { result, trace } = await recordEffect(flow({ id: 'assigned' }));
         const { result: replayed } = await replayEffect(flow({ id: 'assigned' }), JSON.parse(JSON.stringify(trace)));
         assert.deepEqual(replayed, result);
 
@@ -292,7 +292,7 @@ describe('Recording', function () {
                 return Promise.reject(thrown[input.i]);
             });
         for (const i of [0, 1]) {
-            const { result, trace } = await recordEffect(flow, { i });
+            const { result, trace } = await recordEffect(flow({ i }));
             const stored = JSON.parse(JSON.stringify(trace));
             const { result: replayed } = await replayEffect(flow({ i }), stored);
             assert.deepEqual(replayed, result);
@@ -342,7 +342,7 @@ describe('Recording', function () {
         // The README's warning: reading a field of a lookup that found nothing.
         const redact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
             kind === 'result' ? { ...value, email: value.email.toLowerCase() } : value;
-        const { result, trace } = await recordEffect(signup, 'a@b.c', { redact });
+        const { result, trace } = await recordEffect(signup('a@b.c'), { redact });
         assert.deepEqual(result, Success('created'));
         assert.equal(lookups, 1);
         const [{ durationMs, ...entry }] = trace.trace;
@@ -382,7 +382,7 @@ describe('Recording', function () {
             if (kind === 'error') throw new Error('redact bug');
             return value;
         };
-        const { trace } = await recordEffect(flow, null, { redact });
+        const { trace } = await recordEffect(flow(), { redact });
         const [{ durationMs, ...entry }] = trace.trace;
         assert.deepEqual(entry, { command: 'cmdCharge', path: '0', threw: true, unrecorded: 'redact' });
         assert.ok(!JSON.stringify(trace).includes('4111'));
@@ -398,7 +398,7 @@ describe('Recording', function () {
                 }
             }
         );
-        const { trace: rebuilt } = await recordEffect(flow, null, {
+        const { trace: rebuilt } = await recordEffect(flow(), {
             redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
                 kind === 'error' ? unreadable : value
         });
@@ -422,9 +422,9 @@ describe('Recording', function () {
                     charges++;
                     throw unreadable();
                 }),
-                { attempts: 1, delay: 0 }
+                { retries: 1, delay: 0 }
             );
-        const { result, trace } = await recordEffect(flow, null);
+        const { result, trace } = await recordEffect(flow());
         assert.equal(result.type, 'Failure', 'the run keeps its own outcome');
         assert.equal(charges, 2);
         assert.deepEqual(
@@ -451,11 +451,9 @@ describe('Recording', function () {
             }
         );
         const { result: loaded, trace: loadedTrace } = await recordEffect(
-            () =>
-                Command(function cmdLoad() {
-                    return unlisted;
-                }),
-            null
+            Command(function cmdLoad() {
+                return unlisted;
+            })
         );
         assert.equal(loaded.type, 'Success');
         const [{ durationMs, ...entry }] = loadedTrace.trace;
@@ -486,9 +484,9 @@ describe('Recording', function () {
                         calls++;
                         throw hostile;
                     }),
-                    { attempts: 1, delay: 0 }
+                    { retries: 1, delay: 0 }
                 );
-            const { result, trace } = await recordEffect(flow, null);
+            const { result, trace } = await recordEffect(flow());
             assert.equal(/** @type {any} */ (errorOf(result)).lastError, hostile, "the Command's own error");
             assert.equal(calls, 2);
             assert.deepEqual(
@@ -517,7 +515,7 @@ describe('Recording', function () {
                     return i.id;
                 })
             )(input);
-        const { result, trace } = await recordEffect(flow, unlisted, { context: unlisted });
+        const { result, trace } = await recordEffect(flow(unlisted), { context: unlisted });
         assert.deepEqual(result, Success(1));
         assert.equal(calls, 1);
         assert.equal(trace.initialInput, undefined);
@@ -546,11 +544,10 @@ describe('Recording', function () {
                 return value;
             };
         const context = { tenant: 'acme' };
-        const { result, trace } = await recordEffect(
-            flow,
-            { id: 1 },
-            { context, redact: throwsOn(['initialInput', 'context']) }
-        );
+        const { result, trace } = await recordEffect(flow({ id: 1 }), {
+            context,
+            redact: throwsOn(['initialInput', 'context'])
+        });
         assert.deepEqual(result, Success({ id: 1, tenant: 'acme' }));
         assert.equal(trace.initialInput, undefined);
         assert.equal(trace.context, undefined);
@@ -574,7 +571,7 @@ describe('Recording', function () {
         assert.deepEqual(replayed, result, 'a context passed in replays it');
 
         // A trace whose redact succeeded carries no such field.
-        const { trace: clean } = await recordEffect(flow, { id: 1 }, { context });
+        const { trace: clean } = await recordEffect(flow({ id: 1 }), { context });
         assert.equal('unrecorded' in clean, false);
     });
 
@@ -587,7 +584,7 @@ describe('Recording', function () {
                 (/** @type {any} */ u) => Success(u)
             );
 
-        const { trace } = await recordEffect(flow, null, {
+        const { trace } = await recordEffect(flow(), {
             redact: (result, name) =>
                 name === 'cmdLoadUser'
                     ? { .../** @type {any} */ (result), email: '[redacted]', card: '[redacted]' }
@@ -618,20 +615,16 @@ describe('Recording', function () {
                     )
             )(input);
 
-        const { trace } = await recordEffect(
-            flow,
-            { email: 'user@test.com', password: 'hunter2' },
-            {
-                context: { flowName: 'register', authToken: 'bearer-abc123' },
-                redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
-                    seen.push([kind, name]);
-                    if (kind === 'initialInput') return { ...value, password: '[redacted]' };
-                    if (kind === 'context') return { ...value, authToken: '[redacted]' };
-                    if (kind === 'error') return { ...value, attempted: '[redacted]' };
-                    return value;
-                }
+        const { trace } = await recordEffect(flow({ email: 'user@test.com', password: 'hunter2' }), {
+            context: { flowName: 'register', authToken: 'bearer-abc123' },
+            redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
+                seen.push([kind, name]);
+                if (kind === 'initialInput') return { ...value, password: '[redacted]' };
+                if (kind === 'context') return { ...value, authToken: '[redacted]' };
+                if (kind === 'error') return { ...value, attempted: '[redacted]' };
+                return value;
             }
-        );
+        });
 
         assert.deepEqual(
             seen,
@@ -659,7 +652,7 @@ describe('Recording', function () {
             )(input);
         const redact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
             kind === 'error' ? { name: value.name, message: value.message, status: value.status } : value;
-        const { result, trace } = await recordEffect(flow, 'in', { redact });
+        const { result, trace } = await recordEffect(flow('in'), { redact });
         assert.ok(!JSON.stringify(trace).includes('tok_secret'), 'what redact removed stays out');
         for (const stored of [trace, JSON.parse(JSON.stringify(trace))]) {
             const { result: replayed } = await replayEffect(flow('in'), stored);
@@ -683,7 +676,7 @@ describe('Recording', function () {
             )(input);
         const redact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
             kind === 'error' ? { name: value.name, message: value.message, status: value.status } : value;
-        const { result, trace } = await recordEffect(flow, 'in', { redact });
+        const { result, trace } = await recordEffect(flow('in'), { redact });
         const { result: fromMemory } = await replayEffect(flow('in'), trace);
         const { result: fromJson } = await replayEffect(flow('in'), JSON.parse(JSON.stringify(trace)));
         assert.deepEqual(fromMemory, result);
@@ -697,7 +690,7 @@ describe('Recording', function () {
                     throw Object.assign(new Error('down'), { code: undefined });
                 })
             )(input);
-        const { trace } = await recordEffect(flow, 'in');
+        const { trace } = await recordEffect(flow('in'));
         const { result: fromMemory } = await replayEffect(flow('in'), trace);
         const { result: fromJson } = await replayEffect(flow('in'), JSON.parse(JSON.stringify(trace)));
         assert.deepEqual(fromMemory, fromJson);
@@ -713,7 +706,7 @@ describe('Recording', function () {
             )(input);
         const redact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
             kind === 'error' ? '[redacted]' : value;
-        const { trace } = await recordEffect(flow, 'in', { redact });
+        const { trace } = await recordEffect(flow('in'), { redact });
         const { result: replayed } = await replayEffect(flow('in'), JSON.parse(JSON.stringify(trace)));
         assert.equal(errorOf(replayed), '[redacted]');
     });
@@ -738,7 +731,7 @@ describe('Recording', function () {
                 return 'ch_1';
             })
         );
-        const { result, trace } = await recordEffect(flow, 'in', {
+        const { result, trace } = await recordEffect(flow('in'), {
             context,
             redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
                 kind === 'context' ? { tenant: value.tenant } : value
@@ -770,14 +763,10 @@ describe('Recording', function () {
                     )
             )(input);
 
-        const { result, trace } = await recordEffect(
-            flow,
-            { email: 'a@b.c', password: 'hunter2' },
-            {
-                redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
-                    kind === 'initialInput' ? { ...value, password: '[redacted]' } : value
-            }
-        );
+        const { result, trace } = await recordEffect(flow({ email: 'a@b.c', password: 'hunter2' }), {
+            redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
+                kind === 'initialInput' ? { ...value, password: '[redacted]' } : value
+        });
         assert.equal(result.type, 'Success');
         assert.equal(/** @type {any} */ (trace.initialInput).password, '[redacted]');
 
@@ -791,8 +780,8 @@ describe('Recording', function () {
             Command(function cmdBoom() {
                 return Promise.reject(new Error('boom'));
             });
-        const plain = await recordEffect(flow, null);
-        const withStack = await recordEffect(flow, null, { stack: true });
+        const plain = await recordEffect(flow());
+        const withStack = await recordEffect(flow(), { stack: true });
         assert.equal(/** @type {any} */ (plain.trace.trace[0].error).stack, undefined, 'off by default');
         assert.match(/** @type {any} */ (withStack.trace.trace[0].error).stack, /Error: boom/);
     });
@@ -838,7 +827,7 @@ describe('Recording', function () {
                         (/** @type {any} */ node) => Success(node.total)
                     )
             )(input);
-        const { result, trace } = await recordEffect(flow, null);
+        const { result, trace } = await recordEffect(flow(null));
         assert.deepEqual(result, Success(100), 'recording does not change the run');
         assert.equal(trace.trace[0].unrecorded, 'copy', 'a BigInt cannot be stored');
         assert.deepEqual(trace.trace[1].result, { total: 100 }, 'the loop back is cut');
@@ -871,7 +860,7 @@ describe('Recorded values are snapshots', function () {
                     )
             )(input);
 
-        const { trace } = await recordEffect(flow, { cartId: 1 });
+        const { trace } = await recordEffect(flow({ cartId: 1 }));
         assert.deepEqual(trace.trace[0].result, { total: 100 }, 'the trace holds what production saw');
         assert.equal(shared.total, 0, 'while the live object was still mutated by the flow');
     });
@@ -952,7 +941,7 @@ describe('Recorded values are snapshots', function () {
                 },
                 (/** @type {any} */ u) => Success(u.password)
             );
-        const { result, trace } = await recordEffect(flow, null, {
+        const { result, trace } = await recordEffect(flow(), {
             redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
                 if (kind === 'result') delete value.password;
                 return value;
@@ -1025,7 +1014,7 @@ describe('Recorded values are snapshots', function () {
             )(input);
         const redact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
             kind === 'error' ? { name: value.name, message: value.message, status: value.response.status } : value;
-        const { trace } = await recordEffect(flow, 'in', { redact });
+        const { trace } = await recordEffect(flow('in'), { redact });
         const { result } = await replayEffect(flow('in'), JSON.parse(JSON.stringify(trace)));
         assert.ok(errorOf(result) instanceof Error);
         const error = /** @type {any} */ (errorOf(result));
@@ -1044,7 +1033,7 @@ describe('Recorded values are snapshots', function () {
                     return Success(cart.items.length);
                 }
             );
-        const { trace } = await recordEffect(flow, null);
+        const { trace } = await recordEffect(flow());
         const first = await replayEffect(flow(), trace);
         const second = await replayEffect(flow(), trace);
         assert.deepEqual(first.result, Success(2));
@@ -1065,16 +1054,12 @@ describe('Recorded values are snapshots', function () {
                         user.passwordHash === `h:${i.password}` ? Success({ id: user.id }) : Failure('Bad credentials.')
                 )
             )(input);
-        const { result, trace } = await recordEffect(
-            login,
-            { password: 'secret123' },
-            {
-                redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
-                    if (kind === 'result') delete value.passwordHash;
-                    return value;
-                }
+        const { result, trace } = await recordEffect(login({ password: 'secret123' }), {
+            redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
+                if (kind === 'result') delete value.passwordHash;
+                return value;
             }
-        );
+        });
         assert.deepEqual(result, Success({ id: 1 }), 'the flow saw the hash');
         assert.deepEqual(trace.trace[0].result, { id: 1 }, 'while the trace did not');
     });
@@ -1086,7 +1071,7 @@ describe('Recorded values are snapshots', function () {
                     Object.assign(new Error('401'), { response: { headers: { authorization: 'Bearer tok' } } })
                 );
             });
-        const { result, trace } = await recordEffect(flow, null, {
+        const { result, trace } = await recordEffect(flow(), {
             redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
                 if (kind === 'error') delete value.response.headers.authorization;
                 return value;
@@ -1115,18 +1100,14 @@ describe('Recorded values are snapshots', function () {
                     })
                 )
             )(input);
-        const { trace } = await recordEffect(
-            register,
-            { email: 'new@x.io', password: 'secret123' },
-            {
-                context: { apiToken: 'tok_live', log },
-                redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
-                    if (kind === 'initialInput') delete value.password;
-                    if (kind === 'context') delete value.apiToken;
-                    return value;
-                }
+        const { trace } = await recordEffect(register({ email: 'new@x.io', password: 'secret123' }), {
+            context: { apiToken: 'tok_live', log },
+            redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
+                if (kind === 'initialInput') delete value.password;
+                if (kind === 'context') delete value.apiToken;
+                return value;
             }
-        );
+        });
         assert.deepEqual(saved, [{ email: 'new@x.io', password: 'secret123' }], 'the database got the password');
         assert.deepEqual(tokens, ['tok_live'], 'and the Command got the token');
         assert.deepEqual(trace.initialInput, { email: 'new@x.io' });
@@ -1143,7 +1124,7 @@ describe('Recorded values are snapshots', function () {
             Command(function cmdLoad() {
                 return { when: new Date('2026-01-01T00:00:00Z'), seen: new Map([['a', 1]]) };
             });
-        const { trace } = await recordEffect(flow, null);
+        const { trace } = await recordEffect(flow());
         const { result: replayed } = await replayEffect(flow(), trace);
         assert.deepEqual(replayed, Success({ when: '2026-01-01T00:00:00.000Z', seen: {} }));
     });
@@ -1159,7 +1140,7 @@ describe('Recorded values are snapshots', function () {
                     return Success(cart.items.length);
                 }
             );
-        const { trace } = await recordEffect(flow, null);
+        const { trace } = await recordEffect(flow());
         assert.deepEqual(trace.trace[0].result, { items: ['a', 'b'] }, 'recording snapshots the result');
 
         const first = await replayEffect(flow(), trace);
@@ -1174,7 +1155,7 @@ describe('Recorded values are snapshots', function () {
             Command(function cmdCallGateway() {
                 return Promise.reject(Object.assign(new Error('503'), { response: { status: 503 } }));
             });
-        const { trace } = await recordEffect(flow, null);
+        const { trace } = await recordEffect(flow());
 
         const first = await replayEffect(flow(), trace);
         /** @type {any} */ (first.result).error.response.status = 200;
@@ -1192,7 +1173,8 @@ describe('Recorded values are snapshots', function () {
                 return entity;
             }
         };
-        const upsert = (/** @type {any} */ user) =>
+        // Built with effectPipe, which is what records a flow's input.
+        const upsert = effectPipe((/** @type {any} */ user) =>
             user.id
                 ? Command(function cmdUpdateUser() {
                       return orm.save(user);
@@ -1202,8 +1184,9 @@ describe('Recorded values are snapshots', function () {
                           return orm.save(user);
                       },
                       (/** @type {any} */ saved) => Success(saved.id)
-                  );
-        const { result, trace } = await recordEffect(upsert, { email: 'a@b.com' });
+                  )
+        );
+        const { result, trace } = await recordEffect(upsert({ email: 'a@b.com' }));
         assert.deepEqual(trace.initialInput, { email: 'a@b.com' }, 'the trace holds what production received');
         const { result: replayed } = await replayEffect(upsert(trace.initialInput), trace);
         assert.deepEqual(replayed, result);
@@ -1224,10 +1207,10 @@ describe('Recorded values are snapshots', function () {
                         })
                     )
             )(input);
-        const { result, trace } = await recordEffect(flow, { email: 'a@b.com' }, { context: {} });
+        const { result, trace } = await recordEffect(flow({ email: 'a@b.com' }), { context: {} });
         assert.deepEqual(trace.context, {}, 'the trace holds the context Ask saw');
         const replayed = await timeTravel(flow, trace, { log: () => {} });
-        assert.deepEqual(replayed, result);
+        assert.deepEqual(replayed, { result, unreached: [] });
     });
 });
 
@@ -1288,7 +1271,7 @@ describe('Recorded step timings', function () {
 
     it('should keep timings out of the way of replay', async function () {
         const flow = (/** @type {any} */ input) => effectPipe(() => slow(5))(input);
-        const { result, trace } = await recordEffect(flow, { id: 1 });
+        const { result, trace } = await recordEffect(flow({ id: 1 }));
         assert.equal(typeof trace.trace[0].durationMs, 'number');
         const { result: replayed } = await replayEffect(flow({ id: 1 }), trace);
         assert.equal(replayed.type, 'Success');
