@@ -2,7 +2,7 @@
 
 Where this file and `CLAUDE.md` disagree, `CLAUDE.md` is right; fix this file.
 
-This file explains why pure-effect works the way it does. `CLAUDE.md` holds the rules for changing the repository; this file holds the reasons behind them: how each part works, what broke before it worked that way, and the full case for every settled decision. Read the section for a part before changing how it works, and add the reason for a new rule or decision here.
+This file explains why Pure Effect works the way it does. `CLAUDE.md` holds the rules for changing the repository; this file holds the reasons behind them: how each part works, what broke before it worked that way, and the full case for every settled decision. Read the section for a part before changing how it works, and add the reason for a new rule or decision here.
 
 Each section starts with what holds, then how it works, then why. The why is often a bug or an experiment that went wrong, told in a sentence.
 
@@ -22,7 +22,7 @@ Each section starts with what holds, then how it works, then why. The why is oft
 
 ## Overview
 
-pure-effect is a zero-dependency effect system for JavaScript implementing the "Functional Core, Imperative Shell" pattern. Business logic returns plain data instead of executing side effects, so it can be tested without mocks.
+Pure Effect is a zero-dependency effect system for JavaScript implementing the "Functional Core, Imperative Shell" pattern. Business logic returns plain data instead of executing side effects, so it can be tested without mocks.
 
 A flow is inert data until the interpreter walks it. That is what lets a recorded run be fed back through the interpreter with no I/O at all.
 
@@ -968,6 +968,14 @@ Its survivors are not a to-do list:
 
 Before calling a survivor new, apply the mutant by hand to the old code and the new and run the suite. A flip between runs is noise, and a mutant that survives both is an old gap rather than a regression. A survivor outside those classes is a behaviour no test pins, which is what the run is for.
 
+### `RULES.md` is generated from the README
+
+`RULES.md` holds the README's twelve rules for writing a flow and an index of which README section covers each task. It ships in the package, and the first line of `index.d.ts` names it. `scripts/rules-file.js` writes it from the list between the README's `rules:start` and `rules:end` markers, pointing each link at `README.md`, and from the task index the script holds. A test fails when the file and the script disagree, and when a link names a heading the README lacks.
+
+An agent working in someone's project sees the published package, not this repository. In October 2026 eight agents built projects from the packed library alone, four of them with no instructions at all. Each found its rules spread over six to ten README sections, and none found a list of them; the caveats a newcomer needs sat about 800 lines after the Quick Start. Two of the four cold runs guessed a generator API whose `catch` recovers, a mistake the library refuses only at runtime and only on the failure path. The rules now sit at the end of the README's Getting started, after everything they refer to, and in a file an agent listing the package sees beside the README.
+
+The README stays the one source. A copy edited by hand drifts, so the file is generated, as `effectPipe`'s overloads are. The task index lives in the script rather than the README, which is long enough. The file is not `llms.txt`: that convention is for the root of a website, and no agent looks for it inside a package.
+
 ### The size figure lives in one place
 
 The README's feature bullet states the minified, gzipped size in prose. Re-measure it with the size command in `CLAUDE.md` after changing `index.js`, and reword it when the number moves.
@@ -982,6 +990,12 @@ A correction to the README, the JSDoc, `CLAUDE.md` or this file changes nothing 
 
 So a docs change that ships with a behaviour change goes unmentioned in both, and one that ships alone gets no changelog entry. A commit that changes only documentation still needs a message, and it says why the docs changed.
 
+A new file the package ships is the exception, an October 2026 choice of the maintainer's made for `RULES.md`. A user can act on it, by pointing a coding agent at it or copying it into the agent's instructions, and the changelog is how someone upgrading learns it is there. A rewrite of a file that already shipped still gets no entry.
+
+### The library is Pure Effect in prose
+
+Prose calls the library Pure Effect, as the README's title does. `pure-effect` is the package name, an identifier like the names the library exports, so it appears as code where code needs it: an import, `npm install`, `package.json` and a URL.
+
 ### Commit messages are one short line
 
 The maintainer's choice, made in October 2026. A message names the change in one short line and has no body: what the change does for a user goes in the changelog, and why the code works the way it does goes here.
@@ -989,6 +1003,10 @@ The maintainer's choice, made in October 2026. A message names the change in one
 ### Changelog entries are ordered by importance
 
 Someone upgrading reads each section from the top and may stop before its end, so the entry most likely to need a change in their code, or to change what their runs do, comes first. A breaking change leads, then what affects the most users. The order entries were written in says nothing to that reader, and the October 2026 `Unreleased` section had put a check on misspelt hooks above the change to every `Failure`'s shape.
+
+### Changelog entries are short and plain
+
+The maintainer's choice, made in October 2026. Entries had grown into paragraphs that retold each fix, and the longest in 0.20.0 ran to six sentences. Someone upgrading scans for what changed and what they must do, so an entry is a plain sentence and at most one more; why the code changed belongs in this file. Every entry had opened with a bold sentence, and bold on every line marks nothing, so only a label such as `Breaking:` is bold, beside the Added, Changed and Fixed headings. Earlier sections were left as published, and the rule holds from 0.20.1 on.
 
 ### Markdown prose has no hard line breaks
 
@@ -1005,6 +1023,7 @@ The names the library exports are not jargon (`Command`, `Retry`, `Parallel`, `R
 - The Command's function, or `cmd`, not a thunk.
 - Joining, not fan-in.
 - Stops, not short-circuits.
+- A stop, not an abort, for a returned `Failure`.
 - A request, not cooperative.
 - Attached, not stamped.
 - Does the same thing again, not deterministic.
@@ -1012,6 +1031,8 @@ The names the library exports are not jargon (`Command`, `Retry`, `Parallel`, `R
 - Runs at the same time, not concurrently, wherever nothing turns on the distinction.
 
 `grep -rniE "thunk|combinator|monad|kleisli|effect tree|fan-in|fan-out|short-circuit|cooperative|imperative shell|arity|stamp" README.md` should print nothing.
+
+Abort is kept out because JavaScript gives it a meaning of its own: `AbortSignal` cancels, and in a study where agents built projects from the published package alone, all four that ran with no instructions flagged the README's "a `Failure` means abort" as clashing with it. `CLAUDE.md` and this file keep it for the kind of failure, where it is defined. The same study found "walk" used for two things and defined for neither, so a term the README coins is defined where it first appears, and means one thing.
 
 A precise term may stay if the plain words follow it in the same breath, as `idempotent (safe to run more than once)` does in the Retry section. A term that needs a gloss every time it appears is one the README should not use. The precise words are fine everywhere else: `CLAUDE.md`, this file, JSDoc, code comments and test names.
 
@@ -1023,7 +1044,7 @@ The entries had grown into prose that re-taught the guides, a quarter of the REA
 
 ### The README's orientation sections stay short
 
-How It Works and the other orientation sections are a few plain sentences. In September 2026 a rewrite of How It Works added a stated mental model, a walk-through diagram and a three-bullet list. It removed some repetition and was more complete, and it was dropped as too dense. In an orientation section readability wins over completeness: repeating an idea stated elsewhere is fine there, and density is not.
+The Core and the other orientation sections are a few plain sentences. In September 2026 a rewrite of the How It Works section added a stated mental model, a walk-through diagram and a three-bullet list. It removed some repetition and was more complete, and it was dropped as too dense. In an orientation section readability wins over completeness: repeating an idea stated elsewhere is fine there, and density is not. In October 2026 How It Works was removed, once the Quick Start became five steps: each of its three paragraphs was then said by a step, The Core or the section after it, so the whole section was repetition.
 
 So a gap gets a sentence or two, shown as exact wording before anything is rewritten, and moving something is proposed apart from changing it.
 

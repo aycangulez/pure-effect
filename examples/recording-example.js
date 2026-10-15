@@ -3,7 +3,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { configureEffect, recorder, Failure } from 'pure-effect';
 
-/** @import { EffectConfiguration, RunWrapper, StepRunner, CommandInterceptor, TraceEntry, TraceLog, SuccessState, FailureState } from "pure-effect" */
+/** @import { EffectConfiguration, RunWrapper, StepRunner, CommandInterceptor, TraceEntry, TraceLog, SuccessState, FailureState, RecorderOptions } from "pure-effect" */
 
 /**
  * Records every run of an application without touching any call site, one trace per run. `recordEffect` covers
@@ -21,12 +21,14 @@ import { configureEffect, recorder, Failure } from 'pure-effect';
  * @typedef {Object} RecordingOptions
  * @property {(trace: TraceLog) => Promise<void> | void} [sink] - Receives each kept trace, to write to S3 or a
  *           database. Hand slow writes to a queue rather than awaiting them inside a request.
- * @property {(value: any, name: string, kind: string) => any} [redact] - Scrubs every value before it enters the
+ * @property {RecorderOptions['redact']} [redact] - Scrubs every value before it enters the
  *           trace: results, serialized errors, and the stored `initialInput` and `context`, told apart by `kind`.
  *           It receives a copy, so changing it in place never reaches the run. A value it throws on is left out of
  *           the trace, which marks where, as is one the recorder cannot copy.
  * @property {number} [maxEntries] - Caps trace length, 500 by default; the overflow is reported as `dropped`.
  * @property {boolean} [stack] - Records stack traces for thrown errors.
+ * @property {string | undefined} [version] - Commit or build id, attached to each trace, so `timeTravel` can warn
+ *           when it replays a trace against another build.
  * @property {(result: SuccessState<any> | FailureState<any>) => boolean} [keep] - Decides which runs reach the sink:
  *           failures only by default. Return `true` to keep everything, or sample. A run whose own code threw is
  *           offered as a Failure carrying the thrown error.
@@ -50,6 +52,7 @@ export function recordingHooks(options = {}) {
         redact,
         maxEntries = 500,
         stack,
+        version,
         keep = (result) => result.type === 'Failure',
         onSinkError = (error, flowName) => console.error(`Recording failed for '${flowName || 'flow'}':`, error),
         onWarning = (message) => console.warn(message)
@@ -66,7 +69,7 @@ export function recordingHooks(options = {}) {
         // Packaged before the run, so a Command that changes its input cannot rewrite what the trace says it received.
         // `toTrace` never throws, which matters here, where a throw would stop the run before it started: an input it
         // cannot record is left out and named in the trace's `unrecorded`.
-        const head = rec.toTrace({ flowName, initialInput });
+        const head = rec.toTrace({ flowName, initialInput, version });
         return scope.run({ rec, head, contextCaptured: false }, async () => {
             /** @type {{ result: SuccessState<any> | FailureState<any> } | { error: unknown }} */
             let outcome;

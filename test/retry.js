@@ -265,6 +265,23 @@ describe('Retry options and the removed global retry', function () {
         assert.throws(() => Retry(failing(), { delay: NaN }), /Retry 'delay' .*the number NaN/);
     });
 
+    it('should name a function given as a delay plainly, and say how to wait as long as a server asks', function () {
+        // It once guessed that a flow had been passed without its input, which a delay never is.
+        const wait = /** @type {any} */ (() => 1000);
+        assert.throws(
+            () => Retry(failing(), { delay: wait }),
+            (/** @type {Error} */ error) => {
+                assert.match(
+                    error.message,
+                    /^Retry 'delay' must be a finite number of 0 or more, received a function\. /
+                );
+                assert.doesNotMatch(error.message, /without being called/);
+                assert.match(error.message, /as data/);
+                return true;
+            }
+        );
+    });
+
     it('should refuse a retry key in configureEffect, as any key no hook has', function () {
         assert.throws(() => configureEffect(/** @type {any} */ ({ retry: { retries: 5 } })), {
             name: 'TypeError',

@@ -847,7 +847,14 @@ describe('Replay', function () {
         const { flow, calls } = makeFlow();
         const { result: replayed } = await replayEffect(flow({ id: 'x' }), () => undefined);
         assert.equal(replayed.type, 'Failure');
-        assert.match(/** @type {Error} */ (errorOf(replayed)).message, /refusing to run the real Command/);
+        const { message } = /** @type {Error} */ (errorOf(replayed));
+        assert.match(message, /refusing to run the real Command/);
+        // A Resolver is usually a test's answers, so the message names the step it has no answer for, and does not
+        // explain how a recorded run could lack one.
+        assert.match(message, /^The Resolver has no answer for 'cmdRead' at path '0'/);
+        assert.match(message, /Give the Resolver an answer for this step/);
+        assert.match(message, /every step after it that the Resolver has no answer for either/);
+        assert.doesNotMatch(message, /production|vetoed/i);
         assert.deepEqual(calls, { read: 0, write: 0 });
     });
 
@@ -910,6 +917,7 @@ describe('Replay', function () {
         const error = /** @type {Error} */ (errorOf(replayed));
         assert.match(error.message, /onBeforeCommand hook vetoed/);
         assert.match(error.message, /only where every Command the flow can still reach goes to a test double/);
+        assert.doesNotMatch(error.message, /production/i, 'a trace can come from a test run as well');
         assert.deepEqual(calls, { read: 0, write: 0 });
     });
 
@@ -1170,6 +1178,7 @@ describe('Replay', function () {
                     assert.equal(e.name, 'ReplayError');
                     assert.match(e.message, /dropped 1 entries under maxEntries/);
                     assert.match(e.message, /would run it again/);
+                    assert.doesNotMatch(e.message, /production/i);
                     assert.match(
                         e.message,
                         /stop at the first missing step, or record the flow with a higher maxEntries/
@@ -1189,7 +1198,8 @@ describe('Replay', function () {
         const error = /** @type {Error} */ (errorOf(replayed));
         assert.equal(error.name, 'ReplayError');
         assert.match(error.message, /Trace has no step at path '1' for 'cmdWrite'/);
-        assert.match(error.message, /production may have run this step/);
+        assert.match(error.message, /the recorded run may have reached this step/);
+        assert.doesNotMatch(error.message, /production/i);
         assert.match(error.message, /record the flow with a higher maxEntries to replay past it/);
         assert.doesNotMatch(error.message, /onMissing/);
         assert.deepEqual(unreached, [], 'the recorded prefix replayed');

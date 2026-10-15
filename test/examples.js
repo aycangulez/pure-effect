@@ -10,11 +10,12 @@ import {
     effectPipe,
     runEffect,
     configureEffect,
-    replayEffect
+    replayEffect,
+    timeTravel
 } from '../index.js';
 import { enableTelemetry, telemetryHooks } from '../examples/opentelemetry-example.js';
 import { enableRecording, recordingHooks } from '../examples/recording-example.js';
-import { importCopiedExample, exampleTypeErrors } from './helpers.js';
+import { importCopiedExample, exampleTypeErrors, consumerTypeErrors } from './helpers.js';
 
 describe('examples/recording-example.js', function () {
     beforeEach(() => configureEffect());
@@ -32,6 +33,19 @@ describe('examples/recording-example.js', function () {
         // that flag, so a TypeScript project that copied the example failed to compile until the types took it.
         this.timeout(20000);
         assert.deepEqual(exampleTypeErrors('recording-example.js'), []);
+    });
+
+    it('should take a redact typed with the kinds the library declares', function () {
+        // Its options declared kind as any string, so a TypeScript project that typed redact as recorder declares it
+        // could not pass that redact in.
+        this.timeout(20000);
+        const source = [
+            "import { recordingHooks } from './examples/recording-example.js';",
+            "type Kind = 'result' | 'error' | 'initialInput' | 'context';",
+            "const redact = (value: unknown, name: string, kind: Kind) => (kind === 'initialInput' ? null : value);",
+            'recordingHooks({ redact });'
+        ].join('\n');
+        assert.deepEqual(consumerTypeErrors(source), []);
     });
 
     const failing = (/** @type {any} */ input) =>
@@ -66,6 +80,20 @@ describe('examples/recording-example.js', function () {
         assert.equal(written[0].flowName, 'writer');
         assert.deepEqual(written[0].context, { flowName: 'writer', tenant: 'acme' }, 'context captured for Ask replay');
         assert.deepEqual(written[0].initialInput, { id: 1 });
+    });
+
+    it('should attach the version to each trace, so timeTravel can warn about a trace from another build', async function () {
+        // The README told readers to record each run with a version, but the example took none, so a production trace
+        // carried no version and timeTravel's check against the current build never fired.
+        /** @type {any[]} */
+        const written = [];
+        enableRecording({ version: 'build-41', sink: (t) => void written.push(t) });
+        await runEffect(failing({ id: 1 }), { flowName: 'writer' });
+        assert.equal(written[0].version, 'build-41');
+        /** @type {string[]} */
+        const lines = [];
+        await timeTravel(failing, written[0], { version: 'build-42', log: (line) => void lines.push(line) });
+        assert.ok(lines.includes('Warning: trace was recorded at build-41, replaying against build-42.'));
     });
 
     it('should store the input of a run that fails before its first Command', async function () {

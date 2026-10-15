@@ -116,27 +116,48 @@ export const importCopiedExample = async (file) => {
     }
 };
 
-/**
- * The type errors an example raises in a strict TypeScript project that copied it, with `exactOptionalPropertyTypes`
- * on, which `jsconfig.json` leaves off.
- * @param {string} file - The example's file name in examples/
- * @returns {string[]}
- */
-export const exampleTypeErrors = (file) => {
-    const program = ts.createProgram([join('examples', file)], {
-        allowJs: true,
-        checkJs: true,
-        strict: true,
-        exactOptionalPropertyTypes: true,
-        skipLibCheck: true,
-        noEmit: true,
-        target: ts.ScriptTarget.ES2022,
-        module: ts.ModuleKind.NodeNext,
-        moduleResolution: ts.ModuleResolutionKind.NodeNext
-    });
-    return ts.getPreEmitDiagnostics(program).map((d) => {
+/** The options of a strict TypeScript project with `exactOptionalPropertyTypes` on, which `jsconfig.json` leaves off. */
+const strictProject = {
+    allowJs: true,
+    checkJs: true,
+    strict: true,
+    exactOptionalPropertyTypes: true,
+    skipLibCheck: true,
+    noEmit: true,
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext
+};
+
+/** @param {import('typescript').Program} program */
+const typeErrorsOf = (program) =>
+    ts.getPreEmitDiagnostics(program).map((d) => {
         const where = d.file && d.start !== undefined ? d.file.getLineAndCharacterOfPosition(d.start) : undefined;
         const at = where ? `${d.file?.fileName}:${where.line + 1}: ` : '';
         return at + ts.flattenDiagnosticMessageText(d.messageText, ' ');
     });
+
+/**
+ * The type errors an example raises in a strict TypeScript project that copied it.
+ * @param {string} file - The example's file name in examples/
+ * @returns {string[]}
+ */
+export const exampleTypeErrors = (file) => typeErrorsOf(ts.createProgram([join('examples', file)], strictProject));
+
+/**
+ * The type errors a strict TypeScript project gets from `source`, a file at the repository root, so it can import
+ * an example as a project that copied it would.
+ * @param {string} source
+ * @returns {string[]}
+ */
+export const consumerTypeErrors = (source) => {
+    const file = 'consumer.ts';
+    const host = ts.createCompilerHost(strictProject);
+    const { getSourceFile, fileExists } = host;
+    host.getSourceFile = (name, ...rest) =>
+        name === file
+            ? ts.createSourceFile(name, source, ts.ScriptTarget.ES2022)
+            : getSourceFile.call(host, name, ...rest);
+    host.fileExists = (name) => name === file || fileExists.call(host, name);
+    return typeErrorsOf(ts.createProgram([file], strictProject, host));
 };

@@ -312,7 +312,7 @@ const checkOptions = (options, source, rules, raise = (message) => new TypeError
         const value = options[name];
         if (rule === null || value === undefined || rule[0](value)) continue;
         const [, takes, advice] = rule;
-        const message = `${source} '${name}' must be ${takes}, received ${describeArgument(value)}.`;
+        const message = `${source} '${name}' must be ${takes}, received ${describeOption(value)}.`;
         throw raise(advice ? `${message} ${advice}` : message, value);
     }
 };
@@ -332,7 +332,11 @@ const retryOptionRules = {
         "To handle an outcome without retrying, branch on it as data in the Command's next, or isolate a failing " +
             "branch with Parallel's settled option."
     ],
-    delay: [isFiniteNonNegative, 'a finite number of 0 or more'],
+    delay: [
+        isFiniteNonNegative,
+        'a finite number of 0 or more',
+        'To wait as long as a server asks, return its answer as data and wait in a Command.'
+    ],
     backoff: [isFiniteNonNegative, 'a finite number of 0 or more'],
     onExhausted: [isFunction, 'a function that returns the fallback']
 };
@@ -374,6 +378,14 @@ const describeValue = (value) => {
  */
 const describeArgument = (value) =>
     value === undefined ? 'undefined' : isEffect(value) ? `an Effect of type '${value.type}'` : describeValue(value);
+
+/**
+ * Describes an option's value for an error message. A function there is a callback in the wrong place, not a flow
+ * missing its input.
+ * @param {any} value
+ * @returns {string}
+ */
+const describeOption = (value) => (typeof value === 'function' ? 'a function' : describeArgument(value));
 
 /**
  * Marks an error as the harness failing rather than the flow: a malformed flow, or a trace that cannot answer a
@@ -2375,7 +2387,7 @@ const fromTrace = (traceLog, options = {}) => {
 
 /**
  * The outcome a recorded entry hands its step. An entry the recorder could not record stops the replay rather than
- * run live under `onMissing`, since production ran the step.
+ * run live under `onMissing`, since the recorded run ran the step.
  * @param {TraceEntry} entry
  * @param {ReplayStep} step
  * @returns {ReplayOutcome}
@@ -2385,7 +2397,7 @@ const recordedOutcome = (entry, step) => {
         throw unrecordedError(
             `outcome for '${step.name}' at path '${step.path}'`,
             entry.unrecorded,
-            "Production ran the step, so onMissing: 'execute' does not run it either. To replay past it,",
+            "The recorded run ran the step, so onMissing: 'execute' does not run it again. To replay past it,",
             { command: step.name, index: step.index, path: step.path }
         );
     }
@@ -2540,25 +2552,28 @@ const resolveInOrder = (entries, answerFrom) => {
 };
 
 /**
- * The error for a step a replay has no recorded outcome for, which it refuses to run live. It says whether a cap
- * may have dropped the step or production may never have run it, since the fix differs.
+ * The error for a step a replay has no outcome for, which it refuses to run live. For a trace it says whether a cap
+ * may have dropped the step or the recorded run may never have reached it, since the fix differs. A Resolver is
+ * usually a test's answers, so for one it names the step to answer.
  * @param {ReplayStep} step
  * @param {((step: ReplayStep) => string) | undefined} describe - `fromTrace`'s `missing`; a Resolver has none
  * @param {number} droppedEntries - How many entries the trace dropped under `maxEntries`
  * @returns {Error}
  */
 const missingStepError = (step, describe, droppedEntries) => {
-    const what = describe ? describe(step) : `No recorded outcome for '${step.name}' at step ${step.index}`;
-    const why =
-        droppedEntries > 0
-            ? `The trace dropped ${droppedEntries} entries under maxEntries, so production may have run ` +
-              'this step and the recorder not kept it; record the flow with a higher maxEntries to ' +
-              'replay past it.'
-            : 'Production may never have run it: a Command an onBeforeCommand hook vetoed leaves no ' +
-              'entry, and neither does a step the flow reaches now that it did not then, such as one added ' +
-              "past the end of the recording. onMissing: 'execute' runs such a step for real, and every step " +
-              'after it that the trace also lacks, so pass it only where every Command the flow can still ' +
-              'reach goes to a test double or only reads.';
+    const what = describe ? describe(step) : `The Resolver has no answer for '${step.name}' at path '${step.path}'`;
+    const lacking = describe ? 'the trace also lacks' : 'the Resolver has no answer for either';
+    const runsLive =
+        `onMissing: 'execute' runs such a step for real, and every step after it that ${lacking}, so pass it ` +
+        'only where every Command the flow can still reach goes to a test double or only reads.';
+    const why = !describe
+        ? `Give the Resolver an answer for this step. ${runsLive}`
+        : droppedEntries > 0
+          ? `The trace dropped ${droppedEntries} entries under maxEntries, so the recorded run may have reached ` +
+            'this step and the recorder not kept it; record the flow with a higher maxEntries to replay past it.'
+          : 'The recorded run may never have reached it: a Command an onBeforeCommand hook vetoed leaves no ' +
+            'entry, and neither does a step the flow reaches now that it did not then, such as one added ' +
+            `past the end of the recording. ${runsLive}`;
     return replayError(`${what}; refusing to run the real Command. ${why}`, {
         command: step.name,
         index: step.index,
@@ -2691,7 +2706,7 @@ const replayContext = (traceLog, given) => {
 };
 
 /**
- * How many entries a trace dropped under `maxEntries`. A capped trace lacks steps production ran, so it refuses
+ * How many entries a trace dropped under `maxEntries`. A capped trace lacks steps the recorded run ran, so it refuses
  * `onMissing: 'execute'`, which could run one of them again.
  * @param {TraceLog | undefined} traceLog
  * @param {'throw' | 'execute'} onMissing
@@ -2703,7 +2718,7 @@ const droppedEntriesOf = (traceLog, onMissing) => {
     if (capped && onMissing === 'execute') {
         throw replayError(
             `The trace dropped ${dropped} entries under maxEntries, so a step it lacks may be one ` +
-                "production ran, and onMissing: 'execute' would run it again. Replay without it to stop at the " +
+                "the recorded run reached, and onMissing: 'execute' would run it again. Replay without it to stop at the " +
                 'first missing step, or record the flow with a higher maxEntries.'
         );
     }
