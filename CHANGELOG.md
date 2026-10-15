@@ -1,6 +1,19 @@
 # Changelog
 
-All notable changes to pure-effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
+All notable changes to Pure Effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
+
+## [0.20.1] - 2026-10-15
+
+### Added
+
+- The package ships `RULES.md`, the README's twelve rules for writing a flow with an index of where each task is covered, for coding agents and their instructions.
+- The recording example takes a `version` and attaches it to each trace, so `timeTravel` warns when it replays a trace from another build.
+
+### Fixed
+
+- A Resolver with no answer for a step is named as the cause, and the other replay errors speak of the recorded run rather than production.
+- A function given to an option, such as `Retry`'s `delay`, is named plainly in the error, rather than taken for a flow passed without its input.
+- The recording example types `redact` as `recorder` declares it, so a TypeScript `redact` that names the four kinds can be passed to `recordingHooks`.
 
 ## [0.20.0] - 2026-10-13
 
@@ -280,6 +293,7 @@ All notable changes to pure-effect are recorded here. The format follows [Keep a
 
 - Initial release: `Success`, `Failure`, `Command`, `effectPipe`, and `runEffect`.
 
+[0.20.1]: https://github.com/aycangulez/pure-effect/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/aycangulez/pure-effect/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/aycangulez/pure-effect/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/aycangulez/pure-effect/compare/v0.17.0...v0.18.0

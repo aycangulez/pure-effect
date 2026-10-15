@@ -20,9 +20,9 @@ import {
 import * as lib from '../index.js';
 import ts from 'typescript';
 import { readFileSync } from 'node:fs';
-import { mock } from 'node:test';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { effectPipeOverloads, currentOverloads } from '../scripts/effect-pipe-overloads.js';
+import { rulesFile, rulesSection, githubAnchor, headingAnchors } from '../scripts/rules-file.js';
 import { errorOf } from './helpers.js';
 
 describe('README examples', function () {
@@ -145,17 +145,37 @@ describe('README examples', function () {
             trip: { id: 'trip_1' },
             work: [Success(1)],
             pricing: { get: async () => ({ amount: 1 }) },
+            // The checkout the shape-changing fix recipe records: a free cart, and a gateway that refuses to charge 0.
+            carts: {
+                find: async (/** @type {string} */ cartId) => ({ id: cartId, total: cartId === 'cart_free' ? 0 : 120 })
+            },
+            gateway: {
+                charge: async (/** @type {number} */ amount) => {
+                    if (amount === 0)
+                        throw Object.assign(new Error('Amount must be non-zero.'), { code: 'invalid_amount' });
+                    return { chargeId: 'ch_1', amount };
+                }
+            },
+            orderStore: {
+                save: async () => ({ orderId: 'order_1' }),
+                markPaid: async (/** @type {string} */ orderId) => ({ orderId, paid: true })
+            },
+            // The ending-early example: an event log that has already seen one event.
+            eventLog: { claim: async (/** @type {string} */ eventId) => eventId !== 'evt_seen' },
+            // The try/catch translation's refund: a reservation that fails after the charge went through.
+            warehouse: {
+                reserve: async () => {
+                    throw new Error('out of stock');
+                }
+            },
+            payments: { refund: async () => ({ refunded: true }) },
             sku: 'sku_1',
             summarize: (/** @type {any} */ outcome) => outcome.type,
             sink: () => {},
             telemetryHooks: () => ({}),
             recordingHooks: () => ({}),
             // Real: the Hooks example shows a scope reaching every hook, which only the real one does.
-            AsyncLocalStorage,
-            // Real rather than stubbed: the async/await comparison shows the mocked test a plain
-            // `async` function needs, and it should pass against that function the way it would for
-            // a reader.
-            mock
+            AsyncLocalStorage
         };
 
         const log = console.log;
@@ -534,6 +554,64 @@ describe('Declaration parity', function () {
         const generated = await effectPipeOverloads();
         const current = currentOverloads(readFileSync('index.d.ts', 'utf8'));
         assert.ok(current === generated, 'index.d.ts differs from the generator: run npm run generate');
+    });
+});
+
+describe('Rules file', function () {
+    // RULES.md ships so an agent that sees only node_modules finds the rules, and it is generated from the README so
+    // the two cannot drift. These pin that it is current, that the README keeps the rules where the generator reads
+    // them, and that every link in it lands on the heading it names.
+    const readme = readFileSync('README.md', 'utf8');
+
+    it('should hold exactly the RULES.md the generator writes', async function () {
+        this.timeout(20000);
+        const generated = await rulesFile(readme);
+        assert.ok(
+            readFileSync('RULES.md', 'utf8') === generated,
+            'RULES.md differs from the generator: run npm run generate'
+        );
+    });
+
+    it('should keep the twelve rules as one numbered list between one pair of markers', function () {
+        const items = rulesSection(readme).split('\n');
+        items.forEach((item, index) =>
+            assert.ok(item.startsWith(`${index + 1}. **`), `rule ${index + 1} reads '${item}'`)
+        );
+        // The section opens by counting them, so adding or removing a rule means changing that sentence too.
+        assert.equal(items.length, 12, 'the README says "Twelve rules": change it with the list');
+        assert.ok(readme.includes('Twelve rules cover most of what goes wrong.'));
+    });
+
+    it('should give headings the anchors GitHub gives them', function () {
+        // Anchored to values, so a change to the anchor rule shows here before it breaks every link at once.
+        assert.equal(githubAnchor('`Command(cmdFn, nextFn?, meta?)`'), 'commandcmdfn-nextfn-meta');
+        assert.equal(githubAnchor('Coming from async/await'), 'coming-from-asyncawait');
+        assert.equal(
+            githubAnchor("Proving a fix that changes the flow's shape"),
+            'proving-a-fix-that-changes-the-flows-shape'
+        );
+        assert.equal(githubAnchor('What runs once, and what runs again'), 'what-runs-once-and-what-runs-again');
+        assert.equal(githubAnchor('TypeScript: Typed Errors and Context'), 'typescript-typed-errors-and-context');
+        assert.equal(githubAnchor('Translating `try`/`catch`'), 'translating-trycatch');
+        assert.deepEqual(headingAnchors('# A\n```sh\n# not a heading\n```\n## A'), ['a', 'a-1']);
+    });
+
+    it('should link only to headings the README has, each of them once', function () {
+        const anchors = new Set(headingAnchors(readme));
+        const links = [...readFileSync('RULES.md', 'utf8').matchAll(/\]\(([^)]*)\)/g)].map((match) => match[1]);
+        assert.ok(links.length >= 20, `expected RULES.md to link to the README, found ${links.length} links`);
+        links.forEach((link) => {
+            assert.ok(link.startsWith('README.md#'), `RULES.md links to '${link}', not to a README heading`);
+            const anchor = link.slice('README.md#'.length);
+            assert.ok(anchors.has(anchor), `RULES.md links to '${link}', which no heading has`);
+            // A second heading with the same text would take the anchor with -1, and the link would land on the first.
+            assert.ok(!anchors.has(`${anchor}-1`), `RULES.md links to '${link}', which two headings share`);
+        });
+    });
+
+    it('should ship RULES.md in the package', function () {
+        const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+        assert.ok(pkg.files.includes('RULES.md'), "add RULES.md to package.json's files");
     });
 });
 

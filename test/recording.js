@@ -356,6 +356,7 @@ describe('Recording', function () {
                 assert.match(error.message, /no outcome for 'cmdFindUser' at path '0'/);
                 assert.match(error.message, /: redact threw on it, so the recorder left it out\./);
                 assert.match(error.message, /make redact handle every value it is given, null included/);
+                assert.doesNotMatch(error.message, /production/i);
                 assert.equal(error.path, '0');
                 assert.deepEqual(unreached, []);
             }

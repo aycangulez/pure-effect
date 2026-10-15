@@ -1,3 +1,5 @@
+// Rules for writing a correct flow, and a task index: RULES.md in this package.
+
 export type SuccessState<T> = {
     type: 'Success';
     value: T;
@@ -197,7 +199,7 @@ export declare function commandName(command: CommandState<any, any, any, any>): 
 /** Reads the context passed to `runEffect`. With no argument it succeeds with the context; name its type as `Ask<AppCtx>()`. */
 export declare function Ask<Ctx = unknown>(): AskState<Ctx, never, Ctx>;
 
-/** Reads the context passed to `runEffect`. Give the value, error and context types, or none. */
+/** Reads the context passed to `runEffect`. Give the value, error and context types, or none and annotate `ctx`. */
 export declare function Ask<T = never, E = never, Ctx = unknown, N extends AnyEffect = Effect<T, E, Ctx>>(
     next: (context: Ctx) => N
 ): AskState<EffectValue<N>, EffectError<N>, Ctx & EffectContext<N>>;
