@@ -870,6 +870,8 @@ Declaring results as `FailureState<E | Error>` was weighed and dropped:
 - Whatever reaches the caller undeclared needs one fallback where the result is handled, not one per Command.
 - Widening every result type would make every handler spell out a case it treats generically anyway.
 
+`ReplayFault` types a replay's error for a test that casts to it, and leaves the result types alone. It was added after a TypeScript DX experiment in October 2026 could only read a `TimeParadox` as `unknown`.
+
 The README says to write that fallback and to treat it as a server error, and its checkout handler answers a thrown error with a 500 rather than a 400.
 
 It holds for a settled `Parallel`'s outcomes too, though in a batch of plain Commands the `Failure` branch holds only thrown errors, so its error is typed `never`. Typing settled outcomes' errors `unknown` was weighed in October 2026 and dropped, to keep one rule for every result.

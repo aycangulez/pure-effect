@@ -1363,7 +1363,10 @@ export type RunContext<Ctx> = unknown extends Ctx
 /** A context checked against the one the flow reads, and never inferred from. */
 type CheckedContext<T> = [T][T extends any ? 0 : never];
 
-/** Runs a flow and returns its `Success` or `Failure`. A flow that reads a context requires one. */
+/**
+ * Runs a flow and returns its `Success` or `Failure`. A flow that reads a context requires one, so "Expected 2-3
+ * arguments" here means the context was left out.
+ */
 export declare function runEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     ...args: unknown extends Ctx
@@ -1453,7 +1456,8 @@ export type RecordOptions<Ctx = unknown> = RecorderOptions & {
 
 /**
  * Runs a flow for real and returns its outcome with a trace. The trace holds the flow's input when `effectPipe` or
- * `effectGen` built it.
+ * `effectGen` built it. A flow that reads a context requires `options.context`, so "Expected 2 arguments" here means
+ * it was left out.
  */
 export declare function recordEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
@@ -1482,6 +1486,27 @@ export interface Replay<T, E = unknown> {
     result: SuccessState<T> | FailureState<E>;
     unreached: TraceEntry[];
 }
+
+/**
+ * The error a replay stops with, in its result's `Failure`: a `TimeParadox` when the flow asked for a different step,
+ * else a `ReplayError`. The result's type leaves it out, so read the error as `unknown` and cast it.
+ */
+export type ReplayFault = Error & {
+    name: 'ReplayError' | 'TimeParadox';
+    /** Where the replay stopped. */
+    path?: string | undefined;
+    /** The Command the flow asked for. */
+    command?: string | undefined;
+    index?: number | undefined;
+    /** The trace field a replay needed and lacked. */
+    field?: 'initialInput' | 'context' | undefined;
+    /** What the trace recorded at `path`, for a `TimeParadox`. */
+    expected?: unknown;
+    /** What the flow asked for there. */
+    actual?: unknown;
+    /** The recorded branch that cancelled a `Parallel`. */
+    branch?: number | undefined;
+};
 
 /**
  * Replays a flow from a trace, or from a Resolver for other storage, with no I/O. A Resolver holds no context, so a

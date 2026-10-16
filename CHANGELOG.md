@@ -4,6 +4,10 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- `index.d.ts` exports `ReplayFault`, the type of the `ReplayError` or `TimeParadox` a replay stops with, so a test can cast a replay's error to it.
+
 ### Changed
 
 - Breaking: a replay that reaches an `Ask` with no context, from a resolver or a trace that recorded none, stops with a `ReplayError` rather than handing `Ask` an empty object. Pass `options.context`, or give a `recorder`'s `toTrace` the context.

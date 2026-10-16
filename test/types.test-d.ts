@@ -43,6 +43,7 @@ import type {
     Resolver,
     ReplayOptions,
     Replay,
+    ReplayFault,
     TimeTravelOptions
 } from '../index.js';
 
@@ -987,6 +988,19 @@ expectAssignable<ReplayOutcome>({ error: new Error('x') });
 
 // @ts-expect-error a bare value is not an outcome; the wrapper is what distinguishes undefined from unrecorded
 const bareResolver: Resolver = () => 42;
+
+// a replay's fault is a declared type, so a test reads its fields without casting through unknown
+const replayed = await replayEffect(
+    Command(() => 1),
+    { trace: [] }
+);
+const fault = (replayed.result as FailureState<unknown>).error as ReplayFault;
+expectType<'ReplayError' | 'TimeParadox'>(fault.name);
+expectType<string | undefined>(fault.path);
+expectType<string | undefined>(fault.command);
+expectType<'initialInput' | 'context' | undefined>(fault.field);
+expectType<unknown>(fault.expected);
+expectAssignable<Error>(fault);
 
 // a Parallel's step records its decision, and a Resolver can supply one from another storage format
 expectAssignable<ParallelDecision>({ cancelled: false });
