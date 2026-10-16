@@ -7,6 +7,7 @@ import {
     Command,
     Ask,
     Parallel,
+    Retry,
     effectPipe,
     runEffect,
     configureEffect,
@@ -350,6 +351,78 @@ describe('examples/recording-example.js', function () {
             );
         assert.equal((await runEffect(ok({ id: 2 }))).type, 'Success');
         assert.deepEqual(written, []);
+    });
+
+    it('should keep by default a run that succeeded after a Command threw', async function () {
+        // The default kept only runs that ended in a Failure, so a delivery that went to its dead-letter fallback, or
+        // a charge that went through on its third attempt, ended in a Success and was never recorded.
+        /** @type {any[]} */
+        const written = [];
+        enableRecording({ sink: async (/** @type {any} */ t) => void written.push(t) });
+        let calls = 0;
+        const flaky = Retry(
+            Command(function cmdCharge() {
+                if (++calls < 2) throw new Error('503');
+                return 'charged';
+            }),
+            { retries: 2, delay: 0 }
+        );
+        const deadLettered = Retry(
+            Command(function cmdDeliver() {
+                throw new Error('503');
+            }),
+            {
+                retries: 1,
+                delay: 0,
+                onExhausted: () =>
+                    Command(function cmdDeadLetter() {
+                        return 'parked';
+                    })
+            }
+        );
+        assert.deepEqual(await runEffect(effectPipe(() => flaky)('a')), Success('charged'));
+        assert.deepEqual(await runEffect(effectPipe(() => deadLettered)('b')), Success('parked'));
+        assert.deepEqual(
+            written.map((t) => t.initialInput),
+            ['a', 'b']
+        );
+    });
+
+    it('should hand keep the trace entries, so a settled batch whose items failed can be kept', async function () {
+        // A settled Parallel's failures reach next as outcomes, so the run succeeds and no Command threw; only a keep
+        // that reads the result can tell.
+        /** @type {any[]} */
+        const written = [];
+        /** @type {any[]} */
+        const seen = [];
+        const item = (/** @type {boolean} */ ok) =>
+            Command(
+                function cmdImport() {
+                    return ok;
+                },
+                (/** @type {boolean} */ fine) => (fine ? Success('ok') : Failure('bad row'))
+            );
+        const batch = effectPipe(
+            () => Parallel([item(true), item(false)], { settled: true }),
+            (/** @type {any[]} */ outcomes) => Success({ failed: outcomes.filter((o) => o.type === 'Failure').length })
+        );
+        enableRecording({ sink: async (/** @type {any} */ t) => void written.push(t) });
+        await runEffect(batch('by-default'));
+        assert.equal(written.length, 0, 'the default sees no Failure and no throw');
+        configureEffect();
+        enableRecording({
+            sink: async (/** @type {any} */ t) => void written.push(t),
+            keep: (result, entries) => {
+                seen.push(entries.map((e) => e.command));
+                return result.type === 'Failure' || /** @type {any} */ (result).value.failed > 0;
+            }
+        });
+        await runEffect(batch('read-the-result'));
+        assert.deepEqual(
+            written.map((t) => t.initialInput),
+            ['read-the-result']
+        );
+        assert.deepEqual(seen, [['cmdImport', 'cmdImport', 'Parallel']]);
     });
 
     it('should warn once per flow when it keeps a trace whose flow carried no input', async function () {

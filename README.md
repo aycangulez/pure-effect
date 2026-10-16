@@ -1295,14 +1295,14 @@ configureEffect(
         redact: (value, name, kind) =>
             kind === 'initialInput' ? { ...value, password: value.password.length >= 8 ? '[redacted]' : '' } : value,
         maxEntries: 500,
-        keep: (result) => result.type === 'Failure' // the default; keep everything, or sample
+        keep: (result, entries) => result.type === 'Failure' || entries.some((e) => e.threw) // the default
     })
 );
 ```
 
 What the example does with each run:
 
-- **Which runs it keeps.** `keep` decides. By default it keeps a run that ended in a `Failure`, and discards a successful one after holding it in memory.
+- **Which runs it keeps.** `keep` decides, from the run's outcome and its trace's entries. By default it keeps a run that ended in a `Failure` or in which a Command threw, as one that succeeded on a retry or went to a dead-letter fallback did, and discards the rest after holding them in memory. A settled `Parallel` hands its failures to `next`, so a batch whose items failed ends in a `Success` with nothing thrown; keep it with a `keep` that reads the result, such as `(result, entries) => result.type === 'Failure' || result.value.failed > 0`. Return `true` to keep everything, or sample.
 - **When your own code throws.** A `TypeError` after an API changed the shape of its response, say, makes the run reject. `keep` is offered a `Failure` carrying the thrown error, so by default its trace is kept, and replaying it reproduces the throw. A step before the flow's first Command runs when the flow is built, outside `runEffect`, so its throw reaches no hook and is not recorded. That run did no I/O, so its input reproduces it.
 - **What a trace holds.** `redact` runs before anything enters the trace, including the stored `initialInput` and `context`. A value it throws on, or one JSON cannot hold, such as a `BigInt`, is left out and marked `unrecorded`, and a replay stops there. Everything else is already in the form JSON holds, so the sink can write it to S3 or a database column with `JSON.stringify`.
 - **How long a trace gets.** `maxEntries` caps it and reports the overflow as `dropped`, and a capped trace replays only up to the first step it lacks.
