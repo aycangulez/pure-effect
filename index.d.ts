@@ -128,18 +128,37 @@ export type EffectError<X> =
                 ? E
                 : never;
 
-/** The context an Effect reads, which is `unknown` for a `Success` or `Failure`, since they read none. */
-export type EffectContext<X> = [X] extends [SuccessState<any> | FailureState<any>]
-    ? unknown
-    : X extends CommandState<any, any, any, infer C>
-      ? C
-      : X extends AskState<any, any, infer C>
+type NodeContext<X> =
+    X extends CommandState<any, any, any, infer C>
         ? C
-        : X extends RetryState<any, any, infer C, any>
+        : X extends AskState<any, any, infer C>
           ? C
-          : X extends ParallelState<any, any, any, infer C, any, any>
+          : X extends RetryState<any, any, infer C, any>
             ? C
-            : never;
+            : X extends ParallelState<any, any, any, infer C, any, any>
+              ? C
+              : unknown;
+// A node that reads no context gives `unknown`, which would erase the others in an intersection, so it is dropped. Each
+// context is boxed, so one that is itself a union is intersected whole rather than member by member.
+type ContextNeeds<X> = X extends unknown
+    ? unknown extends NodeContext<X>
+        ? never
+        : { context: NodeContext<X> }
+    : never;
+type Intersection<U> = (U extends any ? (u: U) => void : never) extends (i: infer I) => void ? I : never;
+type IsAny<X> = 0 extends 1 & X ? true : false;
+/**
+ * The context an Effect reads: for one of several Effects, as a step that branches returns, every context any of them
+ * reads. `unknown` for a `Success` or `Failure`, since they read none.
+ */
+export type EffectContext<X> =
+    IsAny<X> extends true
+        ? unknown
+        : [ContextNeeds<X>] extends [never]
+          ? unknown
+          : Intersection<ContextNeeds<X>> extends { context: infer C }
+            ? C
+            : unknown;
 
 // Checked by a conditional, not a constraint: a constraint types an inline Ask's or Retry's error as any.
 /** The branches `Parallel` accepts: each one an Effect. */
@@ -1270,25 +1289,10 @@ export declare function step<X extends AnyEffect>(effect: X): Step<X>;
 
 type StepEffectOf<Y> = Y extends Step<infer X, any> ? X : never;
 // An `any` return would match both branches and turn the error union into `any`, so it counts as a plain value.
-type GenIsAny<R> = 0 extends 1 & R ? true : false;
-type ReturnedEffect<R> = GenIsAny<R> extends true ? never : R extends AnyEffect ? R : never;
-type GenValue<R> = GenIsAny<R> extends true ? any : R extends AnyEffect ? EffectValue<R> : R;
+type ReturnedEffect<R> = IsAny<R> extends true ? never : R extends AnyEffect ? R : never;
+type GenValue<R> = IsAny<R> extends true ? any : R extends AnyEffect ? EffectValue<R> : R;
 type GenError<Y, R> = EffectError<StepEffectOf<Y>> | EffectError<ReturnedEffect<R>>;
-// A step that reads no context gives `unknown`, which would erase the others in an intersection, so it is dropped. Each
-// context is boxed, so one that is itself a union is intersected whole rather than member by member.
-type GenNeeds<X> = X extends AnyEffect
-    ? EffectContext<X> extends infer C
-        ? unknown extends C
-            ? never
-            : { context: C }
-        : never
-    : never;
-type GenIntersection<U> = (U extends any ? (u: U) => void : never) extends (i: infer I) => void ? I : never;
-type GenContext<Y, R> = [GenNeeds<StepEffectOf<Y> | ReturnedEffect<R>>] extends [never]
-    ? unknown
-    : GenIntersection<GenNeeds<StepEffectOf<Y> | ReturnedEffect<R>>> extends { context: infer C }
-      ? C
-      : unknown;
+type GenContext<Y, R> = EffectContext<StepEffectOf<Y> | ReturnedEffect<R>>;
 
 /**
  * Builds a flow function from a generator function, written with `yield* step(effect)` where `async` code writes

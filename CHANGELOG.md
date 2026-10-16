@@ -15,6 +15,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 
 ### Fixed
 
+- In TypeScript, a step that returns one of several Effects requires every context any of them reads, so a branch that returns a plain Command beside an `Ask`, or two `Ask`s reading different contexts, no longer lets `runEffect` run without what the flow reads.
 - A replay refuses a `Retry` given more attempts than the recorded one made before its fallback, as a `TimeParadox`, rather than reporting a missing step and running the new attempts live under `onMissing: 'execute'`.
 - A `Retry` wait longer than `setTimeout` can hold, about 24.8 days, is capped there, rather than overflowing and retrying after 1 ms.
 - A Command node built by hand whose `cmd` is not a function rejects the run with an `EffectTypeError`, rather than failing as an I/O fault that `Retry` retried.

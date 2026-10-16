@@ -30,6 +30,7 @@ import type {
     ParallelDecision,
     RetryExhaustedError,
     Effect,
+    EffectContext,
     EffectConfiguration,
     StepRunner,
     RunWrapper,
@@ -693,6 +694,27 @@ const countCharged = effectPipe((ids: number[]) => Parallel(ids.map(chargeOne), 
 expectType<Effect<number, 'declined'>>(countCharged([1]));
 
 // --- Ctx (context type) ---
+
+// a step that returns one of several Effects needs every context any of them reads, a plain Command's none included
+const plainCountCmd = (n: number) => Command(async () => n);
+const readsTenantCtx = (n: number) => Ask((c: { tenant: string }) => Success(c.tenant + n));
+const readsRegionCtx = (n: number) => Ask((c: { region: string }) => Success(c.region + n));
+const branchingStep = effectPipe(
+    (n: number) => Success(n),
+    (n) => (n % 2 ? plainCountCmd(n) : readsTenantCtx(n))
+);
+expectType<{ tenant: string }>({} as EffectContext<ReturnType<typeof branchingStep>>);
+// @ts-expect-error the branch that reads the tenant needs it passed
+runEffect(branchingStep(2));
+const twoReadsStep = effectPipe(
+    (n: number) => Success(n),
+    (n) => (n % 2 ? readsRegionCtx(n) : readsTenantCtx(n))
+);
+// @ts-expect-error either branch can run, so both contexts are needed
+runEffect(twoReadsStep(2), { tenant: 't' });
+runEffect(twoReadsStep(2), { tenant: 't', region: 'r' });
+expectType<unknown>({} as EffectContext<SuccessState<number> | FailureState<'x'>>);
+expectType<unknown>({} as EffectContext<never>);
 
 interface AppCtx {
     db: string;
