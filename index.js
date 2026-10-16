@@ -1865,8 +1865,15 @@ const trackCalls = (call) => {
  * @returns {Promise<SuccessState | FailureState | IoFaultState>}
  */
 const runCommand = async (runtime, command, signal, cmdPath) => {
-    const cmdName = commandName(command);
     const { cmd } = command;
+    // Only a node built by hand can lack its function: a malformed flow, which a Retry must not take for an I/O fault.
+    if (typeof cmd !== 'function') {
+        throw malformed(
+            `A Command's cmd must be a function, got ${describeArgument(cmd)}: build it with Command(fn).`,
+            cmd
+        );
+    }
+    const cmdName = commandName(command);
     // Only inside a Parallel, and only to a function that declares a parameter. A parameter with a default
     // value does not count toward `length`, so `nanoid(size = 21)` keeps its default; a plain first parameter
     // the function treats as optional still takes the signal, a documented sharp edge.

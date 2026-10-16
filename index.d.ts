@@ -1491,22 +1491,29 @@ export interface Replay<T, E = unknown> {
  * The error a replay stops with, in its result's `Failure`: a `TimeParadox` when the flow asked for a different step,
  * else a `ReplayError`. The result's type leaves it out, so read the error as `unknown` and cast it.
  */
-export type ReplayFault = Error & {
-    name: 'ReplayError' | 'TimeParadox';
-    /** Where the replay stopped. */
-    path?: string | undefined;
-    /** The Command the flow asked for. */
-    command?: string | undefined;
-    index?: number | undefined;
-    /** The trace field a replay needed and lacked. */
-    field?: 'initialInput' | 'context' | undefined;
-    /** What the trace recorded at `path`, for a `TimeParadox`. */
-    expected?: unknown;
-    /** What the flow asked for there. */
-    actual?: unknown;
-    /** The recorded branch that cancelled a `Parallel`. */
-    branch?: number | undefined;
-};
+export type ReplayFault =
+    | (Error & {
+          name: 'TimeParadox';
+          /** Where the flow and the trace part. */
+          path?: string | undefined;
+          index?: number | undefined;
+          /** What the trace recorded at `path`: a Command's name, a kind of node, a branch count or `settled`. */
+          expected?: unknown;
+          /** What the flow asked for there. */
+          actual?: unknown;
+          /** The recorded branch that cancelled a `Parallel`. */
+          branch?: number | undefined;
+      })
+    | (Error & {
+          name: 'ReplayError';
+          /** Where the replay stopped. */
+          path?: string | undefined;
+          /** The Command the replay had no answer for. */
+          command?: string | undefined;
+          index?: number | undefined;
+          /** The trace field a replay needed and lacked. */
+          field?: 'initialInput' | 'context' | undefined;
+      });
 
 /**
  * Replays a flow from a trace, or from a Resolver for other storage, with no I/O. A Resolver holds no context, so a

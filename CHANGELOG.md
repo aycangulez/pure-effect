@@ -6,7 +6,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 
 ### Added
 
-- `index.d.ts` exports `ReplayFault`, the type of the `ReplayError` or `TimeParadox` a replay stops with, so a test can cast a replay's error to it.
+- `index.d.ts` exports `ReplayFault`, the type of the `ReplayError` or `TimeParadox` a replay stops with, told apart by `name`, so a test can cast a replay's error to it.
 
 ### Changed
 
@@ -14,6 +14,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 
 ### Fixed
 
+- A Command node built by hand whose `cmd` is not a function rejects the run with an `EffectTypeError`, rather than failing as an I/O fault that `Retry` retried.
 - A `step(...)` a generator body never runs with `yield*`, written as a bare statement or only tested for truth, throws an `EffectTypeError` rather than being skipped, which dropped its `Failure` or left its Command unrun.
 - A replay refuses a `Parallel` whose `settled` option changed since the recording, as a `TimeParadox`, since a recorded decision now says whether it was settled. Traces recorded before this are not checked.
 - A result, input or context that `redact` returns `undefined` for is marked `unrecorded`, as one it throws on, so a replay stops there rather than hand the flow `undefined`.

@@ -997,10 +997,19 @@ const replayed = await replayEffect(
 const fault = (replayed.result as FailureState<unknown>).error as ReplayFault;
 expectType<'ReplayError' | 'TimeParadox'>(fault.name);
 expectType<string | undefined>(fault.path);
-expectType<string | undefined>(fault.command);
-expectType<'initialInput' | 'context' | undefined>(fault.field);
-expectType<unknown>(fault.expected);
 expectAssignable<Error>(fault);
+// `name` tells the two apart, and each declares only the fields the runtime sets on it
+if (fault.name === 'TimeParadox') {
+    expectType<unknown>(fault.expected);
+    expectType<number | undefined>(fault.branch);
+    // @ts-expect-error a TimeParadox names the steps in expected and actual, and has no command
+    void fault.command;
+} else {
+    expectType<string | undefined>(fault.command);
+    expectType<'initialInput' | 'context' | undefined>(fault.field);
+    // @ts-expect-error a ReplayError compares nothing, so it has no expected
+    void fault.expected;
+}
 
 // a Parallel's step records its decision, and a Resolver can supply one from another storage format
 expectAssignable<ParallelDecision>({ cancelled: false });

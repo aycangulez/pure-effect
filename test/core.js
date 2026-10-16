@@ -680,6 +680,19 @@ describe('Malformed flows', function () {
         }
         assert.deepEqual(unhandled, []);
     });
+    it('should refuse a Command built by hand whose cmd is not a function, rather than retry it', async function () {
+        // `{ type: 'Command', cmd: 5 }` called its cmd, and the TypeError became an I/O fault, so a Retry around it
+        // retried a malformed flow and reported an exhausted outage.
+        let attempts = 0;
+        const forged = /** @type {any} */ ({ type: 'Command', cmd: 5, next: (/** @type {any} */ v) => Success(v) });
+        const flow = Retry(forged, { retries: 2, delay: 0 });
+        configureEffect({ onBeforeCommand: async () => void attempts++ });
+        await assert.rejects(runEffect(flow), {
+            name: 'EffectTypeError',
+            message: "A Command's cmd must be a function, got the number 5: build it with Command(fn)."
+        });
+        assert.equal(attempts, 0, 'nothing ran, and nothing was retried');
+    });
 });
 
 describe('Constructor arguments', function () {

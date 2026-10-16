@@ -419,7 +419,7 @@ When every attempt fails, `runEffect` returns a `Failure` with this error:
 { retryExhausted: true, lastError: <the last error>, retries: 3 }
 ```
 
-In TypeScript, a `Retry` adds `RetryExhaustedError` to the error union, beside the errors of the steps it wraps. `lastError` is typed `unknown`, since it is whatever the Command's function threw, so check it before using it, for example with `instanceof Error`.
+In TypeScript, a `Retry` adds `RetryExhaustedError` to the error union, beside the errors of the steps it wraps. `lastError` is typed `unknown`, since it is whatever the Command's function threw, so check it before using it, for example with `instanceof Error`. Tell your own error classes apart by `name`, as in `lastError instanceof Error && lastError.name === 'HttpError'`: a replay hands back a plain `Error`, so `instanceof HttpError` would take another branch there and stop at a `TimeParadox`.
 
 **Use `onExhausted` to fall back when every attempt fails.** The fallback runs in place of the `Failure`. If it succeeds, its value continues down the pipeline; if it fails, its own `Failure` is returned as is. The fallback can be any Effect, such as a Command that reads a cache, or `Success(defaultValue)`:
 
