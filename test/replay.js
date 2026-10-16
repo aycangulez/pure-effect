@@ -93,6 +93,179 @@ describe('Replay', function () {
         assert.deepEqual((await replayEffect(noAsk('in'), () => ({ result: undefined }))).result, Success(undefined));
     });
 
+    it('should narrate a replay as a tree of the flow, ordered by position', async function () {
+        // The narration logged each step as it resolved, in completion order, with no path, so a Parallel's branches
+        // and a Retry's attempts interleaved, and the header left out the Parallel decision the trace held.
+        const flow = effectPipe(
+            () =>
+                Command(function cmdValidateCart() {
+                    return { ok: true };
+                }),
+            () =>
+                Parallel([
+                    Retry(
+                        Command(function cmdFetchStock() {
+                            throw new Error('ECONNRESET');
+                        }),
+                        {
+                            retries: 1,
+                            delay: 0,
+                            onExhausted: () =>
+                                Command(function cmdStockFallback() {
+                                    return 3;
+                                })
+                        }
+                    ),
+                    effectPipe(
+                        () =>
+                            Command(function cmdFetchPrice() {
+                                return 120;
+                            }),
+                        () =>
+                            Command(function cmdFetchTax() {
+                                return 12;
+                            })
+                    )('cart_1')
+                ]),
+            () =>
+                Retry(
+                    Command(function cmdChargePrimary() {
+                        throw new Error('503');
+                    }),
+                    {
+                        retries: 1,
+                        delay: 0,
+                        onExhausted: () =>
+                            Command(function cmdChargeSecondary() {
+                                return { id: 'ch_1' };
+                            })
+                    }
+                ),
+            () =>
+                Command(function cmdSendEmail() {
+                    return { sent: true };
+                })
+        );
+        const { trace } = await recordEffect(flow('cart_1'), { context: { flowName: 'checkout' } });
+        // Without timings, so the lines are the same on every run.
+        const untimed = { ...trace, trace: trace.trace.map(({ durationMs, ...entry }) => entry) };
+        /** @type {string[]} */
+        const lines = [];
+        await timeTravel(flow, untimed, { log: (/** @type {string} */ line) => void lines.push(line) });
+        assert.deepEqual(lines, [
+            "Replaying 'checkout': 10 recorded steps and 1 Parallel decision",
+            'Initial input: "cart_1"',
+            '├─ cmdValidateCart returned {"ok":true}',
+            '├─ Parallel',
+            '│  ├─ branch 0',
+            '│  │  └─ Retry',
+            '│  │     ├─ attempt 0: cmdFetchStock threw {"name":"Error","message":"ECONNRESET"}',
+            '│  │     ├─ attempt 1: cmdFetchStock threw {"name":"Error","message":"ECONNRESET"}',
+            '│  │     └─ fallback: cmdStockFallback returned 3',
+            '│  └─ branch 1',
+            '│     ├─ cmdFetchPrice returned 120',
+            '│     └─ cmdFetchTax returned 12',
+            '├─ Retry',
+            '│  ├─ attempt 0: cmdChargePrimary threw {"name":"Error","message":"503"}',
+            '│  ├─ attempt 1: cmdChargePrimary threw {"name":"Error","message":"503"}',
+            '│  └─ fallback: cmdChargeSecondary returned {"id":"ch_1"}',
+            '└─ cmdSendEmail returned {"sent":true}',
+            'Replay finished with state: Success',
+            'Result: {\n  "sent": true\n}'
+        ]);
+    });
+
+    /** What timeTravel logs for a recording of `flow`, untimed and replayed from `edit(trace)`. */
+    const narrationOf = async (
+        /** @type {(input: any) => any} */ flow,
+        /** @type {(trace: any) => any} */ edit = (trace) => trace
+    ) => {
+        const { trace } = await recordEffect(flow('in'));
+        // Without timings, so the lines are the same on every run.
+        const untimed = { ...trace, trace: trace.trace.map(({ durationMs, ...entry }) => entry) };
+        /** @type {string[]} */
+        const lines = [];
+        await timeTravel(flow, edit(untimed), { log: (/** @type {string} */ line) => void lines.push(line) });
+        return lines;
+    };
+
+    it("should name what cancelled a Parallel, and whether it was settled, in timeTravel's tree", async function () {
+        const declined = () =>
+            Command(
+                function cmdCheckFraud() {
+                    return 'flagged';
+                },
+                () => Failure('fraud')
+            );
+        const held = () =>
+            Command(function cmdReserve() {
+                return 'held';
+            });
+        const cancelled = await narrationOf(effectPipe(() => Parallel([declined(), held()])));
+        assert.ok(cancelled.includes('└─ Parallel, cancelled by branch 0'), cancelled.join('\n'));
+        const settled = await narrationOf(effectPipe(() => Parallel([declined(), held()], { settled: true })));
+        assert.ok(settled.includes('└─ Parallel, settled'), settled.join('\n'));
+        // A nested Parallel's decision sits at its own path, under the branch it ran in.
+        const slowHeld = () =>
+            Command(async function cmdSlowReserve() {
+                await new Promise((resolve) => setTimeout(resolve, 20));
+                return 'held';
+            });
+        const nested = await narrationOf(effectPipe(() => Parallel([declined(), Parallel([slowHeld(), slowHeld()])])));
+        assert.ok(nested.includes('└─ Parallel, cancelled by branch 0'), nested.join('\n'));
+        assert.ok(nested.includes('   └─ branch 1'), nested.join('\n'));
+        assert.ok(nested.includes('      └─ Parallel, cancelled by an enclosing Parallel'), nested.join('\n'));
+        // A trace without decisions, as one from before they were recorded, names the Parallel alone.
+        const undecided = await narrationOf(
+            effectPipe(() => Parallel([held(), held()])),
+            (trace) => ({
+                ...trace,
+                trace: trace.trace.filter((/** @type {any} */ e) => e.command !== 'Parallel')
+            })
+        );
+        assert.ok(undecided.includes('└─ Parallel'), undecided.join('\n'));
+        assert.match(undecided[0], /: 2 recorded steps$/);
+    });
+
+    it("should keep positions and attempts of more than one digit apart in timeTravel's tree", async function () {
+        const step = (/** @type {number} */ n) => () => Command(() => n, undefined, { name: `cmdStep${n}` });
+        const flaky = () =>
+            Retry(
+                Command(function cmdFlaky() {
+                    throw new Error('ECONNRESET');
+                }),
+                {
+                    retries: 10,
+                    delay: 0,
+                    onExhausted: () => Command(() => 'fallback', undefined, { name: 'cmdFallback' })
+                }
+            );
+        const flow = /** @type {any} */ (effectPipe)(...Array.from({ length: 10 }, (_, n) => step(n)), flaky);
+        const lines = await narrationOf(flow);
+        assert.equal(lines[2], '├─ cmdStep0 returned 0');
+        assert.equal(lines[11], '├─ cmdStep9 returned 9');
+        assert.equal(lines[12], '└─ Retry');
+        assert.equal(lines[23], '   ├─ attempt 10: cmdFlaky threw {"name":"Error","message":"ECONNRESET"}');
+        assert.equal(lines[24], '   └─ fallback: cmdFallback returned "fallback"');
+    });
+
+    it('should narrate the steps a replay reached before a step the trace lacks', async function () {
+        // The step the trace lacks is reported to the narration with no outcome, and drawing it would have thrown.
+        const flow = effectPipe(
+            () =>
+                Command(function cmdRead() {
+                    return 1;
+                }),
+            () =>
+                Command(function cmdWrite() {
+                    return 2;
+                })
+        );
+        const lines = await narrationOf(flow, (trace) => ({ ...trace, trace: trace.trace.slice(0, 1) }));
+        assert.ok(lines.includes('└─ cmdRead returned 1'), lines.join('\n'));
+        assert.ok(lines.includes('Replay finished with state: Failure'), lines.join('\n'));
+    });
+
     it("should print a nested error's message in timeTravel's closing line", async function () {
         // The closing line printed a Retry's exhaustion as JSON, and an Error's message is not enumerable, so
         // lastError read {"code": "invalid_amount"} with no message, while the step lines above it had one.
@@ -1346,8 +1519,8 @@ describe('Replay', function () {
         assert.equal(result.type, 'Success');
         const out = lines.join('\n');
         assert.match(out, /trace was recorded at deadbee, replaying against cafe123/);
-        assert.match(out, /Replaying 'checkout' \(2 recorded steps\)/);
-        assert.match(out, /Step 1: cmdRead returned/);
+        assert.match(out, /^Replaying 'checkout': 2 recorded steps$/m);
+        assert.match(out, /^└─ cmdRead returned \{"row":1\}$/m);
         assert.doesNotMatch(out, / in \d/, 'a hand-written trace has no timings to narrate');
         assert.match(out, /1 recorded step was never reached: cmdWrite\. The flow diverged/);
     });

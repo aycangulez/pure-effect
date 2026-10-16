@@ -279,7 +279,7 @@ Each of `recorder`, `fromTrace`, `replayEffect` and `timeTravel` is short and ha
 - `recorder` keeps only its entries and its count of dropped ones. `traceEntry`, `copyAndRedact`, `recordError` and `packTrace` take the `RecorderSettings` they need, `redact` and `stack`.
 - `resolveByPath` takes a `PathIndex` of the trace (its entries by path, the kind of node at each position, and the recorded cancellations), and so do `throwIfReshaped` and `stoppedInProduction`. A step named 'Parallel' asks for the decision recorded under that name, so one comparison serves a Command and a decision.
 - `replayHook` builds the `onStep` a replay runs under, with the first failure of a `Resolver` or `onResolved`, which `replayEffect` rejects with. `replayContext` and `droppedEntriesOf` read the trace's own fields.
-- `timeTravel` reads as its narration, with `traceWarnings`, `stepTimings`, `unreachedWarning` and `formatForLog` saying what it logs.
+- `timeTravel` reads as its narration, with `traceWarnings`, `stepTimings`, `narrationTree`, `unreachedWarning` and `formatForLog` saying what it logs.
 
 Until October 2026 these parts were closures nested in the four functions, which ran from 77 to 118 lines, and `fromTrace` held both resolvers, its path resolver testing for a `Parallel` step in a branch of its own that repeated the rest.
 
@@ -422,7 +422,7 @@ And since a trace matches a Command by name, a Command whose result changes shap
 
 A throw from `onResolved` stops the replay, and `replayEffect` rejects with the observer's own error, carried through a harness-marked stand-in so nothing in the flow absorbs it. A `Resolver`'s throw goes the same way, for the same reason. It is not absorbed the way the recorder absorbs a throw from `redact`, because step assertions are one of the things the seam is for, and a swallowed assertion is a test that cannot fail.
 
-`timeTravel` narrates through `onResolved` and returns what `replayEffect` returns for a trace, `{ result, unreached }`. It returned the bare outcome until 0.20.0, so a test that wanted the unreached steps it had just narrated called `replayEffect` again.
+`timeTravel` narrates through `onResolved` and returns what `replayEffect` returns for a trace, `{ result, unreached }`. It draws the steps as a tree once the replay has ended (`narrationTree`), each under the `Parallel` branch or `Retry` attempt its path names, and labels each `Parallel` from its recorded decision. It logged each step as it resolved until October 2026, numbered in completion order and with no path, so a `Parallel`'s branches and a `Retry`'s attempts interleaved, and the header's count left out the decisions; DX experiments raised both in three rounds. Drawn after the replay, it orders steps by where they ran, and a `finally` draws the steps a rejected replay reached. It returned the bare outcome until 0.20.0, so a test that wanted the unreached steps it had just narrated called `replayEffect` again.
 
 - It looks each step's timing up by path, or by position for a trace without paths.
 - It falls back to `String(v)` for a value `JSON.stringify` cannot print, such as a `BigInt` or a cycle.

@@ -2954,29 +2954,145 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
     }
 
     for (const warning of traceWarnings(traceLog, trace, version)) log(warning);
-    // Decisions are not narrated as steps, so the header counts only Commands.
-    const commandCount = trace.filter((e) => !isDecisionEntry(e)).length;
-    log(`Replaying '${flowName || 'flow'}' (${commandCount} recorded ${commandCount === 1 ? 'step' : 'steps'})`);
+    const decisions = trace.filter(isDecisionEntry);
+    const steps = counted(trace.length - decisions.length, 'recorded step');
+    const andDecisions = decisions.length ? ` and ${counted(decisions.length, 'Parallel decision')}` : '';
+    log(`Replaying '${flowName || 'flow'}': ${steps}${andDecisions}`);
     log(`Initial input: ${formatForLog(initialInput)}`);
-    const timing = stepTimings(trace);
-    // `replayEffect` defaults the context to the trace's.
-    const { result, unreached = [] } = await replayEffect(flowFn(initialInput), traceLog, {
-        context,
-        onResolved: (step, outcome) => {
-            // A step the trace does not hold is refused or run live by `replayEffect`, not narrated here.
-            if (outcome === undefined) return;
-            log(
-                'error' in outcome
-                    ? `Step ${step.index + 1}: ${step.name} threw${timing(step)} ${formatForLog(outcome.error)}`
-                    : `Step ${step.index + 1}: ${step.name} returned${timing(step)} ${formatForLog(outcome.result)}`
-            );
-        }
-    });
+    /** @type {NarratedStep[]} */
+    const narrated = [];
+    let replay;
+    try {
+        // `replayEffect` defaults the context to the trace's.
+        replay = await replayEffect(flowFn(initialInput), traceLog, {
+            context,
+            onResolved: (step, outcome) => {
+                // A step the trace does not hold is refused or run live by `replayEffect`, not narrated here.
+                if (outcome !== undefined) narrated.push({ step, outcome });
+            }
+        });
+    } finally {
+        // Once the replay has ended, so a step's place in the flow orders it rather than when it finished, and a
+        // replay that rejects still shows the steps it reached.
+        const decisionAt = new Map(decisions.map((e) => [e.path, e.result]));
+        for (const line of narrationTree(narrated, decisionAt, stepTimings(trace))) log(line);
+    }
+    const { result, unreached = [] } = replay;
     log(`Replay finished with state: ${result.type}`);
     log(result.type === 'Failure' ? `Error: ${formatForLog(result.error)}` : `Result: ${formatForLog(result.value)}`);
     const warning = unreachedWarning(result, unreached);
     if (warning !== undefined) log(warning);
     return { result, unreached };
+};
+
+/**
+ * Names a number of things, for a message.
+ * @param {number} count
+ * @param {string} thing - Singular
+ * @returns {string}
+ */
+const counted = (count, thing) => `${count} ${thing}${count === 1 ? '' : 's'}`;
+
+/**
+ * A Command a replay answered, for `timeTravel` to narrate.
+ * @typedef {{ step: ReplayStep, outcome: ReplayOutcome }} NarratedStep
+ */
+
+/**
+ * One position in a sequence of steps, as `timeTravel` draws it: a Command, or a `Parallel` or `Retry` holding a
+ * sequence per branch or attempt, keyed by its number, with a fallback last.
+ * @typedef {{ kind: 'step', narrated: NarratedStep }
+ *   | { kind: 'Parallel' | 'Retry', decisionPath: string, groups: Map<number, StepSequence> }} StepNode
+ * @typedef {Map<number, StepNode>} StepSequence
+ */
+
+/**
+ * Draws the steps a replay answered as the flow they ran in, from their paths: `3p1/0r2/0` is the first step of
+ * attempt 2 of the first step of branch 1 of the Parallel at position 3.
+ * @param {NarratedStep[]} narrated
+ * @param {Map<string | undefined, any>} decisionAt - Each recorded Parallel decision, by its path
+ * @param {(step: ReplayStep) => string} timing
+ * @returns {string[]}
+ */
+const narrationTree = (narrated, decisionAt, timing) => {
+    /** @type {StepSequence} */
+    const root = new Map();
+    for (const entry of narrated) {
+        const segments = (entry.step.path ?? String(entry.step.index)).split('/');
+        let sequence = root;
+        let prefix = '';
+        for (const segment of segments.slice(0, -1)) {
+            const [, position, kind, group] = /** @type {RegExpExecArray} */ (/^(\d+)([pr])(\d+|f)$/.exec(segment));
+            let node = /** @type {Exclude<StepNode, { kind: 'step' }> | undefined} */ (sequence.get(Number(position)));
+            if (node === undefined) {
+                node = {
+                    kind: kind === 'p' ? 'Parallel' : 'Retry',
+                    decisionPath: `${prefix}${position}p`,
+                    groups: new Map()
+                };
+                sequence.set(Number(position), node);
+            }
+            // The fallback sorts after every attempt.
+            const key = group === 'f' ? Infinity : Number(group);
+            let inner = node.groups.get(key);
+            if (inner === undefined) {
+                inner = new Map();
+                node.groups.set(key, inner);
+            }
+            sequence = inner;
+            prefix += `${segment}/`;
+        }
+        sequence.set(Number(segments[segments.length - 1]), { kind: 'step', narrated: entry });
+    }
+    const stepLine = (/** @type {NarratedStep} */ { step, outcome }) =>
+        'error' in outcome
+            ? `${step.name} threw${timing(step)} ${formatForLog(outcome.error, 0)}`
+            : `${step.name} returned${timing(step)} ${formatForLog(outcome.result, 0)}`;
+    const nodeLine = (/** @type {Exclude<StepNode, { kind: 'step' }>} */ node) => {
+        if (node.kind === 'Retry') return 'Retry';
+        const decision = decisionAt.get(node.decisionPath);
+        const cancelled =
+            decision?.cancelled !== true
+                ? ''
+                : decision.branch === null
+                  ? ', cancelled by an enclosing Parallel'
+                  : `, cancelled by branch ${decision.branch}`;
+        return `Parallel${cancelled}${decision?.settled === true ? ', settled' : ''}`;
+    };
+    /** @type {string[]} */
+    const lines = [];
+    /** Draws `[label, node]` pairs under `indent`, each a line, and a node holding more than one step as a subtree. */
+    const draw = (/** @type {[string, StepNode | StepSequence][]} */ rows, /** @type {string} */ indent) =>
+        rows.forEach(([label, content], i) => {
+            const last = i === rows.length - 1;
+            const lead = `${indent}${last ? '└─ ' : '├─ '}${label}`;
+            const inner = `${indent}${last ? '   ' : '│  '}`;
+            if (content instanceof Map) {
+                const only = content.size === 1 ? [...content.values()][0] : undefined;
+                // A branch or attempt holding one Command reads as one line.
+                if (only?.kind === 'step') lines.push(`${lead}: ${stepLine(only.narrated)}`);
+                else {
+                    lines.push(lead);
+                    draw(rowsOf(content), inner);
+                }
+            } else if (content.kind === 'step') lines.push(`${lead}${stepLine(content.narrated)}`);
+            else {
+                lines.push(`${lead}${nodeLine(content)}`);
+                // Branches run at the same time, so array order is restored rather than taken from the order each
+                // first answered in, which a replay happens to keep.
+                const sorted = [...content.groups].sort(([a], [b]) => a - b);
+                const name = content.kind === 'Parallel' ? 'branch' : 'attempt';
+                draw(
+                    sorted.map(([key, group]) => [key === Infinity ? 'fallback' : `${name} ${key}`, group]),
+                    inner
+                );
+            }
+        });
+    // A sequence's steps run one after another, so the order they first answered in is already their order.
+    const rowsOf = (/** @type {StepSequence} */ sequence) =>
+        /** @type {[string, StepNode][]} */ ([...sequence.values()].map((node) => ['', node]));
+    draw(rowsOf(root), '');
+    return lines;
 };
 
 /**
@@ -3042,13 +3158,14 @@ const unreachedWarning = (result, unreached) => {
  * `lastError` included, and a value JSON cannot print falls back to `String`, since narration must not be what fails a
  * replay.
  * @param {any} v
+ * @param {number} [indent] - 0 prints it on one line, as a line of `timeTravel`'s tree does
  * @returns {string | undefined}
  */
-const formatForLog = (v) => {
+const formatForLog = (v, indent = 2) => {
     try {
         const withMessages = (/** @type {string} */ key, /** @type {any} */ value) =>
             value instanceof Error ? { ...value, name: value.name, message: value.message } : value;
-        return JSON.stringify(v, withMessages, 2);
+        return JSON.stringify(v, withMessages, indent);
     } catch {
         return String(v);
     }
