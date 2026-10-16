@@ -370,7 +370,7 @@ describe('examples/recording-example.js', function () {
         await runEffect(effectPipe(read)({ id: 1 }), { flowName: 'piped' });
         assert.equal(warnings.length, 1);
         assert.equal(warnings[0][1], 'bare');
-        assert.match(warnings[0][0], /effectPipe/);
+        assert.match(warnings[0][0], /If the flow takes an input, build its outermost flow with effectPipe/);
     });
 
     it('should warn once per flow when it keeps a trace maxEntries cut short', async function () {

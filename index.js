@@ -1375,16 +1375,20 @@ const runBounded = async (tasks, limit) => {
     await Promise.all(Array.from({ length: limit }, worker));
 };
 
+/** The longest wait `setTimeout` can hold, about 24.8 days; a longer one fires at once. */
+const longestWait = 2 ** 31 - 1;
+
 /**
  * Sleeps, but stops early when the branch is cancelled. Resolves either way; the caller's abort check turns a
- * cancelled wait into a Failure.
+ * cancelled wait into a Failure. A wait longer than `setTimeout` can hold is capped there.
  *
- * @param {number} ms
+ * @param {number} requested - Milliseconds
  * @param {AbortSignal} [signal]
  * @returns {Promise<void>}
  */
-const delayFor = (ms, signal) =>
+const delayFor = (requested, signal) =>
     new Promise((resolve) => {
+        const ms = Math.min(requested, longestWait);
         if (!signal) {
             setTimeout(resolve, ms);
             return;
@@ -2522,12 +2526,14 @@ const recordedOutcome = (entry, step) => {
 
 /**
  * A trace's entries indexed for matching by path: each entry by its path, the kind of node the recorded run had at
- * each position its steps passed through, and the recorded decisions that cancelled branches.
+ * each position its steps passed through, the recorded decisions that cancelled branches, and the last attempt of
+ * each Retry that gave up and ran its fallback.
  * @typedef {{
  *   entries: TraceEntry[],
  *   byPath: Map<string | undefined, TraceEntry>,
  *   kinds: Map<string, NodeKind>,
- *   cancellations: TraceEntry[]
+ *   cancellations: TraceEntry[],
+ *   gaveUpAfter: Map<string, number>
  * }} PathIndex
  */
 
@@ -2545,8 +2551,36 @@ const indexByPath = (entries) => {
         entries,
         byPath,
         kinds: new Map(entries.flatMap((e) => nodesAlong(/** @type {string} */ (e.path)))),
-        cancellations: entries.filter(isDecisionEntry).filter((e) => e.result?.cancelled === true)
+        cancellations: entries.filter(isDecisionEntry).filter((e) => e.result?.cancelled === true),
+        gaveUpAfter: lastAttemptsBeforeFallback(entries)
     };
+};
+
+/**
+ * The last attempt each Retry made before it ran its fallback, by the Retry's position. Only a fallback proves the
+ * recorded Retry gave up: a missing attempt can also be one an `onBeforeCommand` hook vetoed.
+ * @param {TraceEntry[]} entries
+ * @returns {Map<string, number>}
+ */
+const lastAttemptsBeforeFallback = (entries) => {
+    /** @type {Map<string, number>} */
+    const lastAttempt = new Map();
+    /** @type {Set<string>} */
+    const fellBack = new Set();
+    for (const { path } of entries) {
+        if (typeof path !== 'string') continue;
+        let prefix = '';
+        for (const segment of path.split('/').slice(0, -1)) {
+            const retry = /^(\d+)r(\d+|f)$/.exec(segment);
+            if (retry) {
+                const at = prefix + retry[1];
+                if (retry[2] === 'f') fellBack.add(at);
+                else lastAttempt.set(at, Math.max(lastAttempt.get(at) ?? 0, Number(retry[2])));
+            }
+            prefix += `${segment}/`;
+        }
+    }
+    return new Map([...lastAttempt].filter(([at]) => fellBack.has(at)));
 };
 
 /**
@@ -2567,6 +2601,7 @@ const resolveByPath = (recorded, answerFrom) => {
             return answerFrom(entry, step);
         }
         throwIfReshaped(recorded, step);
+        throwIfRetriedPast(recorded, step);
         if (stoppedInProduction(recorded, step.path)) throw replayCutError(/** @type {string} */ (step.path));
         return undefined;
     };
@@ -2600,6 +2635,30 @@ const throwIfReshaped = (recorded, step) => {
         expected,
         actual
     });
+};
+
+/**
+ * Refuses a step the trace lacks in an attempt past the last one a recorded Retry made before it gave up, as when
+ * `retries` was raised. That is a change of shape too, which reported as missing would run live under 'execute'.
+ * @param {PathIndex} recorded
+ * @param {ReplayStep} step
+ */
+const throwIfRetriedPast = (recorded, step) => {
+    if (typeof step.path !== 'string') return;
+    let prefix = '';
+    for (const segment of step.path.split('/').slice(0, -1)) {
+        const retry = /^(\d+)r(\d+)$/.exec(segment);
+        const at = retry ? prefix + retry[1] : '';
+        const last = recorded.gaveUpAfter.get(at);
+        if (retry && last !== undefined && Number(retry[2]) > last) {
+            throw timeParadoxAt(
+                `path '${at}'`,
+                `this Retry asks for attempt ${retry[2]}, and the trace recorded it giving up after attempt ${last}.`,
+                { index: step.index, path: at, expected: last, actual: Number(retry[2]) }
+            );
+        }
+        prefix += `${segment}/`;
+    }
 };
 
 /**
@@ -2961,6 +3020,7 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
     log(`Initial input: ${formatForLog(initialInput)}`);
     /** @type {NarratedStep[]} */
     const narrated = [];
+    const timing = stepTimings(trace);
     let replay;
     try {
         // `replayEffect` defaults the context to the trace's.
@@ -2968,14 +3028,20 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
             context,
             onResolved: (step, outcome) => {
                 // A step the trace does not hold is refused or run live by `replayEffect`, not narrated here.
-                if (outcome !== undefined) narrated.push({ step, outcome });
+                if (outcome === undefined) return;
+                // Written now, before the flow is handed the answer and can change it.
+                const line =
+                    'error' in outcome
+                        ? `${step.name} threw${timing(step)} ${formatForLog(outcome.error, 0)}`
+                        : `${step.name} returned${timing(step)} ${formatForLog(outcome.result, 0)}`;
+                narrated.push({ step, line });
             }
         });
     } finally {
         // Once the replay has ended, so a step's place in the flow orders it rather than when it finished, and a
         // replay that rejects still shows the steps it reached.
         const decisionAt = new Map(decisions.map((e) => [e.path, e.result]));
-        for (const line of narrationTree(narrated, decisionAt, stepTimings(trace))) log(line);
+        for (const line of narrationTree(narrated, decisionAt)) log(line);
     }
     const { result, unreached = [] } = replay;
     log(`Replay finished with state: ${result.type}`);
@@ -2994,8 +3060,8 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
 const counted = (count, thing) => `${count} ${thing}${count === 1 ? '' : 's'}`;
 
 /**
- * A Command a replay answered, for `timeTravel` to narrate.
- * @typedef {{ step: ReplayStep, outcome: ReplayOutcome }} NarratedStep
+ * A Command a replay answered, and its line in `timeTravel`'s narration.
+ * @typedef {{ step: ReplayStep, line: string }} NarratedStep
  */
 
 /**
@@ -3011,10 +3077,9 @@ const counted = (count, thing) => `${count} ${thing}${count === 1 ? '' : 's'}`;
  * attempt 2 of the first step of branch 1 of the Parallel at position 3.
  * @param {NarratedStep[]} narrated
  * @param {Map<string | undefined, any>} decisionAt - Each recorded Parallel decision, by its path
- * @param {(step: ReplayStep) => string} timing
  * @returns {string[]}
  */
-const narrationTree = (narrated, decisionAt, timing) => {
+const narrationTree = (narrated, decisionAt) => {
     /** @type {StepSequence} */
     const root = new Map();
     for (const entry of narrated) {
@@ -3044,10 +3109,6 @@ const narrationTree = (narrated, decisionAt, timing) => {
         }
         sequence.set(Number(segments[segments.length - 1]), { kind: 'step', narrated: entry });
     }
-    const stepLine = (/** @type {NarratedStep} */ { step, outcome }) =>
-        'error' in outcome
-            ? `${step.name} threw${timing(step)} ${formatForLog(outcome.error, 0)}`
-            : `${step.name} returned${timing(step)} ${formatForLog(outcome.result, 0)}`;
     const nodeLine = (/** @type {Exclude<StepNode, { kind: 'step' }>} */ node) => {
         if (node.kind === 'Retry') return 'Retry';
         const decision = decisionAt.get(node.decisionPath);
@@ -3070,12 +3131,12 @@ const narrationTree = (narrated, decisionAt, timing) => {
             if (content instanceof Map) {
                 const only = content.size === 1 ? [...content.values()][0] : undefined;
                 // A branch or attempt holding one Command reads as one line.
-                if (only?.kind === 'step') lines.push(`${lead}: ${stepLine(only.narrated)}`);
+                if (only?.kind === 'step') lines.push(`${lead}: ${only.narrated.line}`);
                 else {
                     lines.push(lead);
                     draw(rowsOf(content), inner);
                 }
-            } else if (content.kind === 'step') lines.push(`${lead}${stepLine(content.narrated)}`);
+            } else if (content.kind === 'step') lines.push(`${lead}${content.narrated.line}`);
             else {
                 lines.push(`${lead}${nodeLine(content)}`);
                 // Branches run at the same time, so array order is restored rather than taken from the order each
@@ -3110,8 +3171,9 @@ const traceWarnings = (traceLog, trace, version) => {
     }
     if (traceLog.initialInput === undefined) {
         warnings.push(
-            'Warning: the trace holds no initial input, so the flow is rebuilt from undefined. A trace holds ' +
-                'the input only of a flow built with effectPipe or effectGen.'
+            'Warning: the trace holds no initial input, so the flow is rebuilt from undefined. A trace holds the ' +
+                'input only of a flow effectPipe or effectGen built, and cannot tell an input of undefined from ' +
+                'none. If the flow takes an input, build its outermost flow with effectPipe or effectGen.'
         );
     }
     const anonymous = trace.filter((e) => e.command === 'anonymous').length;

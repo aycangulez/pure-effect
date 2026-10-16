@@ -152,6 +152,35 @@ describe('Retry onExhausted', function () {
 });
 
 describe('Retry options and the removed global retry', function () {
+    it('should wait as long as setTimeout can hold for a backoff longer than that, rather than not at all', async function () {
+        // A wait past 2^31 - 1 ms overflowed setTimeout, which fired after 1 ms, so a long backoff hammered the gateway
+        // it was meant to spare. Here the sibling's failure cancels the wait, which still has days to run.
+        let attempts = 0;
+        const flaky = Retry(
+            Command(function cmdCharge() {
+                attempts++;
+                throw new Error('503');
+            }),
+            { retries: 1, delay: 3e9 }
+        );
+        const failing = Command(
+            async function cmdLater() {
+                await new Promise((resolve) => setTimeout(resolve, 30));
+            },
+            () => Failure('declined')
+        );
+        /** @type {string[]} */
+        const warnings = [];
+        const onWarning = (/** @type {Error} */ w) => void warnings.push(w.name);
+        process.on('warning', onWarning);
+        try {
+            assert.deepEqual(await runEffect(Parallel([flaky, failing])), Failure('declined'));
+        } finally {
+            process.off('warning', onWarning);
+        }
+        assert.equal(attempts, 1, 'the second attempt waited');
+        assert.deepEqual(warnings, []);
+    });
     beforeEach(function () {
         configureEffect();
     });

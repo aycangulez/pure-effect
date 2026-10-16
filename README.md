@@ -9,7 +9,7 @@
 - Read request values, such as the tenant, from any step with `Ask`, without passing them along
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks, with a reference integration to copy
-- Zero dependencies, about 12 KB minified and gzipped
+- Zero dependencies, about 13 KB minified and gzipped
 - Works in JavaScript on Node 22 or later, and in TypeScript 5.1 or later (full generics, bundled `.d.ts`)
 
 ## Table of Contents
@@ -1571,7 +1571,7 @@ Returns `{ type: 'Ask', next }`. Passes the `context` from `runEffect` into `nex
 Returns `{ type: 'Retry', effect, options, next }`. See [Retrying Transient Failures](#retrying-transient-failures).
 
 - `options.retries`: tries after the first, a positive integer (default `3`), so `2` makes at most three calls. Anything else throws, `0` included: to handle an outcome without retrying, branch on it in the Command's `next`, or isolate a failing branch with `Parallel`'s `settled`.
-- `options.delay`: milliseconds before the first retry, a finite number of 0 or more (default `100`).
+- `options.delay`: milliseconds before the first retry, a finite number of 0 or more (default `100`). A wait that `backoff` grows past about 24.8 days, the longest `setTimeout` holds, is capped there.
 - `options.backoff`: the multiplier applied to the delay on each attempt, a finite number of 0 or more (default `1`, flat).
 - `options.onExhausted(error)`: a fallback Effect to run when every attempt has failed, given `{ retryExhausted, lastError, retries }`. Its success feeds `next`; its failure is returned unwrapped. Per use only.
 - An option set to `undefined` keeps its default.
@@ -1690,7 +1690,7 @@ Runs a flow with each Command answered from a trace instead of run, and returns 
 - A resolver is also asked about each `Parallel`, with `step.type` set to `'Parallel'`. Answering with the recorded cancellation as `{ result }` replays it as production decided, and anything else replays it by timing.
 - `options.context`: the context for `Ask`, by default the one the trace recorded. A resolver has none, so pass one if the flow reads `Ask`: a replay that reaches an `Ask` with no context, from a resolver or a trace that recorded none, stops with a `ReplayError`. A trace whose context could not be recorded refuses to replay without one.
 - `options.onMissing`: `'throw'` (default) stops at a step the trace lacks; `'execute'` runs its Command for real, so use it only where Commands reach test doubles or only read.
-- A trace that dropped entries refuses `'execute'`. A flow that changed shape, as when a Command is newly wrapped in `Retry` or moved into a new `Parallel` branch, stops at a `TimeParadox` even under `'execute'`.
+- A trace that dropped entries refuses `'execute'`. A flow that changed shape, as when a Command is newly wrapped in `Retry` or moved into a new `Parallel` branch, or a `Retry` is given more attempts than the recorded one made before its fallback, stops at a `TimeParadox` even under `'execute'`.
 - `options.fastRetry` (default `true`): strip `Retry` delays.
 - `options.hooks` (default `false`): run the replay inside the configured hooks, a configured recorder included, so they see the replayed steps. Off, a replay cannot reach a telemetry backend or a trace sink.
 - `options.onResolved(step, outcome)`: observes each replayed step. A throw stops the replay, and `replayEffect` rejects with it; it never changes an outcome.

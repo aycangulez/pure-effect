@@ -15,6 +15,8 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 
 ### Fixed
 
+- A replay refuses a `Retry` given more attempts than the recorded one made before its fallback, as a `TimeParadox`, rather than reporting a missing step and running the new attempts live under `onMissing: 'execute'`.
+- A `Retry` wait longer than `setTimeout` can hold, about 24.8 days, is capped there, rather than overflowing and retrying after 1 ms.
 - A Command node built by hand whose `cmd` is not a function rejects the run with an `EffectTypeError`, rather than failing as an I/O fault that `Retry` retried.
 - A `step(...)` a generator body never runs with `yield*`, written as a bare statement or only tested for truth, throws an `EffectTypeError` rather than being skipped, which dropped its `Failure` or left its Command unrun.
 - A replay refuses a `Parallel` whose `settled` option changed since the recording, as a `TimeParadox`, since a recorded decision now says whether it was settled. Traces recorded before this are not checked.
@@ -23,6 +25,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 - `runEffect` refuses a context that is not an object or `null`, and so does the `context` option of `recordEffect`, `replayEffect` and `timeTravel`.
 - `recordEffect` given no context records the empty one without handing it to `redact`, so a `redact` that throws on it no longer blocks the replay.
 - `Parallel` refuses a fourth argument, as it already refused a third after the options.
+- The warning for a trace that holds no initial input, in `timeTravel` and in the recording example, no longer tells a flow that takes no input to change how it is built.
 - `timeTravel`'s closing line prints the message of an error nested in the result, such as a `Retry`'s `lastError`.
 
 ## [0.20.1] - 2026-10-15

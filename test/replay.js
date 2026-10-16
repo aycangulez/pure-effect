@@ -249,6 +249,23 @@ describe('Replay', function () {
         assert.equal(lines[24], '   └─ fallback: cmdFallback returned "fallback"');
     });
 
+    it('should narrate the value a step was answered with, not what the flow changed it to', async function () {
+        // The tree is drawn once the replay ends, and it held the answers themselves, so a step that changed one in
+        // place showed the changed value rather than the recorded one.
+        const flow = effectPipe(
+            () =>
+                Command(function cmdLoadStock() {
+                    return { apple: 5 };
+                }),
+            (/** @type {{ apple: number }} */ levels) => {
+                levels.apple = 0;
+                return Success(levels);
+            }
+        );
+        const lines = await narrationOf(flow);
+        assert.ok(lines.includes('└─ cmdLoadStock returned {"apple":5}'), lines.join('\n'));
+    });
+
     it('should narrate the steps a replay reached before a step the trace lacks', async function () {
         // The step the trace lacks is reported to the narration with no outcome, and drawing it would have thrown.
         const flow = effectPipe(
@@ -817,6 +834,60 @@ describe('Replay', function () {
             const wider = flowOf(() => Parallel([step('cmdA'), step('cmdB'), Success('c')]));
             const { result } = await replayEffect(wider('in'), uncounted);
             assert.deepEqual(result, Success(['cmdA', 'cmdB', 'c']));
+        });
+
+        it('should raise a TimeParadox for a Retry given more attempts than the recorded one gave up after', async function () {
+            // The extra attempt was reported as a step the trace lacks, blamed on a veto or the end of the recording,
+            // and under onMissing: 'execute' it ran live before the fallback was answered from the old trace.
+            let calls = 0;
+            const flow = (/** @type {number} */ retries) =>
+                flowOf(() =>
+                    Retry(
+                        Command(function cmdCharge() {
+                            calls++;
+                            throw new Error('503');
+                        }),
+                        { retries, delay: 0, onExhausted: () => step('cmdChargeSecondary') }
+                    )
+                );
+            const { trace } = await recordEffect(flow(1)('in'));
+            calls = 0;
+            for (const onMissing of /** @type {const} */ (['throw', 'execute'])) {
+                const { result } = await replayEffect(flow(3)('in'), trace, { onMissing });
+                assert.deepEqual(paradox(result), { name: 'TimeParadox', path: '0', expected: 1, actual: 2 });
+                assert.match(
+                    /** @type {any} */ (errorOf(result)).message,
+                    /^Time paradox at path '0': this Retry asks for attempt 2, and the trace recorded it giving up after attempt 1\.$/
+                );
+            }
+            assert.equal(calls, 0, 'a Retry given more attempts runs nothing live');
+            // Fewer attempts reach the recorded fallback, and the attempts left over are unreached, as before.
+            const { trace: longer } = await recordEffect(flow(2)('in'));
+            const { result: fewer, unreached } = await replayEffect(flow(1)('in'), longer);
+            assert.deepEqual(fewer, Success('cmdChargeSecondary'));
+            assert.deepEqual(
+                unreached.map((e) => e.path),
+                ['0r2/0']
+            );
+        });
+
+        it('should find a Retry given more attempts inside a Parallel branch, and leave a missing step alone', async function () {
+            const throwing = (/** @type {number} */ retries) =>
+                Retry(
+                    Command(function cmdCharge() {
+                        throw new Error('503');
+                    }),
+                    { retries, delay: 0, onExhausted: () => step('cmdChargeSecondary') }
+                );
+            const flow = (/** @type {number} */ retries) => flowOf(() => Parallel([step('cmdA'), throwing(retries)]));
+            const { trace } = await recordEffect(flow(10)('in'));
+            const { result } = await replayEffect(flow(12)('in'), trace);
+            assert.deepEqual(paradox(result), { name: 'TimeParadox', path: '0p1/0', expected: 10, actual: 11 });
+            // A step missing from an attempt the Retry did make, as one a hook vetoed is, stays a missing step.
+            const vetoed = { ...trace, trace: trace.trace.filter((e) => e.path !== '0p1/0r4/0') };
+            const { result: missing } = await replayEffect(flow(10)('in'), vetoed);
+            assert.equal(/** @type {any} */ (errorOf(missing)).name, 'ReplayError');
+            assert.equal(/** @type {any} */ (errorOf(missing)).path, '0p1/0r4/0');
         });
 
         it('should raise a TimeParadox for a Parallel whose settled option changed', async function () {
@@ -1614,6 +1685,14 @@ describe('Replay', function () {
         const log = (/** @type {string} */ line) => void lines.push(line);
         await timeTravel(bare, (await recordEffect(bare())).trace, { log });
         assert.ok(lines.some((l) => /^Warning: the trace holds no initial input/.test(l)));
+        // A flow that takes no input gets this warning too, since a trace cannot tell undefined from none, so the
+        // advice is for a flow that does take one.
+        assert.ok(
+            lines.some((l) =>
+                l.endsWith('If the flow takes an input, build its outermost flow with effectPipe or effectGen.')
+            ),
+            lines.join('\n')
+        );
 
         lines.length = 0;
         const { flow } = makeFlow();

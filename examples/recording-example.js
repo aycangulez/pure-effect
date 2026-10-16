@@ -116,7 +116,8 @@ export function recordingHooks(options = {}) {
             warnOnce(
                 'input',
                 'the flow carries no input, so its traces hold none and timeTravel rebuilds it from undefined. ' +
-                    'Build the outermost flow with effectPipe, even as a one-step pipeline.'
+                    'If the flow takes an input, build its outermost flow with effectPipe, even as a one-step ' +
+                    'pipeline.'
             );
         }
         if (dropped > 0) {
