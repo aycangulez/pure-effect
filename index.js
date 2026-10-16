@@ -2603,6 +2603,7 @@ const resolveByPath = (recorded, answerFrom) => {
         throwIfReshaped(recorded, step);
         throwIfRetriedPast(recorded, step);
         if (stoppedInProduction(recorded, step.path)) throw replayCutError(/** @type {string} */ (step.path));
+        throwIfAttemptUnrecorded(recorded, step);
         return undefined;
     };
     const missing = (/** @type {ReplayStep} */ step) => `Trace has no step at path '${step.path}' for '${step.name}'`;
@@ -2655,6 +2656,35 @@ const throwIfRetriedPast = (recorded, step) => {
                 `path '${at}'`,
                 `this Retry asks for attempt ${retry[2]}, and the trace recorded it giving up after attempt ${last}.`,
                 { index: step.index, path: at, expected: last, actual: Number(retry[2]) }
+            );
+        }
+        prefix += `${segment}/`;
+    }
+};
+
+/**
+ * Refuses a step the trace lacks in an attempt of a Retry the trace has nothing for, when it has the attempt before.
+ * The recorded Retry stopped there, either because the flow's Retry now makes more attempts or because a hook vetoed
+ * this one, and a trace cannot tell which; either way the step must not run live, so it is refused under any
+ * `onMissing`. With a recorded fallback, `throwIfRetriedPast` names the change as a TimeParadox first.
+ * @param {PathIndex} recorded
+ * @param {ReplayStep} step
+ */
+const throwIfAttemptUnrecorded = (recorded, step) => {
+    if (typeof step.path !== 'string') return;
+    const recordedUnder = (/** @type {string} */ prefix) => recorded.entries.some((e) => e.path?.startsWith(prefix));
+    let prefix = '';
+    for (const segment of step.path.split('/').slice(0, -1)) {
+        const retry = /^(\d+)r(\d+)$/.exec(segment);
+        const attempt = retry ? Number(retry[2]) : 0;
+        const at = retry ? prefix + retry[1] : '';
+        if (attempt > 0 && !recordedUnder(`${at}r${attempt}/`) && recordedUnder(`${at}r${attempt - 1}/`)) {
+            throw replayError(
+                `Trace has no step at path '${step.path}' for '${step.name}', which is attempt ${attempt} of the ` +
+                    `Retry at path '${at}', and the trace's last attempt there is ${attempt - 1}. Either the Retry ` +
+                    'now makes more attempts than the recorded one did, or a hook vetoed this attempt in the recorded ' +
+                    'run; replaying it would run the real Command, so the replay stops here under any onMissing.',
+                { command: step.name, index: step.index, path: step.path }
             );
         }
         prefix += `${segment}/`;

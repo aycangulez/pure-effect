@@ -871,6 +871,50 @@ describe('Replay', function () {
             );
         });
 
+        it('should refuse to run live an attempt past the last one the trace recorded for its Retry', async function () {
+            // A Retry whose fallback leaves no entry, or that has none, gives no sign of having given up, so a raised
+            // retries count asked for an attempt the trace lacks, and under onMissing: 'execute' it ran for real.
+            let calls = 0;
+            const flow = (/** @type {number} */ retries, /** @type {any} */ onExhausted) =>
+                flowOf(() =>
+                    Retry(
+                        Command(function cmdCharge() {
+                            calls++;
+                            throw new Error('503');
+                        }),
+                        { retries, delay: 0, ...(onExhausted ? { onExhausted } : {}) }
+                    )
+                );
+            for (const onExhausted of [() => Success('parked'), undefined]) {
+                const { trace } = await recordEffect(flow(2, onExhausted)('in'));
+                calls = 0;
+                for (const onMissing of /** @type {const} */ (['throw', 'execute'])) {
+                    const { result } = await replayEffect(flow(5, onExhausted)('in'), trace, { onMissing });
+                    const error = /** @type {any} */ (errorOf(result));
+                    assert.equal(error.name, 'ReplayError');
+                    assert.equal(error.path, '0r3/0');
+                    assert.match(
+                        error.message,
+                        /attempt 3 of the Retry at path '0', and the trace's last attempt there is 2\. Either the Retry now makes more attempts than the recorded one did, or a hook vetoed this attempt/
+                    );
+                }
+                assert.equal(calls, 0, 'nothing ran live');
+            }
+            // An attempt a hook vetoed in the recorded run is refused the same way.
+            let vetoes = 0;
+            configureEffect({
+                onBeforeCommand: async () => {
+                    if (++vetoes === 2) throw new Error('kill switch');
+                }
+            });
+            const { trace: killed } = await recordEffect(flow(2, undefined)('in'));
+            configureEffect();
+            calls = 0;
+            const { result: replayed } = await replayEffect(flow(2, undefined)('in'), killed, { onMissing: 'execute' });
+            assert.equal(/** @type {any} */ (errorOf(replayed)).path, '0r1/0');
+            assert.equal(calls, 0, 'the vetoed attempt did not run live');
+        });
+
         it('should find a Retry given more attempts inside a Parallel branch, and leave a missing step alone', async function () {
             const throwing = (/** @type {number} */ retries) =>
                 Retry(
