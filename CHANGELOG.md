@@ -15,6 +15,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 
 ### Fixed
 
+- An error that `redact` rebuilt without a `name` replays with the `name` its class gives it, rather than an own `name` of `undefined`.
 - In TypeScript, a step that returns one of several Effects requires every context any of them reads, so a branch that returns a plain Command beside an `Ask`, or two `Ask`s reading different contexts, no longer lets `runEffect` run without what the flow reads.
 - A replay refuses an attempt past the last one the trace recorded for its `Retry`, rather than running it live under `onMissing: 'execute'`: as a `TimeParadox` when the trace holds the fallback Command the `Retry` gave up to, and otherwise as a `ReplayError` that names the two causes, more attempts or a vetoed one.
 - A `Retry` wait longer than `setTimeout` can hold, about 24.8 days, is capped there, rather than overflowing and retrying after 1 ms.

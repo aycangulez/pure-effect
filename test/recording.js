@@ -736,6 +736,27 @@ describe('Recording', function () {
         assert.ok(/** @type {any} */ (result).error instanceof Error);
     });
 
+    it('should replay an error redact rebuilt without its name as an Error named Error, not undefined', async function () {
+        // The name was restored even when redact had left it out, as an own property holding undefined, which hid
+        // Error.prototype.name, so a flow branching on error.name read undefined in the replay.
+        const flow = (/** @type {any} */ input) =>
+            effectPipe(() =>
+                Command(function cmdPost() {
+                    throw new TypeError('boom');
+                })
+            )(input);
+        const redact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
+            kind === 'error' ? { message: value.message } : value;
+        const { trace } = await recordEffect(flow('in'), { redact });
+        for (const stored of [trace, JSON.parse(JSON.stringify(trace))]) {
+            const error = /** @type {any} */ (errorOf((await replayEffect(flow('in'), stored)).result));
+            assert.ok(error instanceof Error);
+            assert.equal(error.name, 'Error');
+            assert.ok(!Object.hasOwn(error, 'name'), 'no own name hides the inherited one');
+            assert.equal(error.message, 'boom');
+        }
+    });
+
     it('should replay an error redact rebuilt the same from memory as from JSON', async function () {
         // Picking fields the error did not have, as `{ status: value.status }` does, left `status: undefined` on the
         // error replayed from memory, which JSON drops, so the two replays and production disagreed.

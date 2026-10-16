@@ -372,6 +372,7 @@ What `reviveError` restores:
 - Such a key is not copied again with the other own keys. There, a raw cause once replaced the serialized one and reached JSON as `{}`.
 - A subclass revives as a plain `Error`, since the trace carries a name rather than a prototype, so that check holds for plain errors.
 - A thrown value that is not an `Error` passes through unchanged.
+- A `name` the serialized form lacks, as an object `redact` rebuilt with only a message does, is left to `Error`'s own. Restored anyway, it became an own `undefined` that hid `Error.prototype.name`, so a DX experiment's flow branching on `error.name` read `undefined` in the replay.
 
 Loops: a `cause` or `errors` chain that loops back is cut where it returns, carrying that error's name and message only. Following it overflowed the stack, and the recorder's catch-all dropped the step with its other failures, so the trace silently lacked it. A failure like that now marks the step `unrecorded: 'copy'` rather than losing it. Only an error's ancestors cut the chain, so one that appears twice without a loop is carried in full both times.
 

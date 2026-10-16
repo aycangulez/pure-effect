@@ -2083,7 +2083,8 @@ const reviveError = (v) => {
     const shown = Array.isArray(v.__enumerable) ? v.__enumerable : [];
     const restore = (/** @type {string} */ key, /** @type {any} */ value) =>
         Object.defineProperty(e, key, { enumerable: shown.includes(key), configurable: true, writable: true, value });
-    restore('name', v.name);
+    // An object redact rebuilt without a name keeps Error's own, rather than an own `undefined` that hides it.
+    if (v.name !== undefined) restore('name', v.name);
     if (shown.includes('message')) restore('message', v.message);
     const alreadyHandled = ['__error', '__enumerable', 'name', 'message'];
     for (const [k, val] of Object.entries(v)) {
@@ -2113,8 +2114,8 @@ const recorderOptionRules = {
 
 /**
  * Why the recorder stored nothing for a value: `redact` threw on it or returned `undefined` for a value that was not
- * (an error aside), or copying it threw. It stores nothing rather
- * than a stand-in, since a stand-in would replay as what production saw.
+ * (an error aside), or copying it threw. It stores nothing rather than a stand-in, since a stand-in would replay as
+ * what production saw.
  * @typedef {'redact' | 'copy'} UnrecordedCause
  */
 
