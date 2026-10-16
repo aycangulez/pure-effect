@@ -78,6 +78,30 @@ describe('Core', function () {
         assert.deepEqual(result.value, { value: 'value', env: 'test' });
     });
 
+    it('should refuse a context that is not an object, before the run', async function () {
+        // `runEffect(flow, 5)` ran, and an Ask read its fields off the number as undefined.
+        let calls = 0;
+        const flow = Command(function cmdLoad() {
+            return ++calls;
+        });
+        await assert.rejects(
+            () => runEffect(flow, /** @type {any} */ (5)),
+            /runEffect's context must be an object, got the number 5\./
+        );
+        await assert.rejects(
+            () => recordEffect(flow, { context: /** @type {any} */ ('tenant-1') }),
+            /recordEffect 'context' must be an object or null, received the string "tenant-1"\./
+        );
+        await assert.rejects(
+            () => replayEffect(flow, () => ({ result: 1 }), { context: /** @type {any} */ (true) }),
+            /replayEffect 'context' must be an object or null, received the boolean true\./
+        );
+        assert.equal(calls, 0, 'nothing ran under a refused context');
+        // No context and a recorded null one stay allowed.
+        assert.deepEqual(await runEffect(flow), Success(1));
+        assert.deepEqual(await runEffect(flow, /** @type {any} */ (null)), Success(2));
+    });
+
     it('should return a Retry data structure', function () {
         const inner = Command(
             () => 'x',
@@ -761,6 +785,23 @@ describe('Constructor arguments', function () {
         // An absent third argument, as a caller forwarding one may pass, is still fine.
         assert.doesNotThrow(() => parallel([Success(1)], { limit: 1 }, undefined));
         assert.doesNotThrow(() => parallel([Success(1)], { limit: 1 }, null));
+    });
+
+    it('should refuse a fourth argument, which nothing reads', function () {
+        // Only a third argument after the options was refused, so `Parallel(effects, next, options, extra)` dropped
+        // the extra without a word.
+        const parallel = /** @type {any} */ (Parallel);
+        const next = (/** @type {any[]} */ values) => Success(values);
+        assert.match(
+            messageFrom(() => parallel([Success(1)], next, { limit: 1 }, { settled: true })),
+            /Parallel takes effects, next and options, so its fourth argument, a plain object, would be ignored/
+        );
+        assert.match(
+            messageFrom(() => parallel([Success(1)], undefined, { limit: 1 }, 4)),
+            /fourth argument, the number 4, would be ignored/
+        );
+        assert.doesNotThrow(() => parallel([Success(1)], next, { limit: 1 }, undefined));
+        assert.doesNotThrow(() => parallel([Success(1)], next, { limit: 1 }, null));
     });
 
     it('should refuse a Retry given the step instead of its Effect, or a bare number of retries', function () {

@@ -2,6 +2,15 @@
 
 All notable changes to Pure Effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
+## [Unreleased]
+
+### Fixed
+
+- An `onRun` hook that returns anything but a `Success` or `Failure` rejects the run with a `TypeError`, rather than `runEffect` resolving with that value. A hook that forgot to return `op()`'s result must return it.
+- `runEffect` refuses a context that is not an object or `null`, and so does the `context` option of `recordEffect`, `replayEffect` and `timeTravel`.
+- `Parallel` refuses a fourth argument, as it already refused a third after the options.
+- `timeTravel`'s closing line prints the message of an error nested in the result, such as a `Retry`'s `lastError`.
+
 ## [0.20.1] - 2026-10-15
 
 ### Added

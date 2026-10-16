@@ -51,6 +51,7 @@ Everything is in `index.js`, and `index.d.ts` declares it.
 - `Parallel`'s second argument is `next` or the options, whichever it looks like, so `Parallel(effects, { limit: 5 })` needs no placeholder. `replayEffect` tells a `Resolver` from a trace by `typeof` in the same way.
 - `undefined` or `null` in that position is a skipped `next`, so options passed third still count. They were once dropped, which ran a settled batch with no limit and let one failure cancel it.
 - A third argument after the options throws, since nothing reads it. In the billing experiment, `Parallel(effects, { limit: 1 }, next)` ran without its `next`, and only TypeScript refused it.
+- A fourth argument throws for the same reason. Until October 2026 only the third was checked, so a DX experiment found `Parallel(effects, next, options, extra)` accepted while the shorter mistake was refused.
 - `Retry` counts its `retries`, the tries after the first, so `retries: 2` makes at most three calls. The option was `attempts` until 0.20.0, which counted the same thing under a name that read as the total, so `attempts: 2` looked like two calls and the exhaustion's `attempts` needed a note saying the steps ran one more time than it. The check that refuses a name an option does not have refuses `attempts` and names `retries`, so old code fails as the flow is built rather than retrying a different number of times.
 
 ### Composing without combinators
@@ -66,6 +67,7 @@ A Command's identity is `commandName(eff)`: a non-empty string `meta.name`, else
 - It is exported for tests. Before, tests read `cmd.name`, which is empty for an inline arrow named through `meta.name`, so such a step could be checked only by copying the rule into the test.
 - It throws an `EffectTypeError` for anything but a Command. A walk that reached a `Failure` otherwise reported a `TypeError` about reading `name` off `undefined`.
 - `meta.name` exists because `cmd.name` alone made recording depend on syntax. An inline arrow recorded as `'anonymous'`, and a minifier that mangles names renamed every step, both silently. `cmd.name` stays supported, and it is what the examples use.
+- `meta` is not checked. It belongs to the user, whose hooks read whatever keys they put on it, so a `meta.name` that is not a non-empty string is ignored, and the Command falls back to `cmd.name`, rather than refused. A DX experiment in October 2026 flagged the silent fallback, and the maintainer kept it; the README states it.
 
 ## Composition and the flow's input
 
@@ -217,7 +219,7 @@ Undoing work: a fail-fast `Parallel` drops the values of the branches that succe
 ### The three hooks
 
 - `onStep(name, type, op, path)` wraps each Command's execution and each `Parallel`'s branches. It decides whether the Command runs at all, which is how replay suppresses I/O. So a hook that only watches must `await op()` and return its result; one that returns `undefined` after `op` returned a value makes the run reject.
-- `onRun(effect, op, flowName, initialInput)` wraps a whole run, once. `flowName` is `context.flowName`, or `''`, and `initialInput` is what the flow was called with when `effectPipe` built it. A hook that calls another passes both on.
+- `onRun(effect, op, flowName, initialInput)` wraps a whole run, once. `flowName` is `context.flowName`, or `''`, and `initialInput` is what the flow was called with when `effectPipe` built it. A hook that calls another passes both on. What it returns must be a `Success` or `Failure`, or the run rejects with a `TypeError`: `runEffect` once resolved with whatever the hook returned, so in a DX experiment a hook that dropped `op`'s result handed the caller `5`, and `result.type` read `undefined` with nothing reported. A hook may still return an outcome of its own without calling `op`, as a maintenance switch does. One that returned while the run was still going is waited for first, as `onStep`'s is, so the run does not go on after `runEffect` has rejected.
 - `onBeforeCommand(command, context)` runs before each Command, and throwing from it vetoes the Command as an abort.
 
 ### Layers
@@ -232,6 +234,7 @@ Undoing work: a fail-fast `Parallel` drops the values of the branches that succe
 
 ### Per-call configuration
 
+- A context that is not an object or `null` is refused, by `runEffect` before the run and by the `context` option of `recordEffect`, `replayEffect` and `timeTravel` (`isContext`). `runEffect(flow, 5)` ran, and an `Ask` read every field off the number as `undefined`; a DX experiment found it in October 2026. `null` stays, since a recorded run may have run with it.
 - A per-call `callConfig` is merged over the installed wiring by the same merge, innermost, or over nothing under `inherit: false`. A non-boolean `inherit` throws rather than being coerced.
 - That is why `recordEffect` inside an instrumented application keeps its spans, and why `replayEffect` passes `inherit: hooks`: under `hooks: true` its resolver sits innermost, and the configured hooks observe a replay that still executes nothing.
 - Merging is only trustworthy while every nested hook is a watcher, since a global `onStep` that never calls `op` would starve an inner one.

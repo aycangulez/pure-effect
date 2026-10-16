@@ -98,7 +98,8 @@ const Failure = (error) => ({ type: 'Failure', error });
  *        parameter with a default value does not count, so `nanoid(size = 21)` keeps its default.
  * @param {(result: any) => Effect} [next] - Receives the result of `cmd`. Defaults to `Success(result)`; `null`
  *        counts as omitted.
- * @param {CommandMeta} [meta] - Passed to `onBeforeCommand`. A string `meta.name` is the Command's identity.
+ * @param {CommandMeta} [meta] - Passed to `onBeforeCommand`. A non-empty string `meta.name` is the Command's identity;
+ *        any other `name` is ignored.
  * @returns {CommandState}
  */
 const Command = (cmd, next, meta) => {
@@ -199,9 +200,10 @@ const Retry = (effect, options) => {
  * @param {((values: any[]) => Effect) | ParallelOptions | null} [nextOrOptions] - Receives the success values in
  *        order, and defaults to `Success(values)`; or the options.
  * @param {ParallelOptions} [maybeOptions] - Options, when `next` was given or skipped
+ * @param {...any} extra - Refused, since nothing reads it
  * @returns {ParallelState}
  */
-const Parallel = (effects, nextOrOptions, maybeOptions) => {
+const Parallel = (effects, nextOrOptions, maybeOptions, ...extra) => {
     if (!Array.isArray(effects)) {
         throw malformed(`Parallel expects an array of Effects, got ${describeArgument(effects)}.`, effects);
     }
@@ -225,6 +227,13 @@ const Parallel = (effects, nextOrOptions, maybeOptions) => {
             maybeOptions
         );
     }
+    if (extra[0] != null) {
+        const got = describeArgument(extra[0]);
+        throw malformed(
+            `Parallel takes effects, next and options, so its fourth argument, ${got}, would be ignored.`,
+            extra[0]
+        );
+    }
     const options = optionsSecond ? nextOrOptions : maybeOptions;
     checkOptions(options, 'Parallel', parallelOptionRules, malformed);
     return {
@@ -241,6 +250,16 @@ const Parallel = (effects, nextOrOptions, maybeOptions) => {
  * @returns {boolean}
  */
 const isObject = (value) => value !== null && typeof value === 'object';
+
+/**
+ * Whether a value can be a run's context: an object, or `null`, which a recorded run may have run with.
+ * @param {any} value
+ * @returns {boolean}
+ */
+const isContext = (value) => value === null || isObject(value);
+
+/** The rule for a `context` option, as `recordEffect`, `replayEffect` and `timeTravel` take one. */
+const contextOptionRule = /** @type {OptionRule} */ ([isContext, 'an object or null']);
 
 /**
  * @param {any} value
@@ -1375,6 +1394,10 @@ const interpret = async (effect, context = {}, callConfig = {}, fastRetry = fals
         throw new TypeError(`runEffect's callConfig must be an object, got ${describeConfiguration(callConfig)}.`);
     }
     checkConfiguration(callConfig, "runEffect's callConfig", 'callConfig.', [...hookNames, 'inherit']);
+    // An Ask would read its fields off a number or a string as undefined.
+    if (!isContext(context)) {
+        throw new TypeError(`runEffect's context must be an object, got ${describeArgument(context)}.`);
+    }
     const { inherit = true, ...local } = callConfig;
     // Not coerced, so `'false'` cannot inherit everything.
     if (typeof inherit !== 'boolean') {
@@ -1391,8 +1414,16 @@ const interpret = async (effect, context = {}, callConfig = {}, fastRetry = fals
     };
     const onRun = resolved.onRun || defaultRunWrapper;
     // An I/O fault becomes a plain Failure here, where every outcome leaves.
-    const op = async () => asOutcome(await execute(runtime, effect));
-    return onRun(effect, op, context?.flowName || '', flowInputs.get(effect));
+    const calls = trackCalls(async () => asOutcome(await execute(runtime, effect)));
+    const returned = await onRun(effect, calls.op, context?.flowName || '', flowInputs.get(effect));
+    if (isOutcome(returned)) return returned;
+    // As with onStep, a hook that returned while the run went on is judged once the run has finished.
+    const unwaited = calls.running;
+    if (unwaited) await calls.latest;
+    throw new TypeError(
+        `An onRun hook returned ${describeArgument(returned)}${unwaited ? ' before op had finished' : ''}, ` +
+            "not the run's outcome. A hook has to await op() and return what it returns."
+    );
 };
 
 /**
@@ -2226,7 +2257,7 @@ const packTrace = (settings, meta, entries, dropped) => {
 const recordEffect = async (effect, options = {}) => {
     // Before the options, so a call written the old way, with the flow function and its input, is named as that.
     asEffect(effect, 'The flow');
-    checkOptions(options, 'recordEffect', { context: null, version: null, ...recorderOptionRules });
+    checkOptions(options, 'recordEffect', { context: contextOptionRule, version: null, ...recorderOptionRules });
     const { context = {}, version, ...recorderOptions } = options ?? {};
     const rec = recorder(recorderOptions);
     // Before the run, so a Command that writes to the input or the context cannot rewrite what the trace received.
@@ -2649,7 +2680,7 @@ const unrecordedCause = (traceLog, field) => {
  */
 const replayEffect = async (effect, traceOrResolver, options = {}) => {
     checkOptions(options, 'replayEffect', {
-        context: null,
+        context: contextOptionRule,
         fastRetry: [isBoolean, 'true or false'],
         hooks: [isBoolean, 'true or false'],
         onMissing: [(value) => value === 'throw' || value === 'execute', "'throw' or 'execute'"],
@@ -2818,7 +2849,7 @@ const replayHook = ({ resolve, missing, onResolved, onMissing, droppedEntries })
  * @returns {Promise<Replay>} `{ result, unreached }`, as `replayEffect` returns for a trace
  */
 const timeTravel = async (flowFn, traceLog, options = {}) => {
-    checkOptions(options, 'timeTravel', { log: [isFunction, 'a function'], context: null, version: null });
+    checkOptions(options, 'timeTravel', { log: [isFunction, 'a function'], context: contextOptionRule, version: null });
     const { log = console.log, context, version } = options ?? {};
     checkFlowFn(flowFn, 'timeTravel');
     // Checked here, since timeTravel reads the trace's own fields before `replayEffect` checks its shape.
@@ -2914,14 +2945,17 @@ const unreachedWarning = (result, unreached) => {
 };
 
 /**
- * Prints a value for narration. An Error's hidden `message` is spread in, and a value JSON cannot print falls back to
- * `String`, since narration must not be what fails a replay.
+ * Prints a value for narration. An Error's hidden `name` and `message` are spread in wherever one sits, a Retry's
+ * `lastError` included, and a value JSON cannot print falls back to `String`, since narration must not be what fails a
+ * replay.
  * @param {any} v
  * @returns {string | undefined}
  */
 const formatForLog = (v) => {
     try {
-        return JSON.stringify(v instanceof Error ? { ...v, name: v.name, message: v.message } : v, null, 2);
+        const withMessages = (/** @type {string} */ key, /** @type {any} */ value) =>
+            value instanceof Error ? { ...value, name: value.name, message: value.message } : value;
+        return JSON.stringify(v, withMessages, 2);
     } catch {
         return String(v);
     }

@@ -53,6 +53,25 @@ describe('Replay', function () {
         }
     });
 
+    it("should print a nested error's message in timeTravel's closing line", async function () {
+        // The closing line printed a Retry's exhaustion as JSON, and an Error's message is not enumerable, so
+        // lastError read {"code": "invalid_amount"} with no message, while the step lines above it had one.
+        const flow = effectPipe(() =>
+            Retry(
+                Command(function cmdCharge() {
+                    throw Object.assign(new Error('Amount must be positive.'), { code: 'invalid_amount' });
+                }),
+                { retries: 1, delay: 0 }
+            )
+        );
+        const { trace } = await recordEffect(flow({ amount: 0 }));
+        /** @type {string[]} */
+        const lines = [];
+        await timeTravel(flow, trace, { log: (/** @type {string} */ line) => void lines.push(line) });
+        const closing = lines.find((l) => l.startsWith('Error:')) ?? '';
+        assert.match(closing, /"lastError": \{[^}]*"message": "Amount must be positive\."/);
+    });
+
     it('should record and replay the registration flow end to end', async function () {
         const input = { email: 'replay@test.com', password: 'password123' };
         const { result, trace } = await recordEffect(registerUserFlow(input));

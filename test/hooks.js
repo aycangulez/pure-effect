@@ -698,6 +698,43 @@ describe('Where a throw comes from', function () {
         assert.equal(saves, 0, 'the flow must not continue as though no user was found');
     });
 
+    it('should reject when an onRun hook returns something other than an outcome', async function () {
+        // runEffect resolved with whatever the hook returned, so a hook that dropped op's result handed the caller 5,
+        // and `result.type` read undefined.
+        configureEffect({ onRun: async () => /** @type {any} */ (5) });
+        await assert.rejects(
+            runEffect(Success(1)),
+            (e) =>
+                e instanceof TypeError && /An onRun hook returned the number 5, not the run's outcome/.test(e.message)
+        );
+        // An outcome of the hook's own stays allowed, as a hook that answers without running the flow returns one.
+        configureEffect();
+        configureEffect({ onRun: async () => Failure('Maintenance window.') });
+        assert.deepEqual(await runEffect(Success(1)), Failure('Maintenance window.'));
+    });
+
+    it('should wait for the run before rejecting an onRun hook that called op without waiting for it', async function () {
+        let finished = false;
+        configureEffect({
+            // The types refuse this hook, as they should; plain JavaScript does not.
+            onRun: /** @type {any} */ (
+                async (/** @type {any} */ effect, /** @type {() => Promise<unknown>} */ op) => {
+                    op();
+                }
+            )
+        });
+        const flow = Command(async function cmdSlow() {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            finished = true;
+            return 'done';
+        });
+        await assert.rejects(
+            runEffect(flow),
+            (e) => e instanceof TypeError && /onRun hook returned undefined before op had finished/.test(e.message)
+        );
+        assert.ok(finished, 'the run must not go on after runEffect has rejected');
+    });
+
     it('should treat a throw from an op the hook did not wait for as an I/O fault', async function () {
         // Judged as though the hook had awaited op, which a hook missing only its return does. The throw was
         // otherwise left unobserved, so the step passed as a success and the rejection went unhandled.

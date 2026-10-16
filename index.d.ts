@@ -14,6 +14,7 @@ export type FailureState<E = unknown> = {
  * Metadata for a Command. `name` is its name in traces, replays and spans; other keys reach `onBeforeCommand` as they
  * are.
  */
+/** Any keys a hook needs. A non-empty string `name` names the Command; any other `name` is ignored. */
 export type CommandMeta = { name?: string } & Record<string, unknown>;
 
 export type CommandState<R, T, E = unknown, Ctx = unknown> = {

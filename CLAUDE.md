@@ -155,6 +155,7 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 - `index.js` stays one file, divided into sections; a `utils.js` and a split into the core and recording and replay were weighed and dropped.
 - `runBranches` runs both modes through `settleBranches`.
 - Thrown errors stay out of the declared error union.
+- `meta` is unchecked: a `meta.name` that is not a non-empty string falls back to the function's name.
 - A `Failure` carries only its error; the flow's input reaches `onRun`, never an outcome.
 - Sharp edges are documented, not guarded: `Retry` repeating its whole wrapped tree, a branch whose Command ignores its signal running to completion, and a function passed by name taking the signal for a plain first parameter it treats as optional.
 
