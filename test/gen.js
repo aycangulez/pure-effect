@@ -272,6 +272,66 @@ describe('effectGen', function () {
             assert.match(await messageOf(() => flow()), /yielded step\(Command 'cmdFindUser'\) without the star/);
         });
 
+        it('should refuse a step(...) called without yield*, rather than skip it', async function () {
+            // A step written as a bare statement was never iterated, so the body went on past it: a Failure it held
+            // was dropped and a Command it held never ran, and the flow succeeded.
+            let charges = 0;
+            const charge = () =>
+                Command(function cmdCharge() {
+                    charges++;
+                });
+            const atBuild = looseGen(function* () {
+                step(Failure('Card declined.'));
+                return 'charged';
+            });
+            assert.match(
+                await messageOf(() => atBuild()),
+                /^step\(a Failure\) was called without yield\*, so it never ran; write yield\* step\(\.\.\.\)\.$/
+            );
+            const later = looseGen(function* () {
+                yield* step(cmd());
+                step(charge());
+                return 'charged';
+            });
+            await assert.rejects(runEffect(later()), {
+                name: 'EffectTypeError',
+                message: /^step\(Command 'cmdCharge'\) was called without yield\*/
+            });
+            assert.equal(charges, 0, 'the skipped Command did not run');
+            // A truth test cannot be trapped, but the step it read is still one the body never ran.
+            const tested = looseGen(function* () {
+                const found = step(Command(() => /** @type {{ id: number } | null} */ (null)));
+                return found ? 'taken' : 'free';
+            });
+            assert.match(await messageOf(() => tested()), /^step\(Command 'anonymous'\) was called without yield\*/);
+            // A step made first and run with yield* later in the same stretch of the body is fine.
+            const held = looseGen(function* () {
+                const pending = step(charge());
+                const value = yield* pending;
+                return value;
+            });
+            assert.deepEqual(await runEffect(held()), Success(undefined));
+            assert.equal(charges, 1);
+            // One left for a later stretch of the body is refused when the body first yields without it.
+            const deferred = looseGen(function* () {
+                const pending = step(charge());
+                yield* step(cmd());
+                return yield* pending;
+            });
+            assert.match(await messageOf(() => deferred()), /^step\(Command 'cmdCharge'\) was called without yield\*/);
+            assert.equal(charges, 1, 'the deferred Command did not run');
+            // A flow built inside a body tracks its own steps, and the body goes on tracking its own after it.
+            const inner = looseGen(function* () {
+                return yield* step(cmd());
+            });
+            const outer = looseGen(function* () {
+                const nested = inner();
+                step(Failure('Card declined.'));
+                return yield* step(nested);
+            });
+            assert.match(await messageOf(() => outer()), /^step\(a Failure\) was called without yield\*/);
+        });
+
         it('should refuse a yielded Effect, a yielded Promise and any other yielded value', async function () {
             assert.match(
                 await messageOf(() =>

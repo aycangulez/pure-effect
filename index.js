@@ -600,7 +600,8 @@ const flowInputs = new WeakMap();
 
 /**
  * Composes a list of functions into a single Effect pipeline.
- * Each function receives the output of the previous one.
+ * Each function receives the output of the previous one. The steps before the first Command run as the flow is built,
+ * so one that changes its input leaves a trace holding the changed input.
  *
  * @param {...(input: any) => Effect} fns - Functions that each return an Effect: Success, Failure, Command, Ask,
  *        Retry, or Parallel.
@@ -637,6 +638,19 @@ const stepMarkers = new WeakSet();
  * @type {WeakSet<StepMarker>}
  */
 const claimedMarkers = new WeakSet();
+
+/**
+ * The step wrappers made in the stretch of a body that is running, which `resumeBody` sets and checks, so a step the
+ * body never ran with `yield*` is refused rather than skipped. `undefined` outside a body.
+ * @type {object[] | undefined}
+ */
+let madeSteps;
+
+/**
+ * The step wrappers whose iterator was taken, as `yield*` takes it.
+ * @type {WeakSet<object>}
+ */
+const iteratedSteps = new WeakSet();
 
 /**
  * The Effect inside each step wrapper, so `effectGen` can name a step yielded or returned without `yield*`.
@@ -703,7 +717,13 @@ const step = (effect) => {
     // On the target as well, since Node's inspect reads a proxy's target without running its traps.
     const target = Object.freeze(Object.defineProperty({}, inspectCustom, { value: hint }));
     const wrapper = new Proxy(target, {
-        get: (_, key) => (key === Symbol.iterator ? iterate : key === inspectCustom ? hint : refuse()),
+        get: (_, key) => {
+            if (key === Symbol.iterator) {
+                iteratedSteps.add(wrapper);
+                return iterate;
+            }
+            return key === inspectCustom ? hint : refuse();
+        },
         has: refuse,
         ownKeys: refuse,
         getOwnPropertyDescriptor: refuse,
@@ -712,6 +732,7 @@ const step = (effect) => {
         deleteProperty: refuse
     });
     stepEffects.set(wrapper, effect);
+    madeSteps?.push(wrapper);
     return wrapper;
 };
 
@@ -795,14 +816,29 @@ const explainBodyThrow = (e) => {
  * @returns {IteratorResult<any, any>}
  */
 const resumeBody = (run, resume) => {
+    const enclosing = madeSteps;
+    /** @type {object[]} */
+    const made = (madeSteps = []);
+    let result;
     try {
-        const result = resume(run.generator);
+        result = resume(run.generator);
         if (result.done) run.state = 'done';
-        return result;
     } catch (e) {
         run.state = 'done';
         throw explainBodyThrow(e);
+    } finally {
+        madeSteps = enclosing;
     }
+    // One yielded or returned without the star is left to `claimStep` and `returnedEffect`, which say so.
+    const skipped = made.find((wrapper) => !iteratedSteps.has(wrapper) && wrapper !== result.value);
+    if (skipped) {
+        const effect = /** @type {Effect} */ (stepEffects.get(skipped));
+        throw malformed(
+            `step(${describeStep(effect)}) was called without yield*, so it never ran; write yield* step(...).`,
+            effect
+        );
+    }
+    return result;
 };
 
 /**
@@ -1018,7 +1054,8 @@ const stopBody = (flow, run, position, trail, signature, node) => {
  * Builds a flow function from a generator function, which writes `yield* step(effect)` where `async` code writes
  * `await`. Calling the flow function runs the body up to its first step, and the flow it returns is made of ordinary
  * nodes, so it records, replays and tests as a pipeline does. The first execution of the flow takes over that run of
- * the body, and every later one builds the flow again from its input, as calling an `async` function again does.
+ * the body, and every later one builds the flow again from its input, as calling an `async` function again does. A
+ * body that changes its input before its first Command leaves a trace holding the changed input.
  *
  * @param {(input: any) => Generator<any, any, any>} body
  * @returns {(input: any) => Effect}

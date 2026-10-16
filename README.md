@@ -985,6 +985,7 @@ A step in a body's `finally` is not supported. It runs when the body ends normal
 | `yield x` | an `EffectTypeError`: write `yield* step(x)` |
 | `yield* x`, without `step` | the engine's `TypeError`, which on V8 becomes an `EffectTypeError` saying to write `yield* step(x)` |
 | `const found = step(x)`, then `found.id` | an `EffectTypeError`: `step(...)` was used as a value |
+| `step(x)` with no `yield*`, as a statement or in `if (step(x))` | an `EffectTypeError`: `step(...)` was called without `yield*` |
 | `[...step(x)]` or `for (const v of step(x))` | an `EffectTypeError`: `step(...)` was iterated outside `yield*` |
 | `step(db.findUser(email))` | an `EffectTypeError`: put the call in a Command |
 | `effectGen(async function* () {})` | an `EffectTypeError`: write `function*` |
@@ -1719,6 +1720,7 @@ Replays a trace and narrates each step with its recorded duration. Returns `{ re
 - **`redact` covers a trace, not a result.** A `Failure` holds the full error, and an error can quote what a Command sent, as a database's duplicate-key error quotes the key. Keeping it out of your logs is up to you.
 - **Replay checks the path, not the values.** Every result comes from the recording, so a replay cannot check a fix that changes what a flow computes. A step removed from the middle of a flow stops the replay at a `TimeParadox`; see [What a replay cannot check](#what-a-replay-cannot-check).
 - **A trace keeps data, not objects.** A replayed value is what JSON stores: a class instance loses its methods, a `Date` becomes a string, and a thrown error comes back as a plain `Error`, so check `error.name` rather than `instanceof`. Return plain data from Commands; see [Recording in Production](#recording-in-production).
+- **A trace records the input as the run starts, and a step before the first Command has already run by then.** That step runs as the flow is built, so one that changes its input, as `input.count++` does, leaves the trace holding the changed input. Return a new value rather than change the one a step receives; see [Recording in Production](#recording-in-production).
 - **Replay reproduces what one flow saw, not timing.** A stale read replays exactly. A race between two requests does not, because a trace records one flow. Nor does a race between branches that share state: branches replay with the results they saw, not the order they ran in. A cancelled generator branch can stop one step later in a replay; see [Replaying a cancelled `Parallel`](#replaying-a-cancelled-parallel).
 - **Configuration belongs to one copy of the library.** Hooks live in module state, so two copies in one process (a dual ESM and CJS setup, two versions in the dependency tree, or a worker thread) do not share them, and nothing warns you.
 - **A Command needs a name that survives minification.** `meta.name` does. `cmd.name` does not, unless the minifier keeps function names.

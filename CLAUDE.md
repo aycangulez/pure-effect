@@ -157,7 +157,7 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 - Thrown errors stay out of the declared error union.
 - `meta` is unchecked: a `meta.name` that is not a non-empty string falls back to the function's name.
 - A `Failure` carries only its error; the flow's input reaches `onRun`, never an outcome.
-- Sharp edges are documented, not guarded: `Retry` repeating its whole wrapped tree, a branch whose Command ignores its signal running to completion, and a function passed by name taking the signal for a plain first parameter it treats as optional.
+- Sharp edges are documented, not guarded: `Retry` repeating its whole wrapped tree, a branch whose Command ignores its signal running to completion, a function passed by name taking the signal for a plain first parameter it treats as optional, and a step before the first Command that changes its input.
 
 ## Tests
 

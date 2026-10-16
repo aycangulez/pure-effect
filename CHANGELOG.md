@@ -14,6 +14,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 
 ### Fixed
 
+- A `step(...)` a generator body never runs with `yield*`, written as a bare statement or only tested for truth, throws an `EffectTypeError` rather than being skipped, which dropped its `Failure` or left its Command unrun.
 - A replay refuses a `Parallel` whose `settled` option changed since the recording, as a `TimeParadox`, since a recorded decision now says whether it was settled. Traces recorded before this are not checked.
 - A result, input or context that `redact` returns `undefined` for is marked `unrecorded`, as one it throws on, so a replay stops there rather than hand the flow `undefined`.
 - An `onRun` hook that returns anything but a `Success` or `Failure` rejects the run with a `TypeError`, rather than `runEffect` resolving with that value. A hook that forgot to return `op()`'s result must return it.
