@@ -3219,7 +3219,8 @@ const traceWarnings = (traceLog, trace, version) => {
 };
 
 /**
- * Looks up how long each recorded step took, for narration: by path, or by position for a trace without paths.
+ * Looks up how long each recorded step took, for narration: by path, or by position for a trace without paths. It is
+ * printed to a tenth of a millisecond, since timer jitter swamps the microseconds the trace keeps.
  * @param {TraceEntry[]} trace
  * @returns {(step: ReplayStep) => string}
  */
@@ -3227,7 +3228,9 @@ const stepTimings = (trace) => {
     const byPath = new Map(trace.filter(hasPath).map((e) => [e.path, e]));
     return (step) => {
         const recorded = byPath.get(step.path) ?? trace[step.index];
-        return typeof recorded?.durationMs === 'number' ? ` in ${recorded.durationMs}ms` : '';
+        if (typeof recorded?.durationMs !== 'number') return '';
+        const shown = recorded.durationMs.toFixed(1);
+        return ` in ${shown === '0.0' ? '<0.1' : shown}ms`;
     };
 };
 

@@ -1196,9 +1196,9 @@ Initial input: {
   "cartId": "cart_abc123",
   "promoCode": "FREE_YEAR_VIP"
 }
-├─ cmdFetchCart returned in 41.277ms {"totalAmount":"120.00"}
-├─ cmdValidatePromo returned in 26.814ms {"isValid":true,"discountValue":100}
-└─ cmdChargeCard threw in 181.507ms {"code":"invalid_amount","name":"Error","message":"Amount must be non-zero."}
+├─ cmdFetchCart returned in 41.3ms {"totalAmount":"120.00"}
+├─ cmdValidatePromo returned in 26.8ms {"isValid":true,"discountValue":100}
+└─ cmdChargeCard threw in 181.5ms {"code":"invalid_amount","name":"Error","message":"Amount must be non-zero."}
 Replay finished with state: Failure
 Error: {
   "code": "invalid_amount",
@@ -1698,7 +1698,7 @@ Runs a flow with each Command answered from a trace instead of run, and returns 
 
 #### `timeTravel(flowFn, traceLog, options?)`
 
-Replays a trace and narrates it as a tree of the flow, each Command under the `Parallel` branch or `Retry` attempt it ran in, with its recorded duration. Returns `{ result, unreached }`, as `replayEffect` does for a trace.
+Replays a trace and narrates it as a tree of the flow, each Command under the `Parallel` branch or `Retry` attempt it ran in, with its recorded duration to a tenth of a millisecond (`<0.1ms` for a faster step). Returns `{ result, unreached }`, as `replayEffect` does for a trace.
 
 - Names any recorded steps that were never reached.
 - Warns when the trace's `version` differs from `options.version`, and when steps are named `'anonymous'`.

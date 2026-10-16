@@ -189,6 +189,26 @@ describe('Replay', function () {
         return lines;
     };
 
+    it("should print each step's duration to a tenth of a millisecond in timeTravel, and <0.1ms for a faster one", async function () {
+        const step = (/** @type {string} */ name) => () =>
+            Command(Object.defineProperty(() => 1, 'name', { value: name }));
+        const flow = effectPipe(step('cmdA'), step('cmdB'), step('cmdC'), step('cmdD'));
+        const durations = [41.277, 26.0, 0.049, 0.05];
+        const lines = await narrationOf(flow, (trace) => ({
+            ...trace,
+            trace: trace.trace.map((/** @type {any} */ entry, /** @type {number} */ i) => ({
+                ...entry,
+                durationMs: durations[i]
+            }))
+        }));
+        assert.deepEqual(lines.slice(2, 6), [
+            '├─ cmdA returned in 41.3ms 1',
+            '├─ cmdB returned in 26.0ms 1',
+            '├─ cmdC returned in <0.1ms 1',
+            '└─ cmdD returned in 0.1ms 1'
+        ]);
+    });
+
     it("should name what cancelled a Parallel, and whether it was settled, in timeTravel's tree", async function () {
         const declined = () =>
             Command(

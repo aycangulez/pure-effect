@@ -12,6 +12,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 
 - Breaking: a replay that reaches an `Ask` with no context, from a resolver or a trace that recorded none, stops with a `ReplayError` rather than handing `Ask` an empty object. Pass `options.context`, or give a `recorder`'s `toTrace` the context.
 - `timeTravel` narrates a replay as a tree of the flow, each Command under the `Parallel` branch or `Retry` attempt it ran in, and its header counts the `Parallel` decisions. A script that reads its lines must read the new layout.
+- `timeTravel` prints each step's duration to a tenth of a millisecond, and `<0.1ms` for a faster step. The trace still keeps it to the microsecond.
 - The recording example hands `keep` the trace's entries as well as the outcome, and by default also keeps a run in which a Command threw, such as one that succeeded on a retry or went to a dead-letter fallback.
 
 ### Fixed
