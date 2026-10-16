@@ -25,8 +25,8 @@
 /** @typedef {{ type: 'Success', value: any }} SuccessState */
 /** @typedef {{ type: 'Failure', error: any }} FailureState */
 /**
- * Metadata attached to a Command. A string `name` is the Command's identity; every other key is carried through
- * for `onBeforeCommand`.
+ * Metadata attached to a Command. A non-empty string `name` is the Command's identity, and any other `name` is
+ * ignored; every other key is carried through for `onBeforeCommand`.
  * @typedef {{ name?: string } & Record<string, any>} CommandMeta
  */
 /**
@@ -1223,12 +1223,13 @@ const cancelledBranch = () =>
     Failure(Object.assign(new Error('Parallel branch cancelled.'), { name: 'ParallelCancelled' }));
 
 /**
- * Which branch, if any, cancelled a Parallel, and how many branches it had; `branch: null` means an enclosing Parallel
- * did. Timing decides it, so it is recorded as the Parallel's own step for a replay to hand back, and the count lets a
- * replay see a branch added or removed. `threw` says a branch threw, which marked the scope, so a replay stops no
- * generator flow there, as production did not once the throw came.
- * @typedef {{ cancelled: false, branches: number }
- *   | { cancelled: true, branch: number | null, branches: number, threw?: true }} ParallelDecision
+ * Which branch, if any, cancelled a Parallel, how many branches it had, and whether it was settled; `branch: null`
+ * means an enclosing Parallel did. Timing decides it, so it is recorded as the Parallel's own step for a replay to hand
+ * back, and the count and `settled` let a replay see a branch added or removed and the option changed. `threw` says a
+ * branch threw, which marked the scope, so a replay stops no generator flow there, as production did not once the
+ * throw came.
+ * @typedef {{ cancelled: false, branches: number, settled?: boolean }
+ *   | { cancelled: true, branch: number | null, branches: number, settled?: boolean, threw?: true }} ParallelDecision
  */
 
 /**
@@ -1370,10 +1371,12 @@ const delayFor = (ms, signal) =>
 
 /**
  * What every part of the interpreter needs from one run: the context `Ask` reads, whether retries wait, and the two
- * hooks a step calls, resolved from the installed wiring and the call's own configuration.
+ * hooks a step calls, resolved from the installed wiring and the call's own configuration. `noContext` is set only by
+ * `replayEffect`, for a replay that has no context, and builds the fault an `Ask` raises there.
  * @typedef {{
  *   context: any,
  *   fastRetry: boolean,
+ *   noContext: (() => Error) | undefined,
  *   onStep: StepRunner,
  *   onBeforeCommand: CommandInterceptor
  * }} Runtime
@@ -1381,15 +1384,16 @@ const delayFor = (ms, signal) =>
 
 /**
  * The interpreter, which `runEffect` and `replayEffect` share, so a replay cannot drift from a run. Only a replay
- * sets `fastRetry`, which waits no time between retry attempts.
+ * sets `fastRetry`, which waits no time between retry attempts, and `noContext`.
  *
  * @param {Effect} effect
  * @param {any} [context]
  * @param {CallConfiguration} [callConfig]
  * @param {boolean} [fastRetry]
+ * @param {() => Error} [noContext]
  * @returns {Promise<SuccessState | FailureState>}
  */
-const interpret = async (effect, context = {}, callConfig = {}, fastRetry = false) => {
+const interpret = async (effect, context = {}, callConfig = {}, fastRetry = false, noContext = undefined) => {
     if (!isOptionsObject(callConfig)) {
         throw new TypeError(`runEffect's callConfig must be an object, got ${describeConfiguration(callConfig)}.`);
     }
@@ -1409,6 +1413,7 @@ const interpret = async (effect, context = {}, callConfig = {}, fastRetry = fals
     const runtime = {
         context,
         fastRetry,
+        noContext,
         onStep: resolved.onStep || defaultStepRunner,
         onBeforeCommand: resolved.onBeforeCommand || defaultCommandInterceptor
     };
@@ -1508,6 +1513,8 @@ const execute = async (runtime, eff, signal, path = '') => {
             continue;
         }
         if (eff.type === 'Ask') {
+            // A replay with no context would hand the flow an empty one; `replayEffect` sets `noContext`.
+            if (runtime.noContext) throw runtime.noContext();
             from = eff;
             eff = eff.next(runtime.context);
             continue;
@@ -1658,6 +1665,17 @@ const runBranches = async (runtime, effects, options, signal, branchPath, record
             { path: branchPath, expected: recordedBranches, actual: effects.length }
         );
     }
+    // And a changed settled option, which decides what a failing branch does. A decision recorded without it is not
+    // judged by it.
+    const recordedSettled = recorded?.settled;
+    if (isBoolean(recordedSettled) && recordedSettled !== Boolean(settled)) {
+        throw timeParadoxAt(
+            `path '${branchPath}'`,
+            `this Parallel is ${settled ? '' : 'not '}settled, and the trace recorded one that was` +
+                `${recordedSettled ? '' : ' not'}.`,
+            { path: branchPath, expected: recordedSettled, actual: Boolean(settled) }
+        );
+    }
     const forced = asDecision(recorded, effects.length);
     const reproducing = forced !== undefined && forced.cancelled;
     // Live, a throw cancels the others, and so does a failure unless `settled`. Reproducing, nothing does,
@@ -1684,13 +1702,14 @@ const runBranches = async (runtime, effects, options, signal, branchPath, record
         return { results, decision: forced, thrown };
     }
     const branches = effects.length;
+    const isSettled = Boolean(settled);
     /** @type {ParallelDecision} */
     const decision =
         trigger >= 0
-            ? { cancelled: true, branch: trigger, branches }
+            ? { cancelled: true, branch: trigger, branches, settled: isSettled }
             : cancelled
-              ? { cancelled: true, branch: null, branches }
-              : { cancelled: false, branches };
+              ? { cancelled: true, branch: null, branches, settled: isSettled }
+              : { cancelled: false, branches, settled: isSettled };
     // A throw from any branch marked the scope, whichever branch cancelled the others first.
     if (thrown !== undefined && decision.cancelled) decision.threw = true;
     return { results, decision, thrown };
@@ -2045,7 +2064,8 @@ const recorderOptionRules = {
 };
 
 /**
- * Why the recorder stored nothing for a value: `redact` threw on it, or copying it threw. It stores nothing rather
+ * Why the recorder stored nothing for a value: `redact` threw on it or returned `undefined` for a value that was not
+ * (an error aside), or copying it threw. It stores nothing rather
  * than a stand-in, since a stand-in would replay as what production saw.
  * @typedef {'redact' | 'copy'} UnrecordedCause
  */
@@ -2187,8 +2207,19 @@ const copyAndRedact = (settings, value, name, kind) => {
     const copied = recordPart('copy', () => snapshot(value));
     if ('unrecorded' in copied) return copied;
     // What redact returns is copied too, so it reads the same from memory as from storage.
-    return recordPart('redact', () => snapshot(settings.redact(copied.value, name, kind)));
+    const redacted = recordPart('redact', () => snapshot(settings.redact(copied.value, name, kind)));
+    return droppedByRedact(copied.value, redacted) ? { unrecorded: 'redact' } : redacted;
 };
+
+/**
+ * Whether `redact` returned `undefined` for a value that was not, as a branch missing its return does. A replay would
+ * hand the flow `undefined` where production had a value, so the value is marked unrecorded, as one redact threw on.
+ * Not for an error: an entry that threw replays as a throw without it, which is the verdict production had.
+ * @param {any} copy - The value redact was given
+ * @param {Recorded} redacted
+ * @returns {boolean}
+ */
+const droppedByRedact = (copy, redacted) => copy !== undefined && 'value' in redacted && redacted.value === undefined;
 
 /**
  * Copies a thrown value's serialized form and redacts the copy. An Error stays marked as one when `redact` returns an
@@ -2258,7 +2289,7 @@ const recordEffect = async (effect, options = {}) => {
     // Before the options, so a call written the old way, with the flow function and its input, is named as that.
     asEffect(effect, 'The flow');
     checkOptions(options, 'recordEffect', { context: contextOptionRule, version: null, ...recorderOptionRules });
-    const { context = {}, version, ...recorderOptions } = options ?? {};
+    const { context, version, ...recorderOptions } = options ?? {};
     const rec = recorder(recorderOptions);
     // Before the run, so a Command that writes to the input or the context cannot rewrite what the trace received.
     const initialInput = flowInputs.get(effect);
@@ -2266,7 +2297,8 @@ const recordEffect = async (effect, options = {}) => {
     // Merged over the global wiring, so recording inside an instrumented application keeps its spans.
     const result = await runEffect(effect, context, { onStep: rec.onStep });
     const { dropped, trace } = rec.toTrace();
-    return { result, trace: { ...head, dropped, trace } };
+    // A context nobody passed holds nothing to redact, so it is recorded as the empty one the run got, unredacted.
+    return { result, trace: { ...head, ...(context === undefined && { context: {} }), dropped, trace } };
 };
 
 /**
@@ -2614,7 +2646,13 @@ const missingStepError = (step, describe, droppedEntries) => {
 
 /** What each cause the recorder writes means, and what fixes it, for a replay error. */
 const unrecordedReasons = new Map([
-    ['redact', ['redact threw on it', 'make redact handle every value it is given, null included']],
+    [
+        'redact',
+        [
+            'redact threw on it or returned undefined',
+            'make redact handle every value it is given, null included, and return a value for each'
+        ]
+    ],
     ['copy', ['it could not be copied, as when it holds a BigInt or a getter that throws', 'keep it to plain data']]
 ]);
 
@@ -2698,11 +2736,22 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     const context = replayContext(traceLog, givenContext);
     const droppedEntries = droppedEntriesOf(traceLog, onMissing);
     const hook = replayHook({ resolve, missing, onResolved, onMissing, droppedEntries });
+    // Raised by `execute` at the first Ask, so a flow that reads no context replays without one.
+    const noContext =
+        givenContext == null && traceLog?.context === undefined
+            ? () =>
+                  replayError(
+                      'The flow reads the context at an Ask, and this replay has none: ' +
+                          `${fromResolver ? 'a Resolver holds no context' : 'the trace recorded none'}, ` +
+                          'so pass options.context.',
+                      { field: 'context' }
+                  )
+            : undefined;
 
     // A replay fault becomes a Failure here, outside the flow, where nothing can absorb it.
     let result;
     try {
-        result = await interpret(effect, context, { onStep: hook.onStep, inherit: hooks }, fastRetry);
+        result = await interpret(effect, context, { onStep: hook.onStep, inherit: hooks }, fastRetry, noContext);
     } catch (e) {
         if (hook.failure) throw hook.failure.error;
         if (!hasMark(e, replayFault)) throw e;

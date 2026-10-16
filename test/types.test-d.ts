@@ -992,6 +992,7 @@ const bareResolver: Resolver = () => 42;
 expectAssignable<ParallelDecision>({ cancelled: false });
 expectAssignable<ParallelDecision>({ cancelled: true, branch: 0 });
 expectAssignable<ParallelDecision>({ cancelled: true, branch: null });
+expectAssignable<ParallelDecision>({ cancelled: false, branches: 2, settled: true });
 // @ts-expect-error a cancelled decision names the branch that cancelled it, or null for an enclosing Parallel
 const unnamedBranch: ParallelDecision = { cancelled: true };
 const decisionResolver: Resolver = (step) =>

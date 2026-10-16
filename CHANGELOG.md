@@ -4,10 +4,17 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Changed
+
+- Breaking: a replay that reaches an `Ask` with no context, from a resolver or a trace that recorded none, stops with a `ReplayError` rather than handing `Ask` an empty object. Pass `options.context`, or give a `recorder`'s `toTrace` the context.
+
 ### Fixed
 
+- A replay refuses a `Parallel` whose `settled` option changed since the recording, as a `TimeParadox`, since a recorded decision now says whether it was settled. Traces recorded before this are not checked.
+- A result, input or context that `redact` returns `undefined` for is marked `unrecorded`, as one it throws on, so a replay stops there rather than hand the flow `undefined`.
 - An `onRun` hook that returns anything but a `Success` or `Failure` rejects the run with a `TypeError`, rather than `runEffect` resolving with that value. A hook that forgot to return `op()`'s result must return it.
 - `runEffect` refuses a context that is not an object or `null`, and so does the `context` option of `recordEffect`, `replayEffect` and `timeTravel`.
+- `recordEffect` given no context records the empty one without handing it to `redact`, so a `redact` that throws on it no longer blocks the replay.
 - `Parallel` refuses a fourth argument, as it already refused a third after the options.
 - `timeTravel`'s closing line prints the message of an error nested in the result, such as a `Retry`'s `lastError`.
 

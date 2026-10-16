@@ -130,8 +130,9 @@ export function recordingHooks(options = {}) {
             warnOnce(
                 'unrecorded',
                 `${unrecorded} of the values a kept trace holds could not be recorded, because redact threw on them or ` +
-                    'they could not be copied, so it replays only up to the first of them. Make redact handle every ' +
-                    "value it is given, null included, and keep Commands' results to plain data."
+                    'returned undefined, or they could not be copied, so it replays only up to the first of them. ' +
+                    'Make redact handle every value it is given, null included, and return a value for each, and ' +
+                    "keep Commands' results to plain data."
             );
         }
         const anonymous = trace.filter((entry) => entry.command === 'anonymous').length;

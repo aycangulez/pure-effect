@@ -53,6 +53,46 @@ describe('Replay', function () {
         }
     });
 
+    it('should refuse a replay that reaches an Ask with no context', async function () {
+        // A Resolver and a trace that recorded no context both handed Ask an empty object, so a flow reading a field
+        // of it replayed with undefined, where production had a value, with nothing reported.
+        const flow = effectPipe(() =>
+            Ask((/** @type {any} */ ctx) =>
+                Command(
+                    function cmdLoadTenant() {
+                        return { plan: 'pro' };
+                    },
+                    (/** @type {any} */ tenant) => Success({ ...tenant, requestId: ctx.requestId })
+                )
+            )
+        );
+        const resolver = () => ({ result: { plan: 'pro' } });
+        const { result: fromResolver } = await replayEffect(flow('in'), resolver);
+        const resolverError = /** @type {any} */ (errorOf(fromResolver));
+        assert.equal(resolverError.name, 'ReplayError');
+        assert.equal(resolverError.field, 'context');
+        assert.match(
+            resolverError.message,
+            /^The flow reads the context at an Ask, and this replay has none: a Resolver holds no context, so pass options\.context\.$/
+        );
+        const withContext = await replayEffect(flow('in'), resolver, { context: { requestId: 'r1' } });
+        assert.deepEqual(withContext.result, Success({ plan: 'pro', requestId: 'r1' }));
+
+        const rec = recorder();
+        await runEffect(flow('in'), { requestId: 'r1' }, { onStep: rec.onStep });
+        const { result: fromTrace } = await replayEffect(flow('in'), rec.toTrace({ initialInput: 'in' }));
+        assert.match(
+            /** @type {any} */ (errorOf(fromTrace)).message,
+            /this replay has none: the trace recorded none, so pass options\.context\.$/
+        );
+        // A recorded null is a context, and a flow that never reads one needs none.
+        const readsContext = effectPipe(() => Ask((/** @type {any} */ ctx) => Success(ctx)));
+        const { result: nullContext } = await replayEffect(readsContext('in'), { context: null, trace: [] });
+        assert.deepEqual(nullContext, Success(null));
+        const noAsk = effectPipe(() => Command(function cmdPing() {}));
+        assert.deepEqual((await replayEffect(noAsk('in'), () => ({ result: undefined }))).result, Success(undefined));
+    });
+
     it("should print a nested error's message in timeTravel's closing line", async function () {
         // The closing line printed a Retry's exhaustion as JSON, and an Error's message is not enumerable, so
         // lastError read {"code": "invalid_amount"} with no message, while the step lines above it had one.
@@ -604,6 +644,60 @@ describe('Replay', function () {
             const wider = flowOf(() => Parallel([step('cmdA'), step('cmdB'), Success('c')]));
             const { result } = await replayEffect(wider('in'), uncounted);
             assert.deepEqual(result, Success(['cmdA', 'cmdB', 'c']));
+        });
+
+        it('should raise a TimeParadox for a Parallel whose settled option changed', async function () {
+            // The decision did not say whether the Parallel was settled, so a recording with settled replayed on a
+            // flow without it as a Failure, with nothing unreached and nothing reported.
+            const failing = () =>
+                Command(
+                    () => 'b',
+                    () => Failure('Card declined.'),
+                    { name: 'cmdB' }
+                );
+            const flow = (/** @type {boolean} */ settled) =>
+                flowOf(() =>
+                    settled
+                        ? Parallel([step('cmdA'), failing()], { settled: true })
+                        : Parallel([step('cmdA'), failing()])
+                );
+            const { trace } = await recordEffect(flow(true)('in'));
+            const decision = trace.trace.find((e) => e.command === 'Parallel');
+            assert.deepEqual(decision?.result, { cancelled: false, branches: 2, settled: true });
+            for (const [recorded, replayed] of [
+                [true, false],
+                [false, true]
+            ]) {
+                const { trace: recordedTrace } = await recordEffect(flow(recorded)('in'));
+                const { result } = await replayEffect(flow(replayed)('in'), recordedTrace);
+                assert.deepEqual(paradox(result), {
+                    name: 'TimeParadox',
+                    path: '0p',
+                    expected: recorded,
+                    actual: replayed
+                });
+                assert.match(
+                    /** @type {any} */ (errorOf(result)).message,
+                    new RegExp(
+                        `Time paradox at path '0p': this Parallel is ${replayed ? '' : 'not '}settled, and the ` +
+                            `trace recorded one that was${recorded ? '' : ' not'}\\.$`
+                    )
+                );
+            }
+        });
+
+        it('should not judge a decision recorded without settled by it', async function () {
+            // A trace recorded before decisions carried settled still replays.
+            const { trace } = await recordEffect(flowOf(() => Parallel([step('cmdA'), step('cmdB')]))('in'));
+            const older = {
+                ...trace,
+                trace: trace.trace.map((e) =>
+                    e.command === 'Parallel' ? { ...e, result: { cancelled: false, branches: 2 } } : e
+                )
+            };
+            const settled = flowOf(() => Parallel([step('cmdA'), step('cmdB')], { settled: true }));
+            const { result } = await replayEffect(settled('in'), older);
+            assert.deepEqual(result, Success([Success('cmdA'), Success('cmdB')]));
         });
 
         it('should not judge a hand-written trace by the shape of paths it does not write as the recorder does', async function () {
@@ -1674,15 +1768,19 @@ describe('Replaying a cancelled Parallel', function () {
         replays.forEach(assertDeclined);
     });
 
-    it('should record each Parallel decision, and how many branches it had, at the Parallel path', async function () {
+    it('should record each Parallel decision, how many branches it had and whether it was settled, at the Parallel path', async function () {
         const { trace } = await recordEffect(Parallel([chargeBranch(), reserveBranch()]));
         const decision = trace.trace.find((e) => e.path === '0p');
         assert.deepEqual(
             { command: decision?.command, result: decision?.result },
-            { command: 'Parallel', result: { cancelled: true, branch: 0, branches: 2 } }
+            { command: 'Parallel', result: { cancelled: true, branch: 0, branches: 2, settled: false } }
         );
         const { trace: calm } = await recordEffect(Parallel([step('a', () => 1), step('b', () => 2)]));
-        assert.deepEqual(calm.trace.find((e) => e.path === '0p')?.result, { cancelled: false, branches: 2 });
+        assert.deepEqual(calm.trace.find((e) => e.path === '0p')?.result, {
+            cancelled: false,
+            branches: 2,
+            settled: false
+        });
     });
 
     it('should stop a branch where production stopped it during a retry backoff', async function () {
@@ -1712,7 +1810,8 @@ describe('Replaying a cancelled Parallel', function () {
         assert.deepEqual(trace.trace.find((e) => e.path === '0p1/0p')?.result, {
             cancelled: true,
             branch: null,
-            branches: 2
+            branches: 2,
+            settled: false
         });
         replays.forEach(assertDeclined);
     });
@@ -1840,7 +1939,12 @@ describe('Replaying a cancelled Parallel', function () {
         const flow = () =>
             Parallel([reserveBranch('r0'), reserveBranch('r1'), ...(withCharge ? [chargeBranch()] : [])]);
         const { trace } = await recordEffect(flow());
-        assert.deepEqual(trace.trace.find((e) => e.path === '0p')?.result, { cancelled: true, branch: 2, branches: 3 });
+        assert.deepEqual(trace.trace.find((e) => e.path === '0p')?.result, {
+            cancelled: true,
+            branch: 2,
+            branches: 3,
+            settled: false
+        });
         withCharge = false;
         const before = io.calls;
         const { result } = await replayEffect(flow(), trace);
@@ -1923,7 +2027,11 @@ describe('Replaying a cancelled Parallel', function () {
         const { trace } = await recordEffect(Parallel([step('a', () => 1)]), {
             redact: () => '[redacted]'
         });
-        assert.deepEqual(trace.trace.find((e) => e.command === 'Parallel')?.result, { cancelled: false, branches: 1 });
+        assert.deepEqual(trace.trace.find((e) => e.command === 'Parallel')?.result, {
+            cancelled: false,
+            branches: 1,
+            settled: false
+        });
         assert.equal(trace.trace.find((e) => e.command === 'a')?.result, '[redacted]');
     });
 
@@ -1991,6 +2099,7 @@ describe('Replaying a cancelled Parallel', function () {
             cancelled: true,
             branch: 1,
             branches: 2,
+            settled: false,
             threw: true
         });
         await assertCrashReplays(flow, trace, crash);
@@ -2017,6 +2126,7 @@ describe('Replaying a cancelled Parallel', function () {
             cancelled: true,
             branch: 0,
             branches: 2,
+            settled: false,
             threw: true
         });
         await assertCrashReplays(flow, trace, crash);
@@ -2031,6 +2141,7 @@ describe('Replaying a cancelled Parallel', function () {
             cancelled: true,
             branch: 1,
             branches: 2,
+            settled: true,
             threw: true
         });
         await assertCrashReplays(flow, trace, crash);
@@ -2061,6 +2172,7 @@ describe('Replaying a cancelled Parallel', function () {
             cancelled: true,
             branch: 1,
             branches: 2,
+            settled: false,
             threw: true
         });
         await assertCrashReplays(flow, trace, crash);
@@ -2084,6 +2196,7 @@ describe('Replaying a cancelled Parallel', function () {
             cancelled: true,
             branch: 1,
             branches: 2,
+            settled: false,
             threw: true
         });
         fixed = true;

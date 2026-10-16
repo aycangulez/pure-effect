@@ -495,7 +495,8 @@ describe('Documented sharp edges', function () {
         await runEffect(flow(), {}, { onStep: recording.onStep });
         assert.deepEqual(seen, ['caught']);
         seen.length = 0;
-        await replayEffect(flow(), JSON.parse(JSON.stringify(recording.toTrace())));
+        // The context production ran with, which a bare toTrace() does not hold.
+        await replayEffect(flow(), JSON.parse(JSON.stringify(recording.toTrace())), { context: {} });
         assert.deepEqual(seen, ['after Ask']);
     });
 
