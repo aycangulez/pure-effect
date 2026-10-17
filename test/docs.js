@@ -394,14 +394,28 @@ describe('Documented sharp edges', function () {
         assert.deepEqual(seen, []);
     });
 
-    it('should not notice a forgotten yield* when the step is only tested for truth', async function () {
-        // Pinned deliberately: JavaScript cannot trap a truth test, so the step is always truthy and its Command never
-        // runs, as a forgotten await leaves a Promise that is always truthy.
-        const flow = effectGen(function* () {
-            const found = step(Command(() => /** @type {{ id: number } | null} */ (null)));
-            return found ? 'taken' : 'free';
+    it('should record an input a step changed before the first Command, as changed', async function () {
+        // Pinned deliberately: a step before the first Command runs as the flow is built, before anything copies the
+        // input, so a trace holds what that step left. Copying every input as each flow is built was weighed and
+        // dropped, since every flow, recorded or not, would pay for it.
+        const pipe = effectPipe(
+            (/** @type {{ count: number }} */ input) => {
+                input.count++;
+                return Success(input);
+            },
+            (input) => Command(() => input.count, undefined, { name: 'cmdRead' })
+        );
+        const gen = effectGen(function* (/** @type {{ count: number }} */ input) {
+            input.count++;
+            return yield* step(Command(() => input.count, undefined, { name: 'cmdRead' }));
         });
-        assert.deepEqual(await runEffect(flow(undefined)), Success('taken'));
+        for (const flow of [pipe, gen]) {
+            const { result, trace } = await recordEffect(flow({ count: 0 }));
+            assert.deepEqual(result, Success(1));
+            assert.deepEqual(trace.initialInput, { count: 1 }, 'the trace holds the changed input');
+            const { result: replayed } = await replayEffect(flow(trace.initialInput), trace);
+            assert.deepEqual(replayed, Success(1), 'a replay answers the Command from the recording, not the input');
+        }
     });
 
     it('should change a variable outside a generator body again when a test walks a second branch', function () {
@@ -495,7 +509,8 @@ describe('Documented sharp edges', function () {
         await runEffect(flow(), {}, { onStep: recording.onStep });
         assert.deepEqual(seen, ['caught']);
         seen.length = 0;
-        await replayEffect(flow(), JSON.parse(JSON.stringify(recording.toTrace())));
+        // The context production ran with, which a bare toTrace() does not hold.
+        await replayEffect(flow(), JSON.parse(JSON.stringify(recording.toTrace())), { context: {} });
         assert.deepEqual(seen, ['after Ask']);
     });
 

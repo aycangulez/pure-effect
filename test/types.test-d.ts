@@ -30,6 +30,7 @@ import type {
     ParallelDecision,
     RetryExhaustedError,
     Effect,
+    EffectContext,
     EffectConfiguration,
     StepRunner,
     RunWrapper,
@@ -43,6 +44,7 @@ import type {
     Resolver,
     ReplayOptions,
     Replay,
+    ReplayFault,
     TimeTravelOptions
 } from '../index.js';
 
@@ -693,6 +695,27 @@ expectType<Effect<number, 'declined'>>(countCharged([1]));
 
 // --- Ctx (context type) ---
 
+// a step that returns one of several Effects needs every context any of them reads, a plain Command's none included
+const plainCountCmd = (n: number) => Command(async () => n);
+const readsTenantCtx = (n: number) => Ask((c: { tenant: string }) => Success(c.tenant + n));
+const readsRegionCtx = (n: number) => Ask((c: { region: string }) => Success(c.region + n));
+const branchingStep = effectPipe(
+    (n: number) => Success(n),
+    (n) => (n % 2 ? plainCountCmd(n) : readsTenantCtx(n))
+);
+expectType<{ tenant: string }>({} as EffectContext<ReturnType<typeof branchingStep>>);
+// @ts-expect-error the branch that reads the tenant needs it passed
+runEffect(branchingStep(2));
+const twoReadsStep = effectPipe(
+    (n: number) => Success(n),
+    (n) => (n % 2 ? readsRegionCtx(n) : readsTenantCtx(n))
+);
+// @ts-expect-error either branch can run, so both contexts are needed
+runEffect(twoReadsStep(2), { tenant: 't' });
+runEffect(twoReadsStep(2), { tenant: 't', region: 'r' });
+expectType<unknown>({} as EffectContext<SuccessState<number> | FailureState<'x'>>);
+expectType<unknown>({} as EffectContext<never>);
+
 interface AppCtx {
     db: string;
 }
@@ -988,10 +1011,33 @@ expectAssignable<ReplayOutcome>({ error: new Error('x') });
 // @ts-expect-error a bare value is not an outcome; the wrapper is what distinguishes undefined from unrecorded
 const bareResolver: Resolver = () => 42;
 
+// a replay's fault is a declared type, so a test reads its fields without casting through unknown
+const replayed = await replayEffect(
+    Command(() => 1),
+    { trace: [] }
+);
+const fault = (replayed.result as FailureState<unknown>).error as ReplayFault;
+expectType<'ReplayError' | 'TimeParadox'>(fault.name);
+expectType<string | undefined>(fault.path);
+expectAssignable<Error>(fault);
+// `name` tells the two apart, and each declares only the fields the runtime sets on it
+if (fault.name === 'TimeParadox') {
+    expectType<unknown>(fault.expected);
+    expectType<number | undefined>(fault.branch);
+    // @ts-expect-error a TimeParadox names the steps in expected and actual, and has no command
+    void fault.command;
+} else {
+    expectType<string | undefined>(fault.command);
+    expectType<'initialInput' | 'context' | undefined>(fault.field);
+    // @ts-expect-error a ReplayError compares nothing, so it has no expected
+    void fault.expected;
+}
+
 // a Parallel's step records its decision, and a Resolver can supply one from another storage format
 expectAssignable<ParallelDecision>({ cancelled: false });
 expectAssignable<ParallelDecision>({ cancelled: true, branch: 0 });
 expectAssignable<ParallelDecision>({ cancelled: true, branch: null });
+expectAssignable<ParallelDecision>({ cancelled: false, branches: 2, settled: true });
 // @ts-expect-error a cancelled decision names the branch that cancelled it, or null for an enclosing Parallel
 const unnamedBranch: ParallelDecision = { cancelled: true };
 const decisionResolver: Resolver = (step) =>

@@ -29,9 +29,10 @@ import { configureEffect, recorder, Failure } from 'pure-effect';
  * @property {boolean} [stack] - Records stack traces for thrown errors.
  * @property {string | undefined} [version] - Commit or build id, attached to each trace, so `timeTravel` can warn
  *           when it replays a trace against another build.
- * @property {(result: SuccessState<any> | FailureState<any>) => boolean} [keep] - Decides which runs reach the sink:
- *           failures only by default. Return `true` to keep everything, or sample. A run whose own code threw is
- *           offered as a Failure carrying the thrown error.
+ * @property {(result: SuccessState<any> | FailureState<any>, entries: TraceEntry[]) => boolean} [keep] - Decides which
+ *           runs reach the sink, from the outcome and the trace's entries: by default a run that ended in a Failure
+ *           or in which a Command threw, as a retried or dead-lettered one did. Return `true` to keep everything, or
+ *           sample. A run whose own code threw is offered as a Failure carrying the thrown error.
  * @property {(error: unknown, flowName?: string) => void} [onSinkError] - Receives an error thrown by `keep` or
  *           `sink`. Defaults to `console.error`.
  * @property {(message: string, flowName?: string) => void} [onWarning] - Receives a warning, once per flow, about a
@@ -53,7 +54,7 @@ export function recordingHooks(options = {}) {
         maxEntries = 500,
         stack,
         version,
-        keep = (result) => result.type === 'Failure',
+        keep = (result, entries) => result.type === 'Failure' || entries.some((entry) => entry.threw === true),
         onSinkError = (error, flowName) => console.error(`Recording failed for '${flowName || 'flow'}':`, error),
         onWarning = (message) => console.warn(message)
     } = options;
@@ -82,8 +83,8 @@ export function recordingHooks(options = {}) {
             const result = 'result' in outcome ? outcome.result : Failure(outcome.error);
             // Recording never decides the outcome: a keep or sink that throws is reported, not returned.
             try {
-                if (keep(result)) {
-                    const { dropped = 0, trace } = rec.toTrace();
+                const { dropped = 0, trace } = rec.toTrace();
+                if (keep(result, trace)) {
                     const unrecorded =
                         Object.keys(head.unrecorded ?? {}).length +
                         trace.filter((e) => e.unrecorded !== undefined).length;
@@ -116,7 +117,8 @@ export function recordingHooks(options = {}) {
             warnOnce(
                 'input',
                 'the flow carries no input, so its traces hold none and timeTravel rebuilds it from undefined. ' +
-                    'Build the outermost flow with effectPipe, even as a one-step pipeline.'
+                    'If the flow takes an input, build its outermost flow with effectPipe, even as a one-step ' +
+                    'pipeline.'
             );
         }
         if (dropped > 0) {
@@ -130,8 +132,9 @@ export function recordingHooks(options = {}) {
             warnOnce(
                 'unrecorded',
                 `${unrecorded} of the values a kept trace holds could not be recorded, because redact threw on them or ` +
-                    'they could not be copied, so it replays only up to the first of them. Make redact handle every ' +
-                    "value it is given, null included, and keep Commands' results to plain data."
+                    'returned undefined, or they could not be copied, so it replays only up to the first of them. ' +
+                    'Make redact handle every value it is given, null included, and return a value for each, and ' +
+                    "keep Commands' results to plain data."
             );
         }
         const anonymous = trace.filter((entry) => entry.command === 'anonymous').length;

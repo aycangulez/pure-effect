@@ -155,6 +155,8 @@ describe('Recording', function () {
     });
 
     it('should replay a failure whose error redact removed as a failure, from JSON', async function () {
+        // Unlike a result, an error redact returns undefined for is kept as a throw with nothing to show, since the
+        // throw is the verdict the flow acts on.
         const flow = () =>
             Command(function cmdVerifyIdentity() {
                 return Promise.reject(new Error('SSN does not match'));
@@ -354,7 +356,10 @@ describe('Recording', function () {
                 const error = /** @type {any} */ (errorOf(replayed));
                 assert.equal(error.name, 'ReplayError');
                 assert.match(error.message, /no outcome for 'cmdFindUser' at path '0'/);
-                assert.match(error.message, /: redact threw on it, so the recorder left it out\./);
+                assert.match(
+                    error.message,
+                    /: redact threw on it or returned undefined, so the recorder left it out\./
+                );
                 assert.match(error.message, /make redact handle every value it is given, null included/);
                 assert.doesNotMatch(error.message, /production/i);
                 assert.equal(error.path, '0');
@@ -372,6 +377,40 @@ describe('Recording', function () {
         const handBuilt = { trace: [{ command: 'cmdFindUser', path: '0', unrecorded: /** @type {any} */ (true) }] };
         const { result: unknown } = await replayEffect(signup('a@b.c'), handBuilt);
         assert.match(/** @type {any} */ (errorOf(unknown)).message, /: it could not be recorded, so the recorder/);
+    });
+
+    it('should mark a value redact returned undefined for as unrecorded, as one it threw on', async function () {
+        // A redact with a branch missing its return stored the entry with no result and no mark, so a replay handed the
+        // flow undefined where production had a user, and a step reading it threw a TypeError.
+        const flow = effectPipe(() =>
+            Command(
+                function cmdFindUser() {
+                    return { id: 7 };
+                },
+                (/** @type {any} */ user) => Success(user.id)
+            )
+        );
+        const redact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
+            if (kind !== 'result') return value;
+        };
+        const { result, trace } = await recordEffect(flow('a@b.c'), { redact });
+        assert.deepEqual(result, Success(7));
+        const [{ durationMs, ...entry }] = trace.trace;
+        assert.deepEqual(entry, { command: 'cmdFindUser', path: '0', unrecorded: 'redact' });
+        const { result: replayed } = await replayEffect(flow('a@b.c'), trace);
+        const error = /** @type {any} */ (errorOf(replayed));
+        assert.equal(error.name, 'ReplayError');
+        assert.match(error.message, /: redact threw on it or returned undefined, so the recorder left it out\./);
+        assert.match(error.message, /null included, and return a value for each/);
+
+        // A Command that returned undefined is still recorded as one, whatever redact returns for it.
+        const quiet = effectPipe(() => Command(function cmdNotify() {}));
+        const { trace: quietTrace } = await recordEffect(quiet('a@b.c'), {
+            redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
+                kind === 'result' ? undefined : value
+        });
+        assert.equal(quietTrace.trace[0].unrecorded, undefined);
+        assert.deepEqual((await replayEffect(quiet('a@b.c'), quietTrace)).result, Success(undefined));
     });
 
     it('should mark a thrown error redact threw on as a throw that holds no error', async function () {
@@ -524,6 +563,31 @@ describe('Recording', function () {
         assert.deepEqual(trace.unrecorded, { initialInput: 'copy', context: 'copy' });
     });
 
+    it('should record the empty context of a run given none without passing it to redact', async function () {
+        // recordEffect passed redact the {} a run without a context gets, so a redact that threw on it marked the
+        // context unrecorded, and the replay of a flow that never read one was refused for want of it.
+        const flow = effectPipe(() =>
+            Command(function cmdLoad() {
+                return { id: 1 };
+            })
+        );
+        /** @type {string[]} */
+        const kinds = [];
+        const redact = (/** @type {any} */ value, /** @type {any} */ name, /** @type {string} */ kind) => {
+            kinds.push(kind);
+            if (kind === 'context') throw new Error('redact bug');
+            return value;
+        };
+        const { trace } = await recordEffect(flow('in'), { redact });
+        assert.deepEqual(trace.context, {});
+        assert.equal(trace.unrecorded, undefined);
+        assert.ok(!kinds.includes('context'), 'redact is not handed a context nobody passed');
+        assert.deepEqual((await replayEffect(flow('in'), trace)).result, Success({ id: 1 }));
+        // A context the caller passed still goes through redact.
+        const { trace: given } = await recordEffect(flow('in'), { context: { tenant: 'acme' }, redact });
+        assert.deepEqual(given.unrecorded, { context: 'redact' });
+    });
+
     it('should leave out an input or context redact threw on, and refuse a replay that needs it', async function () {
         // Both were stored as '[redaction failed]', so timeTravel rebuilt the flow from that string, and an Ask read
         // it as the context.
@@ -557,13 +621,19 @@ describe('Recording', function () {
 
         await assert.rejects(timeTravel(flow, stored, { log: () => {} }), (/** @type {any} */ e) => {
             assert.equal(e.name, 'ReplayError');
-            assert.match(e.message, /holds no initialInput: redact threw on it, so the recorder left it out/);
+            assert.match(
+                e.message,
+                /holds no initialInput: redact threw on it or returned undefined, so the recorder left it out/
+            );
             assert.equal(e.field, 'initialInput');
             return true;
         });
         await assert.rejects(replayEffect(flow({ id: 1 }), stored), (/** @type {any} */ e) => {
             assert.equal(e.name, 'ReplayError');
-            assert.match(e.message, /holds no context: redact threw on it, so the recorder left it out/);
+            assert.match(
+                e.message,
+                /holds no context: redact threw on it or returned undefined, so the recorder left it out/
+            );
             assert.match(e.message, /pass options\.context/);
             assert.equal(e.field, 'context');
             return true;
@@ -664,6 +734,27 @@ describe('Recording', function () {
             assert.equal(error.token, undefined);
         }
         assert.ok(/** @type {any} */ (result).error instanceof Error);
+    });
+
+    it('should replay an error redact rebuilt without its name as an Error named Error, not undefined', async function () {
+        // The name was restored even when redact had left it out, as an own property holding undefined, which hid
+        // Error.prototype.name, so a flow branching on error.name read undefined in the replay.
+        const flow = (/** @type {any} */ input) =>
+            effectPipe(() =>
+                Command(function cmdPost() {
+                    throw new TypeError('boom');
+                })
+            )(input);
+        const redact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
+            kind === 'error' ? { message: value.message } : value;
+        const { trace } = await recordEffect(flow('in'), { redact });
+        for (const stored of [trace, JSON.parse(JSON.stringify(trace))]) {
+            const error = /** @type {any} */ (errorOf((await replayEffect(flow('in'), stored)).result));
+            assert.ok(error instanceof Error);
+            assert.equal(error.name, 'Error');
+            assert.ok(!Object.hasOwn(error, 'name'), 'no own name hides the inherited one');
+            assert.equal(error.message, 'boom');
+        }
     });
 
     it('should replay an error redact rebuilt the same from memory as from JSON', async function () {

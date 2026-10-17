@@ -14,6 +14,7 @@ export type FailureState<E = unknown> = {
  * Metadata for a Command. `name` is its name in traces, replays and spans; other keys reach `onBeforeCommand` as they
  * are.
  */
+/** Any keys a hook needs. A non-empty string `name` names the Command; any other `name` is ignored. */
 export type CommandMeta = { name?: string } & Record<string, unknown>;
 
 export type CommandState<R, T, E = unknown, Ctx = unknown> = {
@@ -127,18 +128,37 @@ export type EffectError<X> =
                 ? E
                 : never;
 
-/** The context an Effect reads, which is `unknown` for a `Success` or `Failure`, since they read none. */
-export type EffectContext<X> = [X] extends [SuccessState<any> | FailureState<any>]
-    ? unknown
-    : X extends CommandState<any, any, any, infer C>
-      ? C
-      : X extends AskState<any, any, infer C>
+type NodeContext<X> =
+    X extends CommandState<any, any, any, infer C>
         ? C
-        : X extends RetryState<any, any, infer C, any>
+        : X extends AskState<any, any, infer C>
           ? C
-          : X extends ParallelState<any, any, any, infer C, any, any>
+          : X extends RetryState<any, any, infer C, any>
             ? C
-            : never;
+            : X extends ParallelState<any, any, any, infer C, any, any>
+              ? C
+              : unknown;
+// A node that reads no context gives `unknown`, which would erase the others in an intersection, so it is dropped. Each
+// context is boxed, so one that is itself a union is intersected whole rather than member by member.
+type ContextNeeds<X> = X extends unknown
+    ? unknown extends NodeContext<X>
+        ? never
+        : { context: NodeContext<X> }
+    : never;
+type Intersection<U> = (U extends any ? (u: U) => void : never) extends (i: infer I) => void ? I : never;
+type IsAny<X> = 0 extends 1 & X ? true : false;
+/**
+ * The context an Effect reads: for one of several Effects, as a step that branches returns, every context any of them
+ * reads. `unknown` for a `Success` or `Failure`, since they read none.
+ */
+export type EffectContext<X> =
+    IsAny<X> extends true
+        ? unknown
+        : [ContextNeeds<X>] extends [never]
+          ? unknown
+          : Intersection<ContextNeeds<X>> extends { context: infer C }
+            ? C
+            : unknown;
 
 // Checked by a conditional, not a constraint: a constraint types an inline Ask's or Retry's error as any.
 /** The branches `Parallel` accepts: each one an Effect. */
@@ -1269,25 +1289,10 @@ export declare function step<X extends AnyEffect>(effect: X): Step<X>;
 
 type StepEffectOf<Y> = Y extends Step<infer X, any> ? X : never;
 // An `any` return would match both branches and turn the error union into `any`, so it counts as a plain value.
-type GenIsAny<R> = 0 extends 1 & R ? true : false;
-type ReturnedEffect<R> = GenIsAny<R> extends true ? never : R extends AnyEffect ? R : never;
-type GenValue<R> = GenIsAny<R> extends true ? any : R extends AnyEffect ? EffectValue<R> : R;
+type ReturnedEffect<R> = IsAny<R> extends true ? never : R extends AnyEffect ? R : never;
+type GenValue<R> = IsAny<R> extends true ? any : R extends AnyEffect ? EffectValue<R> : R;
 type GenError<Y, R> = EffectError<StepEffectOf<Y>> | EffectError<ReturnedEffect<R>>;
-// A step that reads no context gives `unknown`, which would erase the others in an intersection, so it is dropped. Each
-// context is boxed, so one that is itself a union is intersected whole rather than member by member.
-type GenNeeds<X> = X extends AnyEffect
-    ? EffectContext<X> extends infer C
-        ? unknown extends C
-            ? never
-            : { context: C }
-        : never
-    : never;
-type GenIntersection<U> = (U extends any ? (u: U) => void : never) extends (i: infer I) => void ? I : never;
-type GenContext<Y, R> = [GenNeeds<StepEffectOf<Y> | ReturnedEffect<R>>] extends [never]
-    ? unknown
-    : GenIntersection<GenNeeds<StepEffectOf<Y> | ReturnedEffect<R>>> extends { context: infer C }
-      ? C
-      : unknown;
+type GenContext<Y, R> = EffectContext<StepEffectOf<Y> | ReturnedEffect<R>>;
 
 /**
  * Builds a flow function from a generator function, written with `yield* step(effect)` where `async` code writes
@@ -1308,12 +1313,19 @@ export type StepRunner = (
 ) => Promise<unknown>;
 
 /**
- * Which branch, if any, cancelled a `Parallel`, whether it threw, and how many branches it had; `branch: null` means an
- * enclosing one did. A replay refuses a `Parallel` whose count differs, and a decision without one is not checked.
+ * Which branch, if any, cancelled a `Parallel`, whether it threw, how many branches it had, and whether it was settled;
+ * `branch: null` means an enclosing one did. A replay refuses a `Parallel` whose count or `settled` differs, and a
+ * decision without one is not checked by it.
  */
 export type ParallelDecision =
-    | { cancelled: false; branches?: number | undefined }
-    | { cancelled: true; branch: number | null; branches?: number | undefined; threw?: true | undefined };
+    | { cancelled: false; branches?: number | undefined; settled?: boolean | undefined }
+    | {
+          cancelled: true;
+          branch: number | null;
+          branches?: number | undefined;
+          settled?: boolean | undefined;
+          threw?: true | undefined;
+      };
 
 /**
  * `flowName` is `context.flowName`, or `''` when the context has none. `initialInput` is what the flow was called with
@@ -1355,7 +1367,10 @@ export type RunContext<Ctx> = unknown extends Ctx
 /** A context checked against the one the flow reads, and never inferred from. */
 type CheckedContext<T> = [T][T extends any ? 0 : never];
 
-/** Runs a flow and returns its `Success` or `Failure`. A flow that reads a context requires one. */
+/**
+ * Runs a flow and returns its `Success` or `Failure`. A flow that reads a context requires one, so "Expected 2-3
+ * arguments" here means the context was left out.
+ */
 export declare function runEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     ...args: unknown extends Ctx
@@ -1445,7 +1460,8 @@ export type RecordOptions<Ctx = unknown> = RecorderOptions & {
 
 /**
  * Runs a flow for real and returns its outcome with a trace. The trace holds the flow's input when `effectPipe` or
- * `effectGen` built it.
+ * `effectGen` built it. A flow that reads a context requires `options.context`, so "Expected 2 arguments" here means
+ * it was left out.
  */
 export declare function recordEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
@@ -1474,6 +1490,34 @@ export interface Replay<T, E = unknown> {
     result: SuccessState<T> | FailureState<E>;
     unreached: TraceEntry[];
 }
+
+/**
+ * The error a replay stops with, in its result's `Failure`: a `TimeParadox` when the flow asked for a different step,
+ * else a `ReplayError`. The result's type leaves it out, so read the error as `unknown` and cast it.
+ */
+export type ReplayFault =
+    | (Error & {
+          name: 'TimeParadox';
+          /** Where the flow and the trace part. */
+          path?: string | undefined;
+          index?: number | undefined;
+          /** What the trace recorded at `path`: a Command's name, a kind of node, a branch count or `settled`. */
+          expected?: unknown;
+          /** What the flow asked for there. */
+          actual?: unknown;
+          /** The recorded branch that cancelled a `Parallel`. */
+          branch?: number | undefined;
+      })
+    | (Error & {
+          name: 'ReplayError';
+          /** Where the replay stopped. */
+          path?: string | undefined;
+          /** The Command the replay had no answer for. */
+          command?: string | undefined;
+          index?: number | undefined;
+          /** The trace field a replay needed and lacked. */
+          field?: 'initialInput' | 'context' | undefined;
+      });
 
 /**
  * Replays a flow from a trace, or from a Resolver for other storage, with no I/O. A Resolver holds no context, so a

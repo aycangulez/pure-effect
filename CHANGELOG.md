@@ -2,6 +2,36 @@
 
 All notable changes to Pure Effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
+## [0.21.0] - 2026-10-17
+
+### Added
+
+- `index.d.ts` exports `ReplayFault`, the type of the `ReplayError` or `TimeParadox` a replay stops with, told apart by `name`, so a test can cast a replay's error to it.
+
+### Changed
+
+- Breaking: a replay that reaches an `Ask` with no context, from a resolver or a trace that recorded none, stops with a `ReplayError` rather than handing `Ask` an empty object. Pass `options.context`, or give a `recorder`'s `toTrace` the context.
+- `timeTravel` narrates a replay as a tree of the flow, each Command under the `Parallel` branch or `Retry` attempt it ran in, and its header counts the `Parallel` decisions. A script that reads its lines must read the new layout.
+- `timeTravel` prints each step's duration to a tenth of a millisecond, and `<0.1ms` for a faster step. The trace still keeps it to the microsecond.
+- The recording example hands `keep` the trace's entries as well as the outcome, and by default also keeps a run in which a Command threw, such as one that succeeded on a retry or went to a dead-letter fallback.
+
+### Fixed
+
+- A replay refuses an attempt past the last one the trace recorded for its `Retry`, rather than running it live under `onMissing: 'execute'`: as a `TimeParadox` when the trace holds the fallback Command the `Retry` gave up to, and otherwise as a `ReplayError` that names the two causes, more attempts or a vetoed one.
+- A `step(...)` a generator body never runs with `yield*`, written as a bare statement or only tested for truth, throws an `EffectTypeError` rather than being skipped, which dropped its `Failure` or left its Command unrun.
+- A replay refuses a `Parallel` whose `settled` option changed since the recording, as a `TimeParadox`, since a recorded decision now says whether it was settled. Traces recorded before this are not checked.
+- In TypeScript, a step that returns one of several Effects requires every context any of them reads, so a branch that returns a plain Command beside an `Ask`, or two `Ask`s reading different contexts, no longer lets `runEffect` run without what the flow reads.
+- A result, input or context that `redact` returns `undefined` for is marked `unrecorded`, as one it throws on, so a replay stops there rather than hand the flow `undefined`.
+- A `Retry` wait longer than `setTimeout` can hold, about 24.8 days, is capped there, rather than overflowing and retrying after 1 ms.
+- An `onRun` hook that returns anything but a `Success` or `Failure` rejects the run with a `TypeError`, rather than `runEffect` resolving with that value. A hook that forgot to return `op()`'s result must return it.
+- A Command node built by hand whose `cmd` is not a function rejects the run with an `EffectTypeError`, rather than failing as an I/O fault that `Retry` retried.
+- `runEffect` refuses a context that is not an object or `null`, and so does the `context` option of `recordEffect`, `replayEffect` and `timeTravel`.
+- An error that `redact` rebuilt without a `name` replays with the `name` its class gives it, rather than an own `name` of `undefined`.
+- `recordEffect` given no context records the empty one without handing it to `redact`, so a `redact` that throws on it no longer blocks the replay.
+- `Parallel` refuses a fourth argument, as it already refused a third after the options.
+- The warning for a trace that holds no initial input, in `timeTravel` and in the recording example, no longer tells a flow that takes no input to change how it is built.
+- `timeTravel`'s closing line prints the message of an error nested in the result, such as a `Retry`'s `lastError`.
+
 ## [0.20.1] - 2026-10-15
 
 ### Added
@@ -293,6 +323,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 
 - Initial release: `Success`, `Failure`, `Command`, `effectPipe`, and `runEffect`.
 
+[0.21.0]: https://github.com/aycangulez/pure-effect/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/aycangulez/pure-effect/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/aycangulez/pure-effect/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/aycangulez/pure-effect/compare/v0.18.0...v0.19.0
