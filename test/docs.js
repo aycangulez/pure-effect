@@ -35,13 +35,20 @@ describe('README examples', function () {
     // `js` block runs as one program with the Quick Start's definitions in scope, which makes every
     // `assert` the README prints a real assertion.
     const markdown = readFileSync('README.md', 'utf8');
-    // The js blocks grouped by the heading they sit under, at any depth. The pattern matches a whole
-    // fence before anything inside it, so a `#` comment in a shell block does not count as a heading.
-    const sections = /** @type {string[][]} */ ([[]]);
-    for (const match of markdown.matchAll(/^#+ .*$|```(\w*)\n([\s\S]*?)```/gm)) {
-        if (match[0].startsWith('#')) sections.push([]);
-        else if (match[1] === 'js') sections[sections.length - 1].push(match[2]);
-    }
+    /**
+     * The js blocks grouped by the heading they sit under, at any depth. The pattern matches a whole
+     * fence before anything inside it, so a `#` comment in a shell block does not count as a heading.
+     * @param {string} text
+     */
+    const jsSections = (text) => {
+        const found = /** @type {string[][]} */ ([[]]);
+        for (const match of text.matchAll(/^#+ .*$|```(\w*)\n([\s\S]*?)```/gm)) {
+            if (match[0].startsWith('#')) found.push([]);
+            else if (match[1] === 'js') found[found.length - 1].push(match[2]);
+        }
+        return found;
+    };
+    const sections = jsSections(markdown);
     const blocks = sections.flat();
     const withoutImports = (/** @type {string} */ code) => code.replace(/^import[^;]*;\s*$/gm, '');
     const AsyncFunction = /** @type {any} */ (Object.getPrototypeOf(async function () {}).constructor);
@@ -86,15 +93,119 @@ describe('README examples', function () {
         });
     });
 
-    it('should run every example, assertions included, without performing I/O', async function () {
-        // The first section is the Quick Start, whose definitions the later examples use. Every other
-        // section gets its own scope so two sections can name the same helper without colliding.
-        // Within a section each block's scope sits inside the one before it: a block sees what the
-        // blocks above it defined, as a reader does, so a test can follow the code it tests, and two
-        // independent examples can still both declare `result`.
-        const [quickStart, ...rest] = sections.filter((section) => section.length > 0);
+    // The Quick Start's definitions, which every later example may use.
+    const [quickStart, ...readmeRest] = sections.filter((section) => section.length > 0);
+
+    // Everything the examples reach for that is not the library. These exist so the flows can be
+    // built and walked, not to stand in for a real driver: every assertion the README makes is
+    // about a value the library itself produced. `fetch` throws rather than resolving, so an
+    // example that starts reaching the network fails here instead of in CI.
+    const stubCommand = () =>
+        Command(function cmdStub() {
+            return Promise.resolve({});
+        });
+    const stubs = {
+        input: { email: 'test@test.com', password: 'password123' },
+        db: {
+            findUser: async () => null,
+            saveUser: async (/** @type {any} */ user) => ({ id: 1, ...user }),
+            createWorkspace: async (/** @type {number} */ ownerId) => ({ id: 'ws_1', ownerId, name: 'Personal' })
+        },
+        mailer: { sendWelcome: async () => ({ sent: true }), sendReceipt: async () => ({ sent: true }) },
+        app: { post: () => {} },
+        it: () => {},
+        fetch: () => {
+            throw new Error('a README example must not perform network I/O');
+        },
+        checkoutFlow: stubCommand,
+        mySpans: [{ attributes: { path: '0', output: {} } }],
+        flags: { get: async () => false },
+        chargeCard: stubCommand,
+        sendReceipt: stubCommand,
+        validateOrder: stubCommand,
+        scheduleShipping: stubCommand,
+        cmdFn: () => Promise.resolve({}),
+        next: Success,
+        order: { id: 'order_1' },
+        subscriptions: [{ id: 'sub_1' }, { id: 'sub_2' }],
+        billOne: stubCommand,
+        fetchPrice: stubCommand,
+        cmdHoldSeat: () => Promise.resolve({ holdId: 'seat_1' }),
+        trip: { id: 'trip_1' },
+        work: [Success(1)],
+        pricing: { get: async () => ({ amount: 1 }) },
+        // The checkout the shape-changing fix recipe records: a free cart, and a gateway that refuses to charge 0.
+        carts: {
+            find: async (/** @type {string} */ cartId) => ({ id: cartId, total: cartId === 'cart_free' ? 0 : 120 })
+        },
+        gateway: {
+            charge: async (/** @type {number} */ amount) => {
+                if (amount === 0)
+                    throw Object.assign(new Error('Amount must be non-zero.'), { code: 'invalid_amount' });
+                return { chargeId: 'ch_1', amount };
+            }
+        },
+        orderStore: {
+            save: async () => ({ orderId: 'order_1' }),
+            markPaid: async (/** @type {string} */ orderId) => ({ orderId, paid: true })
+        },
+        // The ending-early example: an event log that has already seen one event.
+        eventLog: { claim: async (/** @type {string} */ eventId) => eventId !== 'evt_seen' },
+        // The try/catch translation's refund: a reservation that fails after the charge went through.
+        warehouse: {
+            reserve: async () => {
+                throw new Error('out of stock');
+            }
+        },
+        // The checkout walkthrough's services: one customer whose card is declined.
+        payments: {
+            charge: async (/** @type {string} */ customerId) =>
+                customerId === 'cus_declined' ? { ok: false, code: 'card_declined' } : { ok: true, chargeId: 'ch_1' },
+            refund: async () => ({ refunded: true })
+        },
+        inventory: { reserve: async () => ({ ok: true, reservationId: 'res_1' }) },
+        analytics: { track: async () => ({ tracked: true }) },
+        sku: 'sku_1',
+        summarize: (/** @type {any} */ outcome) => outcome.type,
+        sink: () => {},
+        telemetryHooks: () => ({}),
+        recordingHooks: () => ({}),
+        // Real: the Hooks example shows a scope reaching every hook, which only the real one does.
+        AsyncLocalStorage
+    };
+
+    /**
+     * Runs the Quick Start's blocks, then `extra`, then each of `given` in a scope of its own. Every
+     * section after the Quick Start gets its own scope so two sections can name the same helper without
+     * colliding. Within a section each block's scope sits inside the one before it: a block sees what the
+     * blocks above it defined, as a reader does, so a test can follow the code it tests, and two
+     * independent examples can still both declare `result`.
+     * @param {string[][]} given
+     * @param {string} [extra]
+     */
+    const runExamples = async (given, extra = '') => {
         const nested = (/** @type {string[]} */ section) =>
             section.reduceRight((inner, block) => `{\n${withoutImports(block)}\n${inner}}\n`, '');
+        const program =
+            quickStart.map(withoutImports).join('\n') +
+            '\n' +
+            extra +
+            '\n' +
+            given
+                .filter((section) => section.length > 0)
+                .map(nested)
+                .join('');
+        const log = console.log;
+        console.log = () => {}; // timeTravel narrates, and that is its job rather than this suite's
+        try {
+            const run = new AsyncFunction(...Object.keys(lib), 'assert', ...Object.keys(stubs), program);
+            await run(...Object.values(lib), assert, ...Object.values(stubs));
+        } finally {
+            console.log = log;
+        }
+    };
+
+    it('should run every example, assertions included, without performing I/O', async function () {
         // The Quick Start shows one flow written two ways, and they must stay the same flow.
         const sameFlow = `
             for (const given of [input, { email: 'bad-email', password: 'password123' }]) {
@@ -105,96 +216,11 @@ describe('README examples', function () {
                 assert.deepEqual(shape(generated.trace), shape(piped.trace));
             }
         `;
-        const program = quickStart.map(withoutImports).join('\n') + '\n' + sameFlow + '\n' + rest.map(nested).join('');
+        await runExamples(readmeRest, sameFlow);
+    });
 
-        // Everything the examples reach for that is not the library. These exist so the flows can be
-        // built and walked, not to stand in for a real driver: every assertion the README makes is
-        // about a value the library itself produced. `fetch` throws rather than resolving, so an
-        // example that starts reaching the network fails here instead of in CI.
-        const stubCommand = () =>
-            Command(function cmdStub() {
-                return Promise.resolve({});
-            });
-        const stubs = {
-            input: { email: 'test@test.com', password: 'password123' },
-            db: {
-                findUser: async () => null,
-                saveUser: async (/** @type {any} */ user) => ({ id: 1, ...user }),
-                createWorkspace: async (/** @type {number} */ ownerId) => ({ id: 'ws_1', ownerId, name: 'Personal' })
-            },
-            mailer: { sendWelcome: async () => ({ sent: true }), sendReceipt: async () => ({ sent: true }) },
-            app: { post: () => {} },
-            it: () => {},
-            fetch: () => {
-                throw new Error('a README example must not perform network I/O');
-            },
-            checkoutFlow: stubCommand,
-            mySpans: [{ attributes: { path: '0', output: {} } }],
-            flags: { get: async () => false },
-            chargeCard: stubCommand,
-            sendReceipt: stubCommand,
-            validateOrder: stubCommand,
-            scheduleShipping: stubCommand,
-            cmdFn: () => Promise.resolve({}),
-            next: Success,
-            order: { id: 'order_1' },
-            subscriptions: [{ id: 'sub_1' }, { id: 'sub_2' }],
-            billOne: stubCommand,
-            fetchPrice: stubCommand,
-            cmdHoldSeat: () => Promise.resolve({ holdId: 'seat_1' }),
-            trip: { id: 'trip_1' },
-            work: [Success(1)],
-            pricing: { get: async () => ({ amount: 1 }) },
-            // The checkout the shape-changing fix recipe records: a free cart, and a gateway that refuses to charge 0.
-            carts: {
-                find: async (/** @type {string} */ cartId) => ({ id: cartId, total: cartId === 'cart_free' ? 0 : 120 })
-            },
-            gateway: {
-                charge: async (/** @type {number} */ amount) => {
-                    if (amount === 0)
-                        throw Object.assign(new Error('Amount must be non-zero.'), { code: 'invalid_amount' });
-                    return { chargeId: 'ch_1', amount };
-                }
-            },
-            orderStore: {
-                save: async () => ({ orderId: 'order_1' }),
-                markPaid: async (/** @type {string} */ orderId) => ({ orderId, paid: true })
-            },
-            // The ending-early example: an event log that has already seen one event.
-            eventLog: { claim: async (/** @type {string} */ eventId) => eventId !== 'evt_seen' },
-            // The try/catch translation's refund: a reservation that fails after the charge went through.
-            warehouse: {
-                reserve: async () => {
-                    throw new Error('out of stock');
-                }
-            },
-            // The checkout walkthrough's services: one customer whose card is declined.
-            payments: {
-                charge: async (/** @type {string} */ customerId) =>
-                    customerId === 'cus_declined'
-                        ? { ok: false, code: 'card_declined' }
-                        : { ok: true, chargeId: 'ch_1' },
-                refund: async () => ({ refunded: true })
-            },
-            inventory: { reserve: async () => ({ ok: true, reservationId: 'res_1' }) },
-            analytics: { track: async () => ({ tracked: true }) },
-            sku: 'sku_1',
-            summarize: (/** @type {any} */ outcome) => outcome.type,
-            sink: () => {},
-            telemetryHooks: () => ({}),
-            recordingHooks: () => ({}),
-            // Real: the Hooks example shows a scope reaching every hook, which only the real one does.
-            AsyncLocalStorage
-        };
-
-        const log = console.log;
-        console.log = () => {}; // timeTravel narrates, and that is its job rather than this suite's
-        try {
-            const run = new AsyncFunction(...Object.keys(lib), 'assert', ...Object.keys(stubs), program);
-            await run(...Object.values(lib), assert, ...Object.values(stubs));
-        } finally {
-            console.log = log;
-        }
+    it('should run every REFERENCE.md example, with the Quick Start in scope', async function () {
+        await runExamples(jsSections(readFileSync('REFERENCE.md', 'utf8')));
     });
 });
 
@@ -620,22 +646,61 @@ describe('Rules file', function () {
         assert.deepEqual(headingAnchors('# A\n```sh\n# not a heading\n```\n## A'), ['a', 'a-1']);
     });
 
-    it('should link only to headings the README has, each of them once', function () {
-        const anchors = new Set(headingAnchors(readme));
+    it('should link only to headings the README or REFERENCE.md has, each of them once', function () {
+        const headings = {
+            'README.md': new Set(headingAnchors(readme)),
+            'REFERENCE.md': new Set(headingAnchors(readFileSync('REFERENCE.md', 'utf8')))
+        };
         const links = [...readFileSync('RULES.md', 'utf8').matchAll(/\]\(([^)]*)\)/g)].map((match) => match[1]);
         assert.ok(links.length >= 20, `expected RULES.md to link to the README, found ${links.length} links`);
         links.forEach((link) => {
-            assert.ok(link.startsWith('README.md#'), `RULES.md links to '${link}', not to a README heading`);
-            const anchor = link.slice('README.md#'.length);
+            const [file, anchor] = link.split('#');
+            assert.ok(file in headings && anchor, `RULES.md links to '${link}', not to a heading in either file`);
+            const anchors = headings[/** @type {keyof typeof headings} */ (file)];
             assert.ok(anchors.has(anchor), `RULES.md links to '${link}', which no heading has`);
             // A second heading with the same text would take the anchor with -1, and the link would land on the first.
             assert.ok(!anchors.has(`${anchor}-1`), `RULES.md links to '${link}', which two headings share`);
         });
     });
 
-    it('should ship RULES.md in the package', function () {
+    it('should ship RULES.md and REFERENCE.md in the package', function () {
         const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
-        assert.ok(pkg.files.includes('RULES.md'), "add RULES.md to package.json's files");
+        for (const file of ['RULES.md', 'REFERENCE.md']) {
+            assert.ok(pkg.files.includes(file), `add ${file} to package.json's files`);
+        }
+    });
+});
+
+describe('Documentation links', function () {
+    // README.md teaches and REFERENCE.md holds the exact rules, and the two link into each other, so a heading
+    // renamed or moved in either one breaks links nothing else would notice.
+    const docs = /** @type {Record<string, string>} */ ({
+        'README.md': readFileSync('README.md', 'utf8'),
+        'REFERENCE.md': readFileSync('REFERENCE.md', 'utf8')
+    });
+
+    it('should link only to headings that exist, each of them once', function () {
+        const anchors = Object.fromEntries(
+            Object.entries(docs).map(([name, text]) => [name, new Set(headingAnchors(text))])
+        );
+        for (const [name, text] of Object.entries(docs)) {
+            // Links inside fenced code are not links.
+            const prose = text.replace(/```[\s\S]*?```/g, '');
+            for (const [, target, anchor] of prose.matchAll(/\]\(((?:README|REFERENCE)\.md)?#([^)]*)\)/g)) {
+                const file = target ?? name;
+                assert.ok(anchors[file].has(anchor), `${name} links to '${file}#${anchor}', which no heading has`);
+                // A second heading with the same text would take the anchor with -1, and the link would land on the first.
+                assert.ok(
+                    !anchors[file].has(`${anchor}-1`),
+                    `${name} links to '${file}#${anchor}', which two headings share`
+                );
+            }
+        }
+    });
+
+    it('should link the README to REFERENCE.md from its table of contents', function () {
+        const contents = docs['README.md'].split('## Installation')[0];
+        assert.match(contents, /\]\(REFERENCE\.md\)/);
     });
 });
 

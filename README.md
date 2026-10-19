@@ -17,7 +17,7 @@
 - **Getting started:** [Installation](#installation) · [The Core](#the-core) · [Quick Start](#quick-start) · [A Real Flow: Checkout](#a-real-flow-checkout) · [Coming from async/await](#coming-from-asyncawait) · [Writing Flows as Generators](#writing-flows-as-generators) · [Testing Without Mocks](#testing-without-mocks) · [Rules for Writing a Flow](#rules-for-writing-a-flow)
 - **Building flows:** [Passing Runtime Context](#passing-runtime-context) · [Retrying Transient Failures](#retrying-transient-failures) · [Running Effects in Parallel](#running-effects-in-parallel) · [Composing Larger Flows](#composing-larger-flows) · [Writing Loops](#writing-loops) · [Which Errors Are Data](#which-errors-are-data) · [Generator Flows in Depth](#generator-flows-in-depth) · [Parallel in Depth](#parallel-in-depth) · [TypeScript](#typescript-typed-errors-and-context)
 - **Recording and replay:** [Time-Travel Debugging](#time-travel-debugging) · [Recording in Production](#recording-in-production) · [Hooks](#hooks) · [Replay in Depth](#replay-in-depth)
-- **Reference:** [Why Pure Effect](#why-pure-effect) · [API Reference](#api-reference) · [Limitations](#limitations)
+- **Reference:** [Why Pure Effect](#why-pure-effect) · [API Reference](#api-reference) · [Limitations](#limitations) · [REFERENCE.md](REFERENCE.md): the API and the exact rules
 
 The eight sections under Getting started are enough to write and test a flow. Come back to the rest when a flow needs it: retries, loops, steps that run at the same time, TypeScript, or recording.
 
