@@ -21,6 +21,7 @@ The rules for writing a correct flow, and where the README covers each task.
 
 ## Find It by Task
 
+- See a whole flow built, tested and replayed, with a retry and calls at the same time: [A Real Flow: Checkout](README.md#a-real-flow-checkout)
 - Test a decision or a branch without mocks: [Testing Without Mocks](README.md#testing-without-mocks)
 - Run a whole flow in a test, a retry that fails and then succeeds included: [Testing a whole flow](README.md#testing-a-whole-flow)
 - Write a flow that reads like `async` code: [Writing Flows as Generators](README.md#writing-flows-as-generators)

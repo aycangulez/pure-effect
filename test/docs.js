@@ -122,7 +122,7 @@ describe('README examples', function () {
                 saveUser: async (/** @type {any} */ user) => ({ id: 1, ...user }),
                 createWorkspace: async (/** @type {number} */ ownerId) => ({ id: 'ws_1', ownerId, name: 'Personal' })
             },
-            mailer: { sendWelcome: async () => ({ sent: true }) },
+            mailer: { sendWelcome: async () => ({ sent: true }), sendReceipt: async () => ({ sent: true }) },
             app: { post: () => {} },
             it: () => {},
             fetch: () => {
@@ -168,7 +168,16 @@ describe('README examples', function () {
                     throw new Error('out of stock');
                 }
             },
-            payments: { refund: async () => ({ refunded: true }) },
+            // The checkout walkthrough's services: one customer whose card is declined.
+            payments: {
+                charge: async (/** @type {string} */ customerId) =>
+                    customerId === 'cus_declined'
+                        ? { ok: false, code: 'card_declined' }
+                        : { ok: true, chargeId: 'ch_1' },
+                refund: async () => ({ refunded: true })
+            },
+            inventory: { reserve: async () => ({ ok: true, reservationId: 'res_1' }) },
+            analytics: { track: async () => ({ tracked: true }) },
             sku: 'sku_1',
             summarize: (/** @type {any} */ outcome) => outcome.type,
             sink: () => {},
