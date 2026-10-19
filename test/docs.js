@@ -668,9 +668,9 @@ describe('Rules file', function () {
         });
     });
 
-    it('should ship RULES.md and REFERENCE.md in the package', function () {
+    it('should ship README.md, RULES.md and REFERENCE.md in the package', function () {
         const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
-        for (const file of ['RULES.md', 'REFERENCE.md']) {
+        for (const file of ['README.md', 'RULES.md', 'REFERENCE.md']) {
             assert.ok(pkg.files.includes(file), `add ${file} to package.json's files`);
         }
     });

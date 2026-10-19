@@ -920,7 +920,7 @@ const fetchPrice = (sku) => {
 };
 ```
 
-The failed attempt is recorded as that Command's result, with the error's `code` and `message`, so a replay takes the same fallback branch. Copy the fields you need rather than returning the error itself: a trace keeps data, not objects, so an error stored inside a result loses its message (see [Recording in Production](#recording-in-production)).
+The failed attempt is recorded as that Command's result, with the error's `code` and `message`, so a replay takes the same fallback branch. Copy the fields you need rather than returning the error itself: a trace keeps data, not objects, so an error stored inside a result loses its message (see [What a trace keeps](REFERENCE.md#what-a-trace-keeps)).
 
 **A `Failure` stops the flow.** It goes back to the code that called `runEffect`, which decides what it means: an HTTP status, a queue retry, an alert. Nothing inside the flow can catch a `Failure`, so a reader never has to look elsewhere for a handler.
 
@@ -1068,7 +1068,7 @@ Exact rules: [TypeScript](REFERENCE.md#typescript).
 
 ### Handling every error
 
-A `switch` over a flow's error union can make TypeScript refuse a case you forgot. Check first for a thrown error, which reaches `result.error` without being in the union, and end the `switch` with a `never`, so a case added to the union later is a compile error until it is handled. TypeScript narrows a `switch` only over a union, so with a single error type, leave out the `default`:
+A `switch` over a flow's error union can make TypeScript refuse a case you forgot. Check first for a thrown error, which reaches `result.error` without being in the union, and end the `switch` with a `never`, so a case added to the union later is a compile error until it is handled. TypeScript narrows a `switch` only over a union, so with a single error type, leave out the `default` and its `never`; the check for a thrown error stays the fallback:
 
 ```ts
 type BillingError = { type: 'NoSubscription' } | { type: 'CardDeclined'; code: string };
@@ -1103,7 +1103,7 @@ const findProduct = (productId: string): Effect<Product, 'not_found', AppContext
 const result = await runEffect(findProduct('abc'), { tenant: 'acme', requestId: '123' });
 ```
 
-Exact rules: [TypeScript](REFERENCE.md#context).
+Exact rules: [context in TypeScript](REFERENCE.md#context).
 
 ### Generator flows
 
@@ -1118,7 +1118,7 @@ const registerUser = effectGen(function* (input: { email: string }) {
 // (input: { email: string }) => Effect<User, 'EMAIL_TAKEN' | the errors findUser and saveUser declare>
 ```
 
-Exact rules: [TypeScript](REFERENCE.md#generator-flows).
+Exact rules: [generator flows in TypeScript](REFERENCE.md#generator-flows).
 
 ### A flow with no input
 
@@ -1191,8 +1191,8 @@ const { result, trace } = await recordEffect(checkoutFlow(input), {
     context: { flowName: 'checkout' }
 });
 
-// Later, somewhere else, with nothing connected:
-await timeTravel(checkoutFlow, trace);
+// Later, somewhere else, with nothing connected. Given the build, timeTravel warns when the trace came from another one.
+await timeTravel(checkoutFlow, trace, { version: process.env.BUILD_ID });
 ```
 
 ```
@@ -1294,7 +1294,7 @@ configureEffect(
     telemetryHooks(),
     recordingHooks({
         sink: (trace) => putObject(`traces/${trace.flowName}/${randomUUID()}.json`, JSON.stringify(trace)),
-        // Attached to each trace, so timeTravel warns when it replays one against another build.
+        // Attached to each trace, so timeTravel(flow, trace, { version }) warns when it replays one against another build.
         version: process.env.BUILD_ID,
         // A replay runs validation again on the stored input, so the stand-in keeps the password rule's verdict.
         redact: (value, name, kind) =>
@@ -1336,7 +1336,7 @@ assert.equal(redact(null, 'cmdFetchUser', 'result'), null); // still nothing fou
 assert.equal(redact('card_declined', 'cmdCharge', 'error'), 'card_declined'); // still a string
 ```
 
-A replay rebuilds the flow from the redacted input and context. So a field a step checks, such as a password, needs a stand-in the check treats the same way, as the example at the top of this section does. A context field an `Ask` reads should stay.
+A replay rebuilds the flow from the redacted input and context. So a field a step checks, such as a password, needs a stand-in the check treats the same way, as the `redact` in [Recording in Production](#recording-in-production) does. A context field an `Ask` reads should stay.
 
 Exact rules: [what `redact` gets](REFERENCE.md#what-redact-gets).
 
@@ -1505,11 +1505,11 @@ await replayEffect(checkoutFlow(input), resolve);
 
 - **`Retry` repeats everything it wraps, including a Command's `next`.** Commands that already succeeded run again, and a retried Command whose `next` continues the flow repeats the rest of the flow with it. See [what an attempt runs again](REFERENCE.md#what-an-attempt-runs-again).
 - **Cancelling a `Parallel` branch cannot stop a call already running.** A cancelled branch starts no new Commands, but a function that ignores its `AbortSignal`, or is never given one, runs to the end. See [cancellation and the signal](REFERENCE.md#cancellation-and-the-signal).
-- **Inside a `Parallel`, a Command's function that takes a parameter gets the `AbortSignal` in it.** So `Command(listUsers)`, where `listUsers(page)` treats `page` as optional, gets the signal as its page inside a `Parallel` and nothing outside one. Wrap such a function, as in `Command(() => listUsers())`; see [cancellation and the signal](REFERENCE.md#cancellation-and-the-signal).
+- **Inside a `Parallel`, a Command's function that takes a parameter without a default value gets the `AbortSignal` in it.** So `Command(listUsers)`, where `listUsers(page)` treats `page` as optional, gets the signal as its page inside a `Parallel` and nothing outside one. Wrap such a function, as in `Command(() => listUsers())`; see [cancellation and the signal](REFERENCE.md#cancellation-and-the-signal).
 - **`redact` covers a trace, not a result.** A `Failure` holds the full error, and an error can quote what a Command sent, as a database's duplicate-key error quotes the key. Keeping it out of your logs is up to you.
 - **Replay checks the path, not the values.** Every result comes from the recording, so a replay cannot check a fix that changes what a flow computes. See [What a replay cannot check](#what-a-replay-cannot-check).
 - **A trace keeps data, not objects.** A replayed value is what JSON stores: a class instance loses its methods, a `Date` becomes a string, and a thrown error comes back as a plain `Error`, so check `error.name` rather than `instanceof`. See [what a trace keeps](REFERENCE.md#what-a-trace-keeps).
-- **A trace records the input as the run starts, and a step before the first Command has already run by then.** That step runs as the flow is built, so one that changes its input, as `input.count++` does, leaves the trace holding the changed input. Return a new value rather than change the one a step receives; see [Recording in Production](#recording-in-production).
+- **A trace records the input as the run starts, and a step before the first Command has already run by then.** That step runs as the flow is built, so one that changes its input, as `input.count++` does, leaves the trace holding the changed input. Return a new value rather than change the one a step receives.
 - **Replay reproduces what one flow saw, not timing.** See [timing](REFERENCE.md#timing).
 - **Configuration belongs to one copy of the library.** Hooks live in module state, so two copies in one process (a dual ESM and CJS setup, two versions in the dependency tree, or a worker thread) do not share them, and nothing warns you.
 - **A Command needs a name that survives minification.** `meta.name` does. `cmd.name` does not, unless the minifier keeps function names.
