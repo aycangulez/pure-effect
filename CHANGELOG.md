@@ -4,6 +4,10 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- `REFERENCE.md` ships the API reference and the exact rules, moved from the README, which now teaches each feature and links to it.
+
 ### Changed
 
 - Breaking: `effectGen` refuses a generator function that declares more than one parameter, whose extra parameters were always `undefined`. Pass several values as one object.

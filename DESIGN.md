@@ -1034,7 +1034,7 @@ The maintainer's choice, made in October 2026. Entries had grown into paragraphs
 
 Write each paragraph and list item as one line, and let the editor wrap it, since hard breaks turn a one-word edit into a reflowed paragraph. `proseWrap: never` unwraps anything that arrives wrapped, but write it unwrapped in the first place. Code blocks and table rows are untouched.
 
-### No jargon in the README
+### No jargon in the README or `REFERENCE.md`
 
 A reader meets the library there, and should not need vocabulary from functional programming, from the interpreter's internals, or from `CLAUDE.md` and this file.
 
@@ -1052,13 +1052,19 @@ The names the library exports are not jargon (`Command`, `Retry`, `Parallel`, `R
 - No catch, not no catch combinator.
 - Runs at the same time, not concurrently, wherever nothing turns on the distinction.
 
-`grep -rniE "thunk|combinator|monad|kleisli|effect tree|fan-in|fan-out|short-circuit|cooperative|imperative shell|arity|stamp" README.md` should print nothing.
+`grep -rniE "thunk|combinator|monad|kleisli|effect tree|fan-in|fan-out|short-circuit|cooperative|imperative shell|arity|stamp" README.md REFERENCE.md` should print nothing.
 
 Abort is kept out because JavaScript gives it a meaning of its own: `AbortSignal` cancels, and in a study where agents built projects from the published package alone, all four that ran with no instructions flagged the README's "a `Failure` means abort" as clashing with it. `CLAUDE.md` and this file keep it for the kind of failure, where it is defined. The same study found "walk" used for two things and defined for neither, so a term the README coins is defined where it first appears, and means one thing.
 
 A precise term may stay if the plain words follow it in the same breath, as `idempotent (safe to run more than once)` does in the Retry section. A term that needs a gloss every time it appears is one the README should not use. The precise words are fine everywhere else: `CLAUDE.md`, this file, JSDoc, code comments and test names.
 
-### The README's API Reference is a reference
+### The README teaches, and `REFERENCE.md` holds the rules
+
+`README.md` teaches each feature: how it works, what to do, one example, and a closing link to its rules. `REFERENCE.md` holds the API and every exact rule, edge case and "what happens when", by feature. A rule's full statement lives there once. Three kinds of short restatement stay, each with its own job and each linking to the full statement: the twelve Rules for Writing a Flow (and so `RULES.md`), a Limitations entry, and a guide's advice on what to do, such as "wrap only the Command that fails". What leaves a guide is the precise detail behind the advice: exactly which functions get the signal, how a fallback is typed, how each kind of entry is recorded. Both files ship, and `REFERENCE.md` keeps the API entries' headings, so their anchors survived the move.
+
+The split reversed the rule below, in October 2026. The maintainer, trying to understand how a feature worked, kept meeting reference-level detail in the middle of its explanation, such as three paragraphs on exactly which Command functions receive the `AbortSignal` straight after cancellation is explained. Both DX rounds that month named the README's size as their top complaint, eight runs of eight, at 129,329 bytes. A survey found about 18 KB of reference prose outside the API Reference, about 7 KB of it inside guide sections, and four rules stated three times each, in a guide, the API Reference and Limitations: the signal rule, naming Commands, a trace keeping data rather than objects, and `Retry` repeating what it wraps. With nothing saying which statement was the authoritative one, a reader could not tell where to look.
+
+The rule it replaced, as it stood until then:
 
 Each entry gives the signature, what it returns, and one line per option, parameter or rule. Where a guide section already teaches something, the entry links to it rather than teaching it again. Explanations live in the guide sections, and reasons in this file.
 
