@@ -145,6 +145,32 @@ describe('effectGen', function () {
             assert.match(await messageOf(() => looseGen(async function* () {})), /not async function\*/);
         });
 
+        it('should refuse a generator function that declares more than one parameter', async function () {
+            // A flow is called with one value, and every run after the first builds it again from that value alone,
+            // so a second parameter could only ever be undefined.
+            assert.match(
+                await messageOf(() => looseGen(function* (/** @type {any} */ batch, /** @type {any} */ options) {})),
+                /effectGen's generator function declares 2 parameters, but a flow takes one input.*function\* \(\{ batch, limit \}\)/
+            );
+        });
+
+        it('should build from a generator function that declares one parameter, none, or only a rest parameter', function () {
+            // Checked on the definition rather than the call, so `list.map(flow)`, which passes an index and the
+            // list as well, still works.
+            const bodies = [
+                function* (/** @type {any} */ input) {},
+                function* () {},
+                function* (/** @type {any[]} */ ...args) {}
+            ];
+            for (const body of bodies) {
+                const flow = looseGen(body);
+                assert.deepEqual(
+                    [1, 2].map(flow).map((root) => root.type),
+                    ['Success', 'Success']
+                );
+            }
+        });
+
         it('should refuse a function that returns no generator, when the flow is built', async function () {
             const flow = looseGen(() => 1);
             assert.match(await messageOf(() => flow()), /its function returned the number 1/);

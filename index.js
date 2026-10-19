@@ -1073,6 +1073,15 @@ const effectGen = (body) => {
             body
         );
     }
+    // Checked on the definition rather than the call, so `list.map(flow)`, which also passes an index, still works.
+    if (body.length > 1) {
+        throw malformed(
+            `effectGen's generator function declares ${body.length} parameters, but a flow takes one input: the ` +
+                'first value is recorded and the flow is built again from it alone. Pass several values as one ' +
+                'object, as in function* ({ batch, limit }) { ... }.',
+            body
+        );
+    }
     /** @param {any} input */
     const build = (input) => {
         const flow = { body, input };

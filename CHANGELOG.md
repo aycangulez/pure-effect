@@ -2,6 +2,12 @@
 
 All notable changes to Pure Effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
+## [Unreleased]
+
+### Changed
+
+- Breaking: `effectGen` refuses a generator function that declares more than one parameter, whose extra parameters were always `undefined`. Pass several values as one object.
+
 ## [0.21.0] - 2026-10-17
 
 ### Added

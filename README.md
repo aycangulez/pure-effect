@@ -1139,6 +1139,7 @@ A step in a body's `finally` is not supported. It runs when the body ends normal
 | `[...step(x)]` or `for (const v of step(x))` | an `EffectTypeError`: `step(...)` was iterated outside `yield*` |
 | `step(db.findUser(email))` | an `EffectTypeError`: put the call in a Command |
 | `effectGen(async function* () {})` | an `EffectTypeError`: write `function*` |
+| `effectGen(function* (batch, options) {})` | an `EffectTypeError`: a flow takes one input, so pass one object, as in `function* ({ batch, limit })` |
 
 In TypeScript, most of these do not compile; see [TypeScript](#typescript-typed-errors-and-context).
 
@@ -1740,7 +1741,7 @@ Returns `{ type: 'Parallel', effects, next, options }`. Runs the branches at the
 
 #### `effectPipe(...functions)`
 
-Composes steps into a pipeline: each step gets the previous step's `Success` value, and a `Failure` from any step stops it. A step may ignore the value it gets and close over the enclosing scope instead, which is fine in JavaScript:
+Composes steps into a pipeline: each step gets the previous step's `Success` value, and a `Failure` from any step stops it. The pipeline is called with one input; pass several values as one object. A step may ignore the value it gets and close over the enclosing scope instead, which is fine in JavaScript:
 
 ```js
 // The last step ignores what came before and uses the enclosing input instead.
@@ -1768,6 +1769,7 @@ Returns a flow function, `(input) => Effect`, from a generator function, `functi
 - `return value` is `Success(value)`, `return Failure(error)` stops the flow, and a returned Effect runs.
 - When a step stops the flow, the body's `catch` and `finally` blocks run; a `catch` that recovers or throws another error, or a `finally` that runs a step, rejects the run.
 - An `async function*`, and a body that yields anything but `yield* step(effect)`, throws an `EffectTypeError`.
+- A flow takes one input, so a generator function that declares more than one parameter throws an `EffectTypeError`; pass several values as one object.
 
 #### `step(effect)`
 
