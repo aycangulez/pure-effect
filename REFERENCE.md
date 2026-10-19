@@ -20,7 +20,7 @@ Returns `{ type: 'Failure', error }`. Stops the pipeline immediately.
 
 Returns `{ type: 'Command', cmd, next, meta }`.
 
-- `cmd`: the function, sync or async, that does the I/O. Inside a `Parallel` branch, one that declares a parameter without a default value gets an `AbortSignal` that fires when a sibling fails; see [Running Effects in Parallel](README.md#running-effects-in-parallel).
+- `cmd`: the function, sync or async, that does the I/O. Inside a `Parallel` branch, one that declares a parameter without a default value gets an `AbortSignal` that fires when a sibling fails; see [Cancellation and the signal](#cancellation-and-the-signal).
 - `next`: receives `cmd`'s result and returns the next Effect; by default `(result) => Success(result)`.
 - `meta`: metadata passed to `onBeforeCommand`, with any keys your hooks need. A non-empty string `meta.name` names the Command; any other `name` is ignored, and the function's name is used.
 
@@ -56,15 +56,49 @@ Returns `{ type: 'Retry', effect, options, next }`. See [Retrying Transient Fail
 - `options.onExhausted(error)`: a fallback Effect to run when every attempt has failed, given `{ retryExhausted, lastError, retries }`. Its success feeds `next`; its failure is returned unwrapped. Per use only.
 - An option set to `undefined` keeps its default.
 
+#### The fallback
+
+Every attempt and the fallback are recorded, so a replay repeats the same failures and the same fallback, without the delays. A fallback never starts in a `Parallel` branch that has already been cancelled. With `onExhausted` set, the fallback's error type takes the place of `RetryExhaustedError` in the TypeScript error union.
+
+#### Exhaustion in TypeScript
+
+In TypeScript, a `Retry` adds `RetryExhaustedError` to the error union, beside the errors of the steps it wraps. `lastError` is typed `unknown`, since it is whatever the Command's function threw, so check it before using it, for example with `instanceof Error`. Tell your own error classes apart by `name`, as in `lastError instanceof Error && lastError.name === 'HttpError'`: a replay hands back a plain `Error`, so `instanceof HttpError` would take another branch there and stop at a `TimeParadox`.
+
 ### `Parallel(effects, next?, options?)`
 
 Returns `{ type: 'Parallel', effects, next, options }`. Runs the branches at the same time and hands `next` their values in order; by default `(values) => Success(values)`. See [Running Effects in Parallel](README.md#running-effects-in-parallel).
 
 - The first branch to fail cancels the others, and its `Failure` is the result, with `next` skipped. Which branch that is depends on timing, so it is recorded, and a replay returns the same one.
-- A branch's Command gets an `AbortSignal` to pass to its I/O when its function declares a parameter without a default value; see [Running Effects in Parallel](README.md#running-effects-in-parallel).
+- A branch's Command gets an `AbortSignal` to pass to its I/O when its function declares a parameter without a default value; see [Cancellation and the signal](#cancellation-and-the-signal).
 - The second argument is `next` or the options, so `Parallel(effects, { limit: 5 })` works; after the options, a third argument throws, as does a fourth after `next` and the options.
 - `limit`: the most branches running at once, a positive integer. Results and recorded paths stay in array order, so it changes only the pacing.
 - `settled`: run every branch to the end and hand `next` one `Success` or `Failure` per branch, in array order, so no branch cancels the others or fails the `Parallel`. A bug still rejects the run: a step or `next` that throws, or returns something other than an Effect, is not a branch outcome.
+
+#### `settled`, `limit` and outcomes
+
+In TypeScript, write `settled: true` where you call `Parallel`, or mark a shared options object `as const`. Since `settled` decides what `next` receives, a value the compiler only knows as `true` or `false` is refused.
+
+The outcomes are plain `Success` and `Failure` objects. Returning one of them from `next` is the same as returning any other `Failure`: the flow stops, and `Retry` does not run it again.
+
+`limit` caps how many branches run at once; the rest start as others finish. Results and recorded paths stay in array order, so a limit changes only the pacing, and a trace recorded with a limit replays the same without one. A `limit` that is not a positive integer throws an `EffectTypeError` where the `Parallel` is built.
+
+#### Cancellation and the signal
+
+`Parallel` waits for every branch before it returns. Outside a `Parallel`, a Command's function is called with no arguments. A `Retry` inside a cancelled branch stops retrying. Since the signal is then `undefined`, TypeScript types it `AbortSignal | undefined`, and under `exactOptionalPropertyTypes` pass it to `fetch` as `{ signal: signal ?? null }`.
+
+A function gets the signal only when it declares a parameter without a default value. One written as `(...args)` or `({ signal } = {})`, or wrapped by a helper that hides its parameters, gets none, so once started it runs to the end. A parameter with a default value does not count, so `Command(nanoid)`, whose size is written `size = 21`, works everywhere.
+
+That rule catches a function passed by name whose first parameter is optional and has no default. `function listUsers(page) { page ??= 1; return db.users(page); }` gets the signal as its page inside a `Parallel`, and nothing outside one. Wrap such a function, as in `Command(() => listUsers())`. In TypeScript, a function whose first parameter cannot be an `AbortSignal` does not compile as a Command.
+
+#### Undoing under `settled`
+
+A settled `Parallel` cancels nothing, so both steps always run to the end, and the undoing starts once both have finished. The undo steps are part of the flow, so a trace records them and a replay repeats them. An undo step that fails ends the flow with its own error rather than the original one; wrap it in `Retry` if it can fail for a moment.
+
+Under `settled`, a branch whose Command throws reaches `next` as a `Failure`, so the undo still runs. When one call follows another instead, as a shipment follows a charge, the later Command's function has to catch its own error and return it as data: a throw stops the flow before its `next` runs, and the charge stays. [Translating `try`/`catch`](README.md#translating-trycatch) shows that shape.
+
+#### Loops
+
+A generator flow's `for` loop and a `Parallel` over the list record differently, so a trace recorded from one replays against the other as a `TimeParadox`. When a Command's function gets a whole list by paging, a trace records the finished list as that step's result, and a replay hands the list back without replaying the pages. A `Retry` around the Command starts again from the first page.
 
 #### Errors no branch returned
 
@@ -243,6 +277,10 @@ Runs a flow and resolves with its `Success` or `Failure`. See [Which Errors Are 
 - A throw from a Command's function, or an `onBeforeCommand` veto, ends the run with a `Failure` holding the error thrown; under a `Retry` that gave up, it holds `{ retryExhausted, lastError, retries }`.
 - A malformed flow, or a throw from a `next` or a pure step, is a bug. The call that builds the flow throws it before the first Command, and `runEffect` rejects with it after.
 
+#### The context
+
+The context is copied once per run. So a value that can change while a run is under way, such as a switch an operator can flip to stop a batch, belongs in a Command, whose result the trace records each time. A context whose properties throw when read, as a lazy client's can, leaves the whole context out, and a replay then needs it passed in.
+
 ### `configureEffect(...configs)`
 
 Adds a layer of hooks for the whole process and returns a function that removes that layer only. See [Hooks](README.md#hooks).
@@ -256,6 +294,20 @@ Adds a layer of hooks for the whole process and returns a function that removes 
     - A throw after `op()` succeeded, or `undefined` in place of its value (a forgotten `return` or `await`), is a bug in the hook: the run rejects, and `Retry` does not run the Command again.
     - For a `Parallel`, `op()` runs the branches, so a hook must call it or the run rejects with a `TypeError`. It returns which branch, if any, cancelled the others, and how many branches there were and whether it was settled, as in `{ cancelled: true, branch: 0, branches: 2, settled: false }`. A branch that threw adds `threw: true`.
 - `onBeforeCommand(command, context)`: runs before each Command. A throw vetoes the Command: the run returns a `Failure` carrying the thrown error, and `Retry` does not retry it. A vetoed Command leaves no entry in a trace, so a replay of that run fails where it was vetoed; see [Errors no branch returned](#errors-no-branch-returned).
+
+#### Per-call hooks
+
+Hooks passed as `runEffect`'s third argument are merged with the configured ones by the same rules: the configured wrappers run outside them, and the configured `onBeforeCommand` hooks run first. `inherit: false` leaves the configured hooks out. With configured hooks `C` and a call `K` that supplies only `onStep`:
+
+```
+                  inherit: true (default)        inherit: false
+
+onRun             C.onRun                        (none)
+onBeforeCommand   C.onBeforeCommand              (none)
+onStep            C.onStep( K.onStep( cmd ) )    K.onStep
+```
+
+`recordEffect` inherits, so recording inside an application that already traces still produces spans. `replayEffect` passes `inherit: false` unless `hooks: true`.
 
 ## Recording and replay
 
@@ -282,6 +334,10 @@ Returns `{ onStep, entries, toTrace }`, a hook that records every step of a run,
 - `options.stack`: record stack traces for thrown errors (off by default).
 - A value `redact` throws on or returns `undefined` for, or one JSON cannot hold, is left out and marked `unrecorded`: on its entry, or for the input and context in the trace's `unrecorded`, as in `{ context: 'copy' }`. A replay stops there with a `ReplayError` rather than hand the flow a stand-in. An error `redact` returns `undefined` for is recorded as a throw with nothing to show. See [Recording in Production](README.md#recording-in-production) for what a copy keeps.
 
+#### What `redact` gets
+
+`redact` gets a copy in the form the trace stores, so changing it in place is safe, and what it returns is stored in that form too. A thrown `Error` arrives as a plain object holding its `name`, `message` and own fields, and any object returned for it replays as an `Error`.
+
 ### `recordEffect(effect, options?)`
 
 Runs a flow for real while recording, returning `{ result, trace }`. The trace holds the flow's input when `effectPipe` or `effectGen` built it, so `timeTravel` can build the flow again. Accepts `recorder` options plus `context` and `version`; without a `context`, the trace records the empty one the run gets, which `redact` is not handed. For tests and scripts; to record an application without changing call sites, use the wiring in [`examples/recording-example.js`](https://github.com/aycangulez/pure-effect/blob/main/examples/recording-example.js), which gives each run its own recorder.
@@ -305,6 +361,18 @@ Runs a flow with each Command answered from a trace instead of run, and returns 
 - `options.onResolved(step, outcome)`: observes each replayed step. A throw stops the replay, and `replayEffect` rejects with it; it never changes an outcome.
 - A trace whose entries have no `path`, written by hand or recorded before paths existed, is matched in order, and a Command inside a `Parallel` is refused with a `ReplayError`.
 
+#### What ends a replay
+
+A step the trace lacks ends the replay in a `Failure` holding a `ReplayError`. A trace lacks a step that comes after the end of the recording, one a hook vetoed in production, and one the recorder dropped under `maxEntries`. An empty `unreached` catches a removed step only when it is the last one the flow reaches. Remove a step from the middle and every later step moves to a different path, so the replay stops at a `TimeParadox`, and `unreached` lists the steps it never got to.
+
+#### How errors come back
+
+A replayed `Failure` compares equal to the recorded one when the Command threw a plain `Error`. It comes back with its message, name, cause, custom properties and an `AggregateError`'s list of errors, even a `name` or `cause` set after it was created. An error of any other class, built-in ones included, comes back as a plain `Error` carrying that class's name. So `deepEqual` from `node:assert/strict` refuses the replayed `TypeError` that `fetch` rejects with when the network fails. Where a Command can throw one, compare `error.name` and `error.message` instead.
+
+#### Timing
+
+A stale read replays exactly. A race between two requests does not, because a trace records one flow. Nor does a race between branches that share state: branches replay with the results they saw, not the order they ran in. A cancelled generator branch can stop one step later in a replay; see [Replaying a cancelled `Parallel`](#replaying-a-cancelled-parallel).
+
 ### `timeTravel(flowFn, traceLog, options?)`
 
 Replays a trace and narrates it as a tree of the flow, each Command under the `Parallel` branch or `Retry` attempt it ran in, with its recorded duration to a tenth of a millisecond (`<0.1ms` for a faster step). Returns `{ result, unreached }`, as `replayEffect` does for a trace.
@@ -313,6 +381,36 @@ Replays a trace and narrates it as a tree of the flow, each Command under the `P
 - Warns when the trace's `version` differs from `options.version`, and when steps are named `'anonymous'`.
 - Refuses a trace whose input could not be recorded, since the flow is rebuilt from it.
 - `options.context` overrides the trace's; `options.log` replaces `console.log`.
+
+### The recording example
+
+What the example does with each run:
+
+- **Which runs it keeps.** `keep` decides, from the run's outcome and its trace's entries. By default it keeps a run that ended in a `Failure` or in which a Command threw, as one that succeeded on a retry or went to a dead-letter fallback did, and discards the rest after holding them in memory. A settled `Parallel` hands its failures to `next`, an `onBeforeCommand` veto among them, so a batch whose items failed or were vetoed ends in a `Success` with nothing thrown; keep it with a `keep` that reads the result, such as `(result, entries) => result.type === 'Failure' || result.value.failed > 0`. Return `true` to keep everything, or sample.
+- **When your own code throws.** A `TypeError` after an API changed the shape of its response, say, makes the run reject. `keep` is offered a `Failure` carrying the thrown error, so by default its trace is kept, and replaying it reproduces the throw. A step before the flow's first Command runs when the flow is built, outside `runEffect`, so its throw reaches no hook and is not recorded. That run did no I/O, so its input reproduces it.
+- **What a trace holds.** `redact` runs before anything enters the trace, including the stored `initialInput` and `context`. A value it throws on, or one JSON cannot hold, such as a `BigInt`, is left out and marked `unrecorded`, and a replay stops there. Everything else is already in the form JSON holds, so the sink can write it to S3 or a database column with `JSON.stringify`.
+- **How long a trace gets.** `maxEntries` caps it and reports the overflow as `dropped`, and a capped trace replays only up to the first step it lacks.
+- **When storage fails.** If `keep` or the sink throws, for example because storage is unreachable, the run keeps its own outcome and the error goes to `onSinkError`, which defaults to `console.error`.
+- **What it warns about.** The example warns through `onWarning`, once per flow, when it keeps a trace that was capped, one holding values it could not record, or one whose steps include any named `'anonymous'`.
+
+The example takes the input from `onRun`, which is handed it only for a flow `effectPipe` or `effectGen` built, so build the outermost flow with one of them. A flow that starts with a bare `Command`, `Ask`, `Retry`, or `Parallel` records no input, and `timeTravel` would rebuild it from `undefined`. A one-step pipeline is enough, as in `runEffect(effectPipe(loadProfile)(userId))`. The example warns through `onWarning`, which defaults to `console.warn`, the first time it keeps a trace of such a flow, and `timeTravel` warns when it replays one.
+
+The example also takes the context from the run's first Command, so a run that stops before any Command, for example at an `Ask` check, records no context. Such a run did no I/O, so running the flow again with its input and the context from your logs reproduces it.
+
+### What a trace keeps
+
+A value is copied into the form JSON stores when it is recorded, and again each time a replay hands it to the flow, so neither a later step nor a replay can change what the trace says, and a replay from memory gets what a replay from storage gets. The copy keeps values but not classes:
+
+| Recorded                            | Replayed as                                         |
+| ----------------------------------- | --------------------------------------------------- |
+| a money object or a database entity | a plain object, without its methods                 |
+| a `Date`                            | a string                                            |
+| a `Map` or a `Set`                  | `{}`                                                |
+| a `Buffer`                          | `{ type: 'Buffer', data }`                          |
+| `undefined` in an array             | `null`                                              |
+| an error returned inside a result   | its own fields, such as `code`, without its message |
+
+A reference back to an object the value is inside of, as between an HTTP client's request and response, is cut. A value JSON cannot hold at all, such as a `BigInt` or an object whose getter throws, is left out of the trace and marked `unrecorded` before `redact` sees it. So a context holding a lazy client is left out whole.
 
 ## TypeScript
 
