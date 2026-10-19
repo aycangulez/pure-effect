@@ -49,7 +49,9 @@ describe('README examples', function () {
         return found;
     };
     const sections = jsSections(markdown);
-    const blocks = sections.flat();
+    const reference = readFileSync('REFERENCE.md', 'utf8');
+    const referenceSections = jsSections(reference);
+    const blocks = [...sections.flat(), ...referenceSections.flat()];
     const withoutImports = (/** @type {string} */ code) => code.replace(/^import[^;]*;\s*$/gm, '');
     const AsyncFunction = /** @type {any} */ (Object.getPrototypeOf(async function () {}).constructor);
 
@@ -66,7 +68,10 @@ describe('README examples', function () {
     it('should find the examples at all', function () {
         // A regex that silently stops matching would turn every check below into a pass over
         // nothing, which is the failure this whole suite exists to rule out.
-        assert.ok(blocks.length >= 20, `expected the README to hold examples, found ${blocks.length}`);
+        const inReadme = sections.flat().length;
+        const inReference = referenceSections.flat().length;
+        assert.ok(inReadme >= 20, `expected the README to hold examples, found ${inReadme}`);
+        assert.ok(inReference >= 3, `expected REFERENCE.md to hold examples, found ${inReference}`);
     });
 
     it('should fence only real JavaScript as js', function () {
@@ -80,7 +85,7 @@ describe('README examples', function () {
 
     it('should import only names the library exports', function () {
         const shipped = Object.keys(lib);
-        const imports = [...markdown.matchAll(/import\s*\{([^}]*)\}\s*from\s*'pure-effect'/g)];
+        const imports = [...(markdown + reference).matchAll(/import\s*\{([^}]*)\}\s*from\s*'pure-effect'/g)];
         assert.ok(imports.length > 0, 'expected the README to import from the package');
         imports.forEach((match) => {
             match[1]
@@ -220,7 +225,7 @@ describe('README examples', function () {
     });
 
     it('should run every REFERENCE.md example, with the Quick Start in scope', async function () {
-        await runExamples(jsSections(readFileSync('REFERENCE.md', 'utf8')));
+        await runExamples(referenceSections);
     });
 });
 
