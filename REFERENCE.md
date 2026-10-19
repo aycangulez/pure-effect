@@ -64,6 +64,10 @@ Every attempt and the fallback are recorded, so a replay repeats the same failur
 
 In TypeScript, a `Retry` adds `RetryExhaustedError` to the error union, beside the errors of the steps it wraps. `lastError` is typed `unknown`, since it is whatever the Command's function threw, so check it before using it, for example with `instanceof Error`. Tell your own error classes apart by `name`, as in `lastError instanceof Error && lastError.name === 'HttpError'`: a replay hands back a plain `Error`, so `instanceof HttpError` would take another branch there and stop at a `TimeParadox`.
 
+#### What an attempt runs again
+
+`Retry` repeats everything it wraps, including a Command's `next`. Commands that already succeeded run again, and a retried Command whose `next` continues the flow repeats the rest of the flow with it. Wrap only the Command that fails, and continue in a later step; see [Retrying Transient Failures](README.md#retrying-transient-failures). A function that catches its own error is never retried; see [Which Errors Are Data](README.md#which-errors-are-data).
+
 ### `Parallel(effects, next?, options?)`
 
 Returns `{ type: 'Parallel', effects, next, options }`. Runs the branches at the same time and hands `next` their values in order; by default `(values) => Success(values)`. See [Running Effects in Parallel](README.md#running-effects-in-parallel).
@@ -84,7 +88,7 @@ The outcomes are plain `Success` and `Failure` objects. Returning one of them fr
 
 #### Cancellation and the signal
 
-`Parallel` waits for every branch before it returns. Outside a `Parallel`, a Command's function is called with no arguments. A `Retry` inside a cancelled branch stops retrying. Since the signal is then `undefined`, TypeScript types it `AbortSignal | undefined`, and under `exactOptionalPropertyTypes` pass it to `fetch` as `{ signal: signal ?? null }`.
+A cancelled branch starts no new Commands, but a function that ignores its `AbortSignal`, or is never given one, runs to the end. So a branch whose _first_ Command is a write can still write after another branch has failed. `Parallel` waits for every branch before it returns. Outside a `Parallel`, a Command's function is called with no arguments. A `Retry` inside a cancelled branch stops retrying. Since the signal is then `undefined`, TypeScript types it `AbortSignal | undefined`, and under `exactOptionalPropertyTypes` pass it to `fetch` as `{ signal: signal ?? null }`.
 
 A function gets the signal only when it declares a parameter without a default value. One written as `(...args)` or `({ signal } = {})`, or wrapped by a helper that hides its parameters, gets none, so once started it runs to the end. A parameter with a default value does not count, so `Command(nanoid)`, whose size is written `size = 21`, works everywhere.
 

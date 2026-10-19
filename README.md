@@ -979,6 +979,8 @@ assert.deepEqual(await runEffect(pay(25)), Success({ chargeId: 'ch_1', amount: 2
 
 In short, **you can recover from an error your I/O produced, but you cannot catch a `Failure` a step returned.** Only the code that called `runEffect` acts on it. For the same reason, do not throw business errors from a Command's function: a throw there tells `Retry` that the I/O broke, and `Retry` will try again. A throw anywhere else in the flow is a bug, and is thrown as it is rather than returned as a `Failure`. `runEffect` rejects with it, or, from a step before the first Command, the call that builds the flow throws it.
 
+Exact rules: [a malformed flow](REFERENCE.md#a-malformed-flow).
+
 ### Translating `try`/`catch`
 
 A `catch` around `yield*` can log and rethrow, but it cannot recover, and it sees a `FlowStopped` error rather than the original. So each `try`/`catch` in an `async` function moves to where its error happens. The four common shapes:
@@ -1061,6 +1063,8 @@ The annotations are optional. Without them, the union holds whatever each step c
 To check for a thrown error, copy it into a variable typed `unknown` first, as in `const error: unknown = result.error`. TypeScript refuses `instanceof Error` on an error type made only of strings, or on a flow that declares none.
 
 Value types are checked through the pipeline too, so a step that reads a field the previous step does not return is a compile error. This only works while every step uses the value it receives. A step written as `() => doSomething(outer)` ignores it, and the types stop being checked at that point.
+
+Exact rules: [TypeScript](REFERENCE.md#typescript).
 
 ### Handling every error
 
@@ -1156,6 +1160,8 @@ function assertCommand<T, E, C>(step: Effect<T, E, C>, name: string) {
 const step1 = assertCommand(registerUserFlow(input), 'cmdFindUser');
 assertCommand(step1.next(null), 'cmdSaveUser');
 ```
+
+Exact rules: [walking a flow in a test](REFERENCE.md#walking-a-flow-in-a-test).
 
 ## Time-Travel Debugging
 
@@ -1497,9 +1503,9 @@ await replayEffect(checkoutFlow(input), resolve);
 
 ## Limitations
 
-- **`Retry` repeats everything it wraps, including a Command's `next`.** Commands that already succeeded run again, and a retried Command whose `next` continues the flow repeats the rest of the flow with it. See [Retrying Transient Failures](#retrying-transient-failures).
+- **`Retry` repeats everything it wraps, including a Command's `next`.** Commands that already succeeded run again, and a retried Command whose `next` continues the flow repeats the rest of the flow with it. See [what an attempt runs again](REFERENCE.md#what-an-attempt-runs-again).
 - **Cancelling a `Parallel` branch cannot stop a call already running.** A cancelled branch starts no new Commands, but a function that ignores its `AbortSignal`, or is never given one, runs to the end. See [cancellation and the signal](REFERENCE.md#cancellation-and-the-signal).
-- **Inside a `Parallel`, a Command's function that takes a parameter gets the `AbortSignal` in it.** Wrap such a function, as in `Command(() => listUsers())`; see [cancellation and the signal](REFERENCE.md#cancellation-and-the-signal).
+- **Inside a `Parallel`, a Command's function that takes a parameter gets the `AbortSignal` in it.** So `Command(listUsers)`, where `listUsers(page)` treats `page` as optional, gets the signal as its page inside a `Parallel` and nothing outside one. Wrap such a function, as in `Command(() => listUsers())`; see [cancellation and the signal](REFERENCE.md#cancellation-and-the-signal).
 - **`redact` covers a trace, not a result.** A `Failure` holds the full error, and an error can quote what a Command sent, as a database's duplicate-key error quotes the key. Keeping it out of your logs is up to you.
 - **Replay checks the path, not the values.** Every result comes from the recording, so a replay cannot check a fix that changes what a flow computes. See [What a replay cannot check](#what-a-replay-cannot-check).
 - **A trace keeps data, not objects.** A replayed value is what JSON stores: a class instance loses its methods, a `Date` becomes a string, and a thrown error comes back as a plain `Error`, so check `error.name` rather than `instanceof`. See [what a trace keeps](REFERENCE.md#what-a-trace-keeps).
