@@ -11,6 +11,13 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 ### Changed
 
 - Breaking: `effectGen` refuses a generator function that declares more than one parameter, whose extra parameters were always `undefined`. Pass several values as one object.
+- A `Command` given only its result type, with a `next` that keeps the value and cannot fail, types its error as `never` rather than `unknown`.
+
+### Fixed
+
+- A `Parallel` whose `settled` is typed `boolean` gets a type error that names `settled`, rather than one about what `next` returns.
+- Hovers and type errors show a generator flow's error union rather than an unexpanded `GenError<Step<...>>`.
+- A type error in a Command's `next` reports two overloads rather than three.
 
 ## [0.21.0] - 2026-10-17
 

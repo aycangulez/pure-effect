@@ -260,8 +260,8 @@ if (walkedRetry.type === 'Retry') walkedRetry.next({ chargeId: 'ch_1' });
 Retry(innerCmd).next('not a number');
 
 // A step annotated with its return type can return a retried Command that keeps its default next, which is the
-// shape the README recommends. Command's value type was inferred from the annotation rather than from the
-// function, as unknown, until the no-next case got its own overload.
+// shape the README recommends. Without a next, Command's value comes from its function, since T defaults to R; it
+// was once inferred from the annotation instead, as unknown.
 type Seat = { seat: string };
 const cmdHoldSeat = async (): Promise<Seat> => ({ seat: '12A' });
 const holdSeat = (): Effect<Seat, RetryExhaustedError> => Retry(Command(cmdHoldSeat), { retries: 2 });
@@ -438,6 +438,12 @@ expectType<AskState<SavedUser, 'not_found'>>(fullyTypedAsk);
 const toUserId = (u: SavedUser) => Success(u.id);
 // @ts-expect-error with only R given, the value defaults to R, so a next that changes it needs every argument or none
 Command<SavedUser>(() => fetchJson('/me'), toUserId);
+// A next that keeps the value and cannot fail fits those defaults, so it adds never to the union rather than unknown
+const typedPassThrough = Command<SavedUser>(
+    () => fetchJson('/me'),
+    (u) => Success(u)
+);
+expectType<CommandState<SavedUser, SavedUser, never>>(typedPassThrough);
 // Writing the function's result type instead keeps every other type inferred exactly
 const typedByReturn = Command(
     (): Promise<SavedUser | null> => fetchJson('/me'),

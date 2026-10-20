@@ -189,18 +189,13 @@ export declare function Success<T>(value: T): SuccessState<T>;
 /** Stops the pipeline with `error`. A literal keeps its exact type, and an object or array error is readonly. */
 export declare function Failure<const E = unknown>(error: E): FailureState<E>;
 
+// `N` is what `next` returns, whole, so Failures of different shapes join; given explicitly, `T`, `E` and `Ctx` build it.
+// Without `next`, `N` takes its default, so `T = R` types the value the result passes through as.
 /**
  * Defers a side effect: `cmd` makes the call and `next` decides what follows; without `next` the result passes through.
  * `meta.name` names it, else `cmd.name`.
  */
-export declare function Command<R>(
-    cmd: (signal?: AbortSignal) => Promise<R> | R,
-    next?: undefined,
-    meta?: CommandMeta
-): CommandState<R, R, never>;
-
-// `N` is what `next` returns, whole, so Failures of different shapes join; given explicitly, `T`, `E` and `Ctx` build it.
-export declare function Command<R, T = never, E = never, Ctx = unknown, N extends AnyEffect = Effect<T, E, Ctx>>(
+export declare function Command<R, T = R, E = never, Ctx = unknown, N extends AnyEffect = Effect<T, E, Ctx>>(
     cmd: (signal?: AbortSignal) => Promise<R> | R,
     next?: (result: R) => N,
     meta?: CommandMeta
@@ -243,6 +238,7 @@ export declare function Retry<T, E = never, Ctx = unknown>(
 ): RetryState<T, E | RetryExhaustedError, Ctx>;
 
 // `settled?: false | undefined` keeps a `settled` typed boolean from matching; `| []` infers tuples on TypeScript 5.1.
+// `N` defaults to an Effect rather than `never`, so a call no overload matches reports its options, not `next`.
 /**
  * Runs the branches at the same time and hands `next` their values in order. The first to fail cancels the rest, unless
  * `settled`, which hands `next` every outcome.
@@ -259,7 +255,7 @@ export declare function Parallel<B extends readonly unknown[] | []>(
     EffectError<B[number]>
 >;
 
-export declare function Parallel<B extends readonly unknown[] | [], N extends AnyEffect = never>(
+export declare function Parallel<B extends readonly unknown[] | [], N extends AnyEffect = Effect<any, never, unknown>>(
     effects: ParallelBranches<B>,
     next: (outcomes: ParallelOutcomes<B>) => N,
     options: ParallelOptions & { settled: true }
@@ -277,7 +273,7 @@ export declare function Parallel<B extends readonly unknown[] | []>(
     options?: ParallelOptions & { settled?: false | undefined }
 ): ParallelState<ParallelValues<B>, ParallelValues<B>, EffectError<B[number]>, ParallelContext<B>>;
 
-export declare function Parallel<B extends readonly unknown[] | [], N extends AnyEffect = never>(
+export declare function Parallel<B extends readonly unknown[] | [], N extends AnyEffect = Effect<any, never, unknown>>(
     effects: ParallelBranches<B>,
     next: (values: ParallelValues<B>) => N,
     options?: ParallelOptions & { settled?: false | undefined }
@@ -1291,16 +1287,16 @@ type StepEffectOf<Y> = Y extends Step<infer X, any> ? X : never;
 // An `any` return would match both branches and turn the error union into `any`, so it counts as a plain value.
 type ReturnedEffect<R> = IsAny<R> extends true ? never : R extends AnyEffect ? R : never;
 type GenValue<R> = IsAny<R> extends true ? any : R extends AnyEffect ? EffectValue<R> : R;
-type GenError<Y, R> = EffectError<StepEffectOf<Y>> | EffectError<ReturnedEffect<R>>;
 type GenContext<Y, R> = EffectContext<StepEffectOf<Y> | ReturnedEffect<R>>;
 
+// The error union is written out rather than named by an alias, which hovers and errors would show unexpanded.
 /**
  * Builds a flow function from a generator function, written with `yield* step(effect)` where `async` code writes
  * `await`. A plain return value is a `Success`; return a `Failure` to stop.
  */
 export declare function effectGen<I, Y extends Step<any, any>, R>(
     body: (input: I) => Generator<Y, R, unknown>
-): (input: I) => Effect<GenValue<R>, GenError<Y, R>, GenContext<Y, R>>;
+): (input: I) => Effect<GenValue<R>, EffectError<StepEffectOf<Y>> | EffectError<ReturnedEffect<R>>, GenContext<Y, R>>;
 
 /**
  * Wraps each Command, and each `Parallel`. Call `op` and return its result; a hook that calls another passes `path` on.
