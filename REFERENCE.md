@@ -438,7 +438,7 @@ Every step's context counts, so a pipeline needs all the contexts its steps read
 
 ### Generator flows
 
-`yield* x` without `step`, reading a property of a step, and an `async function*` do not compile, and a body that returns an untyped value keeps its steps' errors. Returning a step or a Promise compiles, so that a generic helper returning a value of its type parameter does too, and fails when it runs. `yield step(x)` without the star does, and fails when it runs. Name the context `Ask()` reads as `Ask<AppContext>()`. Given a function, `Ask`'s first type argument is the value instead, so annotate the parameter: `Ask((ctx: AppContext) => ...)`.
+`yield* x` without `step`, a bare `yield` of an Effect, reading a property of a step, and an `async function*` do not compile; the error for a bare `yield` ends by naming `yield* step(effect)`, and a body that returns an untyped value keeps its steps' errors. Returning a step or a Promise compiles, so that a generic helper returning a value of its type parameter does too, and fails when it runs. `yield step(x)` without the star does, and fails when it runs. Name the context `Ask()` reads as `Ask<AppContext>()`. Given a function, `Ask`'s first type argument is the value instead, so annotate the parameter: `Ask((ctx: AppContext) => ...)`.
 
 ### Walking a flow in a test
 

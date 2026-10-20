@@ -14,12 +14,12 @@
 
 ## Table of Contents
 
-- **Getting started:** [Installation](#installation) · [The Core](#the-core) · [Quick Start](#quick-start) · [A Real Flow: Checkout](#a-real-flow-checkout) · [Coming from async/await](#coming-from-asyncawait) · [Writing Flows as Generators](#writing-flows-as-generators) · [Testing Without Mocks](#testing-without-mocks) · [Rules for Writing a Flow](#rules-for-writing-a-flow)
+- **Getting started:** [Installation](#installation) · [The Core](#the-core) · [Quick Start](#quick-start) · [Coming from async/await](#coming-from-asyncawait) · [Writing Flows as Generators](#writing-flows-as-generators) · [Testing Without Mocks](#testing-without-mocks) · [Rules for Writing a Flow](#rules-for-writing-a-flow)
 - **Building flows:** [Passing Runtime Context](#passing-runtime-context) · [Retrying Transient Failures](#retrying-transient-failures) · [Running Effects in Parallel](#running-effects-in-parallel) · [Composing Larger Flows](#composing-larger-flows) · [Writing Loops](#writing-loops) · [Which Errors Are Data](#which-errors-are-data) · [TypeScript](#typescript-typed-errors-and-context)
 - **Recording and replay:** [Time-Travel Debugging](#time-travel-debugging) · [Recording in Production](#recording-in-production) · [Hooks](#hooks) · [Replay in Depth](#replay-in-depth)
 - **Reference:** [Why Pure Effect](#why-pure-effect) · [Limitations](#limitations) · [REFERENCE.md](REFERENCE.md): the API and the exact rules
 
-The eight sections under Getting started are enough to write and test a flow. Come back to the rest when a flow needs it: retries, loops, steps that run at the same time, TypeScript, or recording.
+The seven sections under Getting started are enough to write and test a flow. Come back to the rest when a flow needs it: retries, loops, steps that run at the same time, TypeScript, or recording.
 
 ## Installation
 
@@ -128,157 +128,7 @@ async function registerUser(input) {
 }
 ```
 
-That is a whole flow. [A Real Flow: Checkout](#a-real-flow-checkout) builds a bigger one, with a retry and calls at the same time, and replays a failed run on your machine. [Rules for Writing a Flow](#rules-for-writing-a-flow) lists the twelve rules that cover most of what goes wrong, and [Time-Travel Debugging](#time-travel-debugging) shows how to record a run in production and replay it on your machine. In TypeScript, [TypeScript: Typed Errors and Context](#typescript-typed-errors-and-context) covers typing a flow's errors and context, handling every error, and testing a flow.
-
-## A Real Flow: Checkout
-
-The Quick Start's flow is three steps in a line. Real flows are messier: they retry, make calls at the same time, and decide what an answer means. This checkout shows that a messy flow still reads as a list of steps, and that all of it can be tested and replayed with nothing connected.
-
-Here it is with `async`/`await`. It checks the cart, reserves the stock, charges the customer up to three times if the payment provider times out, then sends a receipt and records the purchase at the same time:
-
-```js
-async function checkoutAsync(order) {
-    if (order.items.length === 0) throw new Error('Cart is empty.');
-    const stock = await inventory.reserve(order.items);
-    if (!stock.ok) throw new Error('Out of stock.');
-
-    let charge;
-    for (let attempt = 1; ; attempt++) {
-        try {
-            charge = await payments.charge(order.customerId, order.total);
-            break;
-        } catch (error) {
-            if (attempt === 3) throw error;
-            await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-    }
-    if (!charge.ok) throw new Error('Card declined.');
-
-    await Promise.all([mailer.sendReceipt(order.email, charge.chargeId), analytics.track('purchase', order.id)]);
-    return { orderId: order.id, chargeId: charge.chargeId };
-}
-```
-
-Testing it means mocking four services, and reaching the retry means making the payment mock fail once and waiting for the retry or faking the clock.
-
-**As a pipeline,** each piece becomes a small step, and the flow is the list of them:
-
-```js
-import { Success, Failure, Command, Retry, Parallel, effectPipe } from 'pure-effect';
-
-const validateCart = (order) => (order.items.length === 0 ? Failure('Cart is empty.') : Success(order));
-
-const reserveStock = (order) => {
-    const cmdReserveStock = () => inventory.reserve(order.items);
-    return Command(cmdReserveStock, (stock) => (stock.ok ? Success(order) : Failure('Out of stock.')));
-};
-
-// Up to three calls if the provider times out. A declined card is an answer, not a timeout, so it is not retried.
-const chargeCard = (order) => {
-    const cmdChargeCard = () => payments.charge(order.customerId, order.total);
-    return Retry(Command(cmdChargeCard), { retries: 2 });
-};
-
-const requirePaid = (charge) => (charge.ok ? Success(charge) : Failure('Card declined.'));
-
-// Pays, then passes the order on with its charge, since the receipt needs both.
-const payForOrder = (order) => effectPipe(chargeCard, requirePaid, (charge) => Success({ order, charge }))(order);
-
-const sendReceipt = (order, charge) => {
-    const cmdSendReceipt = () => mailer.sendReceipt(order.email, charge.chargeId);
-    return Command(cmdSendReceipt);
-};
-
-const trackPurchase = (order) => {
-    const cmdTrackPurchase = () => analytics.track('purchase', order.id);
-    return Command(cmdTrackPurchase);
-};
-
-// Sends the receipt and records the purchase at the same time.
-const notify = ({ order, charge }) =>
-    Parallel([sendReceipt(order, charge), trackPurchase(order)], () =>
-        Success({ orderId: order.id, chargeId: charge.chargeId })
-    );
-
-const checkout = (order) => effectPipe(validateCart, reserveStock, payForOrder, notify)(order);
-```
-
-The last line reads as the checkout does. The retry loop became a `Retry` around the one call that can time out, `Promise.all` became a `Parallel`, and each `if` became a step that returns `Success` or `Failure`. The receipt needs both the order and the charge, so `payForOrder`, a named step, passes both on; that is how a pipeline carries an earlier value past a step, and [Composing Larger Flows](#composing-larger-flows) shows more.
-
-**As a generator,** the same steps go in the same order with `yield*`, and earlier values are variables:
-
-```js
-import { effectGen, step } from 'pure-effect';
-
-const checkoutGen = effectGen(function* (order) {
-    yield* step(validateCart(order));
-    yield* step(reserveStock(order));
-    const charge = yield* step(chargeCard(order));
-    yield* step(requirePaid(charge));
-    return yield* step(notify({ order, charge }));
-});
-```
-
-Both build the same flow from the same step functions and record the same steps at the same paths, so each replays the other's trace. Pick whichever reads better; [Choosing between the two forms](#choosing-between-the-two-forms) compares them.
-
-**Test the whole flow with no I/O.** Hand `replayEffect` a function that answers each Command by name. Here the payment provider times out once, then the charge goes through; nothing is mocked, and the retry does not wait. Each decision can be tested on its own as well, as in the Quick Start:
-
-```js
-import { replayEffect } from 'pure-effect';
-
-const order = { id: 'order_42', customerId: 'cus_1', email: 'ada@example.com', items: ['sku_tea'], total: 24 };
-
-const answers = {
-    cmdReserveStock: [{ result: { ok: true, reservationId: 'res_1' } }],
-    cmdChargeCard: [{ error: new Error('ETIMEDOUT') }, { result: { ok: true, chargeId: 'ch_1' } }],
-    cmdSendReceipt: [{ result: { sent: true } }],
-    cmdTrackPurchase: [{ result: { tracked: true } }]
-};
-const inTurn = (step) => answers[step.name]?.shift();
-
-const { result } = await replayEffect(checkout(order), inTurn);
-assert.deepEqual(result, Success({ orderId: 'order_42', chargeId: 'ch_1' }));
-
-assert.deepEqual(requirePaid({ ok: false, code: 'card_declined' }), Failure('Card declined.'));
-```
-
-**Replay a failed checkout on your machine.** Record runs in production. When a customer's checkout fails, replay its trace with nothing connected: the flow gets the answers it got in production, and `timeTravel` narrates each step. The trace below is recorded from the pipeline and replayed through the generator:
-
-```js
-import { recordEffect, timeTravel } from 'pure-effect';
-
-// In production: this customer's card is declined.
-const { result: failed, trace } = await recordEffect(checkout({ ...order, customerId: 'cus_declined' }), {
-    context: { flowName: 'checkout' }
-});
-const stored = JSON.stringify(trace);
-
-// On your machine, with no payment provider: the same answers, so the same outcome.
-const { result: replayed } = await replayEffect(checkoutGen(JSON.parse(stored).initialInput), JSON.parse(stored));
-assert.deepEqual(replayed, failed);
-
-await timeTravel(checkout, JSON.parse(stored));
-```
-
-```text
-Replaying 'checkout': 2 recorded steps
-Initial input: {
-  "id": "order_42",
-  "customerId": "cus_declined",
-  "email": "ada@example.com",
-  "items": [
-    "sku_tea"
-  ],
-  "total": 24
-}
-├─ cmdReserveStock returned in 18.6ms {"ok":true,"reservationId":"res_1"}
-└─ Retry
-   └─ attempt 0: cmdChargeCard returned in 212.4ms {"ok":false,"code":"card_declined"}
-Replay finished with state: Failure
-Error: "Card declined."
-```
-
-The rest of this README goes deeper into each piece: [Testing Without Mocks](#testing-without-mocks), [Retrying Transient Failures](#retrying-transient-failures), [Running Effects in Parallel](#running-effects-in-parallel) and [Time-Travel Debugging](#time-travel-debugging).
+That is a whole flow. [Rules for Writing a Flow](#rules-for-writing-a-flow) lists the twelve rules that cover most of what goes wrong, and [Time-Travel Debugging](#time-travel-debugging) shows how to record a run in production and replay it on your machine. In TypeScript, [TypeScript: Typed Errors and Context](#typescript-typed-errors-and-context) covers typing a flow's errors and context, handling every error, and testing a flow.
 
 ## Coming from async/await
 
@@ -1036,8 +886,9 @@ Each step in `effectPipe` carries its own error type. The compiler collects them
 type ValidationError = 'invalid_email' | 'weak_password';
 type ApiError = 'network_timeout' | 'rate_limited';
 
-const validate = (input: { email: string }): Effect<{ email: string }, ValidationError> => { ... };
-const submit = (input: { email: string }): Effect<{ id: number }, ApiError> => { ... };
+const validate = (input: { email: string }): Effect<{ email: string }, ValidationError> =>
+    input.email.includes('@') ? Success(input) : Failure('invalid_email');
+const submit = (input: { email: string }): Effect<{ id: number }, ApiError> => submitSignup(input);
 
 const result = await runEffect(effectPipe(validate, submit)({ email: 'user@example.com' }));
 if (result.type === 'Failure') {
@@ -1062,8 +913,9 @@ A `switch` over a flow's error union can make TypeScript refuse a case you forgo
 ```ts
 type BillingError = { type: 'NoSubscription' } | { type: 'CardDeclined'; code: string };
 
-const result = await runEffect(billTenant(tenantId), context);
-if (result.type === 'Failure') {
+async function billAndReport(tenantId: string) {
+    const result = await runEffect(billTenant(tenantId));
+    if (result.type === 'Success') return billed(result.value);
     const thrown: unknown = result.error;
     if (thrown instanceof Error) return serverError(thrown); // a Command's function threw
     switch (result.error.type) {
@@ -1087,7 +939,10 @@ if (result.type === 'Failure') {
 type AppContext = { tenant: string; requestId: string };
 
 const findProduct = (productId: string): Effect<Product, 'not_found', AppContext> =>
-    Ask<Product, 'not_found', AppContext>((ctx) => { ... });
+    Ask<Product, 'not_found', AppContext>((ctx) => {
+        const cmdFindProduct = () => catalog.find(ctx.tenant, productId);
+        return Command(cmdFindProduct, (product) => (product ? Success(product) : Failure('not_found')));
+    });
 
 const result = await runEffect(findProduct('abc'), { tenant: 'acme', requestId: '123' });
 ```
@@ -1151,6 +1006,41 @@ assertCommand(step1.next(null), 'cmdSaveUser');
 ```
 
 Exact rules: [walking a flow in a test](REFERENCE.md#walking-a-flow-in-a-test).
+
+### Replaying in TypeScript
+
+A replay test needs three things the types leave to you: a table of answers, the input of a trace read back from storage, and the error a replay stops with.
+
+```ts
+import assert from 'node:assert/strict';
+import { replayEffect } from 'pure-effect';
+import type { ReplayFault, ReplayOutcome, Resolver, TraceLog } from 'pure-effect';
+
+type Signup = { email: string; password: string };
+
+// Answers by Command name, handed out in turn. Typed as ReplayOutcome lists, the table needs no cast.
+const answers: Record<string, ReplayOutcome[]> = {
+    cmdFindUser: [{ result: null }],
+    cmdSaveUser: [{ result: { id: 1, email: 'ada@example.com' } }]
+};
+const inTurn: Resolver = (asked) => answers[asked.name]?.shift();
+const answered = await replayEffect(registerUserFlow({ email: 'ada@example.com', password: 'password123' }), inTurn);
+assert.equal(answered.result.type, 'Success');
+
+// A stored trace's input is whatever type you give it, and a trace can hold none.
+const stored: TraceLog<Signup> = JSON.parse(await readTrace('incident-8f3a'));
+if (stored.initialInput === undefined) throw new Error('the trace holds no input to rebuild the flow from');
+const { result } = await replayEffect(registerUserFlow(stored.initialInput), stored);
+
+// A replay that stops ends in a Failure the flow's error union leaves out: read the error as unknown, then cast it.
+const error: unknown = result.type === 'Failure' ? result.error : undefined;
+if (error instanceof Error && (error.name === 'TimeParadox' || error.name === 'ReplayError')) {
+    const fault = error as ReplayFault;
+    assert.fail(`the replay stopped at ${fault.path}: ${fault.message}`);
+}
+```
+
+Exact rules: [`replayEffect`](REFERENCE.md#replayeffecteffect-traceorresolver-options).
 
 ## Time-Travel Debugging
 

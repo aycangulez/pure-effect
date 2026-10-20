@@ -1283,19 +1283,22 @@ export type Step<X extends AnyEffect, C = EffectContext<X>> = {
 /** Wraps an Effect for `yield*` inside `effectGen`: `const user = yield* step(findUser(email))`. */
 export declare function step<X extends AnyEffect>(effect: X): Step<X>;
 
+// The property names the fix, since TypeScript ends the error for a bare `yield effect` by saying it is missing.
+type YieldStarStep = { 'write yield* step(effect)': true };
 type StepEffectOf<Y> = Y extends Step<infer X, any> ? X : never;
 // An `any` return would match both branches and turn the error union into `any`, so it counts as a plain value.
 type ReturnedEffect<R> = IsAny<R> extends true ? never : R extends AnyEffect ? R : never;
 type GenValue<R> = IsAny<R> extends true ? any : R extends AnyEffect ? EffectValue<R> : R;
 type GenContext<Y, R> = EffectContext<StepEffectOf<Y> | ReturnedEffect<R>>;
 
-// The error union is written out rather than named by an alias, which hovers and errors would show unexpanded.
+// What a body yields is checked against `YieldStarStep` rather than constrained to a `Step`, so a bare `yield effect`
+// fails with an error that names the fix. The error union is written out, since hovers would show an alias unexpanded.
 /**
  * Builds a flow function from a generator function, written with `yield* step(effect)` where `async` code writes
  * `await`. A plain return value is a `Success`; return a `Failure` to stop.
  */
-export declare function effectGen<I, Y extends Step<any, any>, R>(
-    body: (input: I) => Generator<Y, R, unknown>
+export declare function effectGen<I, Y, R>(
+    body: (input: I) => Generator<Y extends Step<any, any> ? Y : YieldStarStep, R, unknown>
 ): (input: I) => Effect<GenValue<R>, EffectError<StepEffectOf<Y>> | EffectError<ReturnedEffect<R>>, GenContext<Y, R>>;
 
 /**

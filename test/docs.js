@@ -23,7 +23,7 @@ import { readFileSync } from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { effectPipeOverloads, currentOverloads } from '../scripts/effect-pipe-overloads.js';
 import { rulesFile, rulesSection, githubAnchor, headingAnchors } from '../scripts/rules-file.js';
-import { errorOf } from './helpers.js';
+import { errorOf, consumerFilesTypeErrors } from './helpers.js';
 
 describe('README examples', function () {
     // The README is code readers copy, and for most of this project's life no test ran it. Two wrong
@@ -162,14 +162,12 @@ describe('README examples', function () {
                 throw new Error('out of stock');
             }
         },
-        // The checkout walkthrough's services: one customer whose card is declined.
+        // The services the undo and loop examples call.
         payments: {
-            charge: async (/** @type {string} */ customerId) =>
-                customerId === 'cus_declined' ? { ok: false, code: 'card_declined' } : { ok: true, chargeId: 'ch_1' },
+            charge: async () => ({ ok: true, chargeId: 'ch_1' }),
             refund: async () => ({ refunded: true })
         },
         inventory: { reserve: async () => ({ ok: true, reservationId: 'res_1' }) },
-        analytics: { track: async () => ({ tracked: true }) },
         sku: 'sku_1',
         summarize: (/** @type {any} */ outcome) => outcome.type,
         sink: () => {},
@@ -226,6 +224,78 @@ describe('README examples', function () {
 
     it('should run every REFERENCE.md example, with the Quick Start in scope', async function () {
         await runExamples(referenceSections);
+    });
+});
+
+describe('README TypeScript examples', function () {
+    // The ts blocks once held `{ ... }` where a function's body went, and no test compiled them, so a TypeScript
+    // reader got examples that did not build. Each now compiles as a file of its own in a strict project, as a
+    // reader's copy would, with every library export in scope and stubs for what the example leaves out.
+    const markdown = readFileSync('README.md', 'utf8');
+    const tsBlocks = [...markdown.matchAll(/^#+ (.*)$|```(\w*)\n([\s\S]*?)```/gm)].reduce(
+        (found, match) => {
+            if (match[1] !== undefined) found.heading = match[1];
+            else if (match[2] === 'ts') found.blocks.push({ heading: found.heading, code: match[3] });
+            return found;
+        },
+        { heading: '', blocks: /** @type {{ heading: string, code: string }[]} */ ([]) }
+    ).blocks;
+
+    // What each example reaches for that is not the library, by the heading it sits under.
+    /** @type {Record<string, string>} */
+    const stubs = {
+        'Error union across pipeline steps': `
+            declare function submitSignup(input: { email: string }): Effect<{ id: number }, ApiError>;`,
+        'Handling every error': `
+            declare function billTenant(tenantId: string): Effect<{ amount: number }, BillingError>;
+            declare function billed(value: { amount: number }): string;
+            declare function serverError(error: unknown): string;
+            declare function skipTenant(): string;
+            declare function notifyDecline(code: string): string;`,
+        'Typed context with `Ask`': `
+            type Product = { id: string; name: string };
+            declare const catalog: { find(tenant: string, id: string): Promise<Product | null> };`,
+        'Generator flows': `
+            type User = { id: number; email: string };
+            declare function findUser(email: string): Effect<User | null, never>;
+            declare function saveUser(input: { email: string }): Effect<User, 'db_unavailable'>;`,
+        'A flow with no input': `
+            declare function listUsers(): Effect<{ id: number }[], never>;`,
+        'Testing a flow in TypeScript': `
+            declare const input: { email: string; password: string };
+            declare function registerUserFlow(input: { email: string; password: string }): Effect<{ id: number }, string>;`,
+        'Replaying in TypeScript': `
+            declare function registerUserFlow(input: Signup): Effect<{ id: number; email: string }, string>;
+            declare function readTrace(id: string): Promise<string>;`
+    };
+
+    // Every export in scope, so an example may leave its imports out as a js block does; its own imports from the
+    // library are dropped so the two do not clash, and any other import stays.
+    const exportedTypes = [...readFileSync('index.d.ts', 'utf8').matchAll(/^export (?:type|interface) (\w+)/gm)].map(
+        (match) => match[1]
+    );
+    const header =
+        `import { ${Object.keys(lib).join(', ')} } from 'pure-effect';\n` +
+        `import type { ${exportedTypes.join(', ')} } from 'pure-effect';\n`;
+    const withoutLibraryImports = (/** @type {string} */ code) =>
+        code.replace(/^import[^;]*from 'pure-effect';\s*$/gm, '');
+
+    it('should find the examples at all', function () {
+        assert.ok(tsBlocks.length >= 7, `expected the README to hold ts examples, found ${tsBlocks.length}`);
+    });
+
+    it('should compile every ts block in a strict TypeScript project', function () {
+        this.timeout(20000);
+        /** @type {Record<string, string>} */
+        const files = {};
+        tsBlocks.forEach(({ heading, code }, index) => {
+            files[`readme-ts-${index + 1}.ts`] = header + withoutLibraryImports(code) + (stubs[heading] ?? '');
+        });
+        const errors = consumerFilesTypeErrors(files).map((error) => {
+            const block = tsBlocks[Number(/readme-ts-(\d+)/.exec(error)?.[1]) - 1];
+            return block ? `${error} (under '${block.heading}')` : error;
+        });
+        assert.deepEqual(errors, []);
     });
 });
 

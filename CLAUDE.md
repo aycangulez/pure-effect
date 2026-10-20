@@ -137,6 +137,7 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 - A `Parallel`'s trigger is the first failure to finish, not the first by array order.
 - No `AbortSignal` for a whole run, and none reaches a Command outside a `Parallel`.
 - No finalizer inside a flow: cleanup is a try/finally around `runEffect` in the shell.
+- No undo node: nested and flat forms were spiked and dropped; an undo after a later step's throw is caught inside that Command's function.
 - Nested pipelines for dependent values are a TypeScript cost only.
 - No join helper: `pair(f)` was built and dropped.
 - No flows written as one function: `flow(fn)` was built and dropped; `effectGen` replaced it.
@@ -170,5 +171,5 @@ The runtime tests are in `test/`, a file for each concern (`core`, `retry`, `par
 - Anchor an equation to a value, as the `Kleisli laws` suite does.
 - Each example file has a suite, so a change to the hook contract breaks the examples rather than letting them rot.
 - Audit the guidance when behaviour changes: write the flow a careful reader would write after reading each documented sharp edge, and run it.
-- README and `REFERENCE.md` examples run. The `README examples` suite executes every `js` block in both files as one program with its asserts live, so a fenced `js` block is real JavaScript: a value shape goes in a `text` block, a placeholder is written out rather than `...`, and anything new outside the library gets a stub in that suite. A `ts` block is not run, so check `assertCommand` by hand when the types it touches change.
+- README and `REFERENCE.md` examples run. The `README examples` suite executes every `js` block in both files as one program with its asserts live, so a fenced `js` block is real JavaScript: a value shape goes in a `text` block, a placeholder is written out rather than `...`, and anything new outside the library gets a stub in that suite. The `README TypeScript examples` suite compiles each README `ts` block as a file of its own in a strict project, with every export in scope, so a `ts` block is real TypeScript too, and anything it reaches for outside the library gets a stub under its heading there.
 - Documented pipelines keep their shape. Every step accepts and returns the piped value, so a guard's `next` returns `Success(input)`, not `Success(true)`; threading the value is preferred over `() => f(outer)`, without presenting it as a rule; and a Command's function body stays a single call.

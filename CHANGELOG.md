@@ -16,6 +16,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 ### Fixed
 
 - A `Parallel` whose `settled` is typed `boolean` gets a type error that names `settled`, rather than one about what `next` returns.
+- A bare `yield` of an Effect in a generator flow gets a type error that ends by naming `yield* step(effect)`.
 - Hovers and type errors show a generator flow's error union rather than an unexpanded `GenError<Step<...>>`.
 - A type error in a Command's `next` reports two overloads rather than three.
 

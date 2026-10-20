@@ -21,7 +21,7 @@ import {
     effectGen,
     step
 } from '../index.js';
-import { registerUserFlow, validateRegistration, db } from './helpers.js';
+import { registerUserFlow, validateRegistration, db, consumerTypeErrors } from './helpers.js';
 
 // The same flow as `registerUserFlow`, written as a generator, with the same Command names so the two record the
 // same trace.
@@ -140,6 +140,19 @@ describe('effectGen', function () {
     beforeEach(() => configureEffect());
 
     describe('building a flow', function () {
+        it('should name yield* step(effect) in the type error for a bare yield of an Effect', function () {
+            // TypeScript's error for a generator whose yields do not fit runs to seven lines about IteratorResult and
+            // exactOptionalPropertyTypes; the last says which property the yielded value lacks, and that is the fix.
+            this.timeout(20000);
+            const errors = consumerTypeErrors(
+                "import { Command, Success, effectGen } from 'pure-effect';\n" +
+                    'const cmdA = async () => 1;\n' +
+                    'effectGen(function* (_input: void) { yield Command(cmdA); return Success(1); });\n'
+            );
+            assert.equal(errors.length, 1);
+            assert.match(errors[0], /write yield\* step\(effect\)/);
+        });
+
         it('should refuse a value that is not a function, and an async generator function', async function () {
             assert.match(await messageOf(() => looseGen(42)), /effectGen expects a generator function/);
             assert.match(await messageOf(() => looseGen(async function* () {})), /not async function\*/);
