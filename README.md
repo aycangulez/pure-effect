@@ -926,20 +926,9 @@ The failed attempt is recorded as that Command's result, with the error's `code`
 
 Rule of thumb: if you would handle it, return it as a value; if you would only report it, return a `Failure`. The one exception is retry exhaustion, which happens inside `Retry`; handle it with the `onExhausted` option in [Retrying Transient Failures](#retrying-transient-failures).
 
-**Catch or retry, not both.** `Retry` only reacts to a function that throws. If you catch a 503 inside the function and return it as a value, then wrap the step in `Retry`, it makes one call and never retries. Catch the error when the flow should handle it as data; let it throw when `Retry` should try again.
+**Catch or retry, not both.** `Retry` only reacts to a function that throws. If you catch a 503 inside the function and return it as a value, then wrap the step in `Retry`, it makes one call and never retries. Catch the error when the flow should handle it as data, as `fetchPrice` above does; let it throw when `Retry` should try again:
 
 ```js
-// Handled as data: one call, and `next` decides what the miss means.
-Command(
-    function cmdFetchPrice() {
-        return pricing
-            .get(sku)
-            .then((price) => ({ ok: true, price }))
-            .catch((error) => ({ ok: false, code: error.code, message: error.message }));
-    },
-    (r) => (r.ok ? Success(r.price) : fetchCachedPrice(sku))
-);
-
 // Retried: the function lets the rejection out, so the interpreter sees an I/O fault.
 Retry(
     Command(function cmdFetchPrice() {
