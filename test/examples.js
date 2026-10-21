@@ -71,7 +71,7 @@ describe('examples/recording-example.js', function () {
         /** @type {any[]} */
         const written = [];
         enableRecording({ sink: async (/** @type {any} */ trace) => void written.push(trace) });
-        const result = await runEffect(failing({ id: 1 }), { flowName: 'writer', tenant: 'acme' });
+        const result = await runEffect(failing({ id: 1 }), { tenant: 'acme' }, { flowName: 'writer' });
         assert.equal(result.type, 'Failure');
         assert.equal(written.length, 1);
         assert.deepEqual(
@@ -79,7 +79,7 @@ describe('examples/recording-example.js', function () {
             ['cmdRead', 'cmdWrite']
         );
         assert.equal(written[0].flowName, 'writer');
-        assert.deepEqual(written[0].context, { flowName: 'writer', tenant: 'acme' }, 'context captured for Ask replay');
+        assert.deepEqual(written[0].context, { tenant: 'acme' }, 'context captured for Ask replay');
         assert.deepEqual(written[0].initialInput, { id: 1 });
     });
 
@@ -89,7 +89,7 @@ describe('examples/recording-example.js', function () {
         /** @type {any[]} */
         const written = [];
         enableRecording({ version: 'build-41', sink: (t) => void written.push(t) });
-        await runEffect(failing({ id: 1 }), { flowName: 'writer' });
+        await runEffect(failing({ id: 1 }), undefined, { flowName: 'writer' });
         assert.equal(written[0].version, 'build-41');
         /** @type {string[]} */
         const lines = [];
@@ -113,7 +113,7 @@ describe('examples/recording-example.js', function () {
                         return i;
                     })
             )(input);
-        const result = await runEffect(register({ email: 'bad' }), { flowName: 'register' });
+        const result = await runEffect(register({ email: 'bad' }), undefined, { flowName: 'register' });
         assert.deepEqual(result, Failure('Invalid email.'));
         assert.deepEqual(written[0].initialInput, { email: 'bad' });
         assert.deepEqual(warnings, [], 'the flow carries its input, so there is nothing to warn about');
@@ -278,7 +278,7 @@ describe('examples/recording-example.js', function () {
             },
             onWarning: (message, flowName) => void warnings.push([message, flowName])
         });
-        const result = await runEffect(failing({ id: 5 }), { flowName: 'writer', tenant: 'acme' });
+        const result = await runEffect(failing({ id: 5 }), { tenant: 'acme' }, { flowName: 'writer' });
         assert.equal(result.type, 'Failure', 'the run keeps its own outcome');
         assert.equal(written[0].initialInput, undefined);
         assert.equal(written[0].context, undefined);
@@ -301,7 +301,7 @@ describe('examples/recording-example.js', function () {
             onSinkError: (/** @type {any} */ error, /** @type {any} */ flowName) =>
                 void reported.push([error.message, flowName])
         });
-        const result = await runEffect(failing({ id: 1 }), { flowName: 'checkout' });
+        const result = await runEffect(failing({ id: 1 }), undefined, { flowName: 'checkout' });
         assert.equal(/** @type {any} */ (result).error.message, 'write failed', 'the run keeps its own outcome');
         assert.deepEqual(reported, [['Converting circular structure to JSON', 'checkout']]);
         remove();
@@ -313,7 +313,7 @@ describe('examples/recording-example.js', function () {
                 throw new Error('reporter failed');
             }
         });
-        const again = await runEffect(failing({ id: 1 }), { flowName: 'checkout' });
+        const again = await runEffect(failing({ id: 1 }), undefined, { flowName: 'checkout' });
         assert.equal(/** @type {any} */ (again).error.message, 'write failed');
     });
 
@@ -328,7 +328,7 @@ describe('examples/recording-example.js', function () {
                     throw new Error('keep failed');
                 }
             });
-            const result = await runEffect(failing({ id: 1 }), { flowName: 'checkout' });
+            const result = await runEffect(failing({ id: 1 }), undefined, { flowName: 'checkout' });
             assert.equal(result.type, 'Failure');
             assert.equal(logged.length, 1);
             assert.match(String(logged[0][0]), /Recording failed for 'checkout'/);
@@ -438,9 +438,9 @@ describe('examples/recording-example.js', function () {
             Command(function cmdRead() {
                 return 1;
             });
-        await runEffect(read(), { flowName: 'bare' });
-        await runEffect(read(), { flowName: 'bare' });
-        await runEffect(effectPipe(read)({ id: 1 }), { flowName: 'piped' });
+        await runEffect(read(), undefined, { flowName: 'bare' });
+        await runEffect(read(), undefined, { flowName: 'bare' });
+        await runEffect(effectPipe(read)({ id: 1 }), undefined, { flowName: 'piped' });
         assert.equal(warnings.length, 1);
         assert.equal(warnings[0][1], 'bare');
         assert.match(warnings[0][0], /If the flow takes an input, build its outermost flow with effectPipe/);
@@ -469,9 +469,9 @@ describe('examples/recording-example.js', function () {
             () => read(3)
         );
         const short = effectPipe(() => read(1));
-        await runEffect(long({ id: 1 }), { flowName: 'long' });
-        await runEffect(long({ id: 2 }), { flowName: 'long' });
-        await runEffect(short({ id: 3 }), { flowName: 'short' });
+        await runEffect(long({ id: 1 }), undefined, { flowName: 'long' });
+        await runEffect(long({ id: 2 }), undefined, { flowName: 'long' });
+        await runEffect(short({ id: 3 }), undefined, { flowName: 'short' });
         assert.deepEqual(
             written.map((t) => t.dropped),
             [1, 1, 0],
@@ -506,8 +506,8 @@ describe('examples/recording-example.js', function () {
                     return 2;
                 })
         );
-        await runEffect(flow({ id: 1 }), { flowName: 'writer' });
-        await runEffect(flow({ id: 2 }), { flowName: 'writer' });
+        await runEffect(flow({ id: 1 }), undefined, { flowName: 'writer' });
+        await runEffect(flow({ id: 2 }), undefined, { flowName: 'writer' });
         assert.equal(warnings.length, 1);
         assert.equal(warnings[0][1], 'writer');
         assert.match(warnings[0][0], /2 of the values a kept trace holds could not be recorded/);
@@ -532,9 +532,9 @@ describe('examples/recording-example.js', function () {
                 return 1;
             })
         );
-        await runEffect(inline({ id: 1 }), { flowName: 'inline' });
-        await runEffect(inline({ id: 2 }), { flowName: 'inline' });
-        await runEffect(named({ id: 3 }), { flowName: 'named' });
+        await runEffect(inline({ id: 1 }), undefined, { flowName: 'inline' });
+        await runEffect(inline({ id: 2 }), undefined, { flowName: 'inline' });
+        await runEffect(named({ id: 3 }), undefined, { flowName: 'named' });
         assert.equal(warnings.length, 1);
         assert.equal(warnings[0][1], 'inline');
         assert.match(warnings[0][0], /2 of its steps are named 'anonymous'/);
@@ -563,8 +563,8 @@ describe('examples/recording-example.js', function () {
                     )
             )(input);
         await Promise.all([
-            runEffect(slowFail('A')({ id: 'A' }), { flowName: 'A' }),
-            runEffect(slowFail('B')({ id: 'B' }), { flowName: 'B' })
+            runEffect(slowFail('A')({ id: 'A' }), undefined, { flowName: 'A' }),
+            runEffect(slowFail('B')({ id: 'B' }), undefined, { flowName: 'B' })
         ]);
         assert.equal(written.length, 2);
         for (const trace of written) {
@@ -591,7 +591,7 @@ describe('examples/recording-example.js', function () {
             },
             recordingHooks({ sink: async (/** @type {any} */ t) => void written.push(t) })
         );
-        const result = await runEffect(failing({ id: 3 }), { flowName: 'both' });
+        const result = await runEffect(failing({ id: 3 }), undefined, { flowName: 'both' });
         assert.equal(result.type, 'Failure');
         assert.deepEqual(spans, ['cmdRead', 'cmdWrite'], 'telemetry still saw every step');
         assert.equal(written.length, 1, 'and the trace was still written');
@@ -630,7 +630,7 @@ describe('examples/recording-example.js', function () {
                     })
                 ])
             )(input);
-        const result = await runEffect(flow(1), { flowName: 'fanout' });
+        const result = await runEffect(flow(1), undefined, { flowName: 'fanout' });
         assert.deepEqual(result, Success([2, 3]));
         assert.equal(written.length, 1);
         assert.deepEqual(
@@ -740,7 +740,7 @@ describe('examples/opentelemetry-example.js', function () {
         const secret = { email: 'user@test.com', password: 'plaintext' };
         const { tracer, spans } = fakeTracer();
         configureEffect(telemetryHooks({ tracer }));
-        await runEffect(workFlow(secret), { flowName: 'register' });
+        await runEffect(workFlow(secret), undefined, { flowName: 'register' });
 
         const attributes = JSON.stringify(spans.map((/** @type {any} */ sp) => sp.attributes));
         assert.ok(!attributes.includes('plaintext'), 'no input values on spans');
@@ -753,7 +753,7 @@ describe('examples/opentelemetry-example.js', function () {
     it('should name the root span after the flow and open a child span per Command', async function () {
         const { tracer, spans } = fakeTracer();
         configureEffect(telemetryHooks({ tracer }));
-        await runEffect(workFlow({ id: 1 }), { flowName: 'checkout' });
+        await runEffect(workFlow({ id: 1 }), undefined, { flowName: 'checkout' });
         assert.deepEqual(
             spans.map((/** @type {any} */ s) => s.name),
             ['checkout', 'cmdWork']
@@ -770,7 +770,9 @@ describe('examples/opentelemetry-example.js', function () {
                 (/** @type {any} */ v) => Success(v),
                 { name }
             );
-        const result = await runEffect(Parallel([load('cmdUser'), load('cmdCart')]), { flowName: 'checkout' });
+        const result = await runEffect(Parallel([load('cmdUser'), load('cmdCart')]), undefined, {
+            flowName: 'checkout'
+        });
         assert.deepEqual(result, Success(['cmdUser', 'cmdCart']));
         assert.deepEqual(
             spans.map((/** @type {any} */ s) => s.name),
@@ -824,7 +826,7 @@ describe('examples/opentelemetry-example.js', function () {
 
     it('should still work through enableTelemetry with no SDK started', async function () {
         enableTelemetry();
-        const result = await runEffect(workFlow({ id: 1 }), { flowName: 'noop-tracer' });
+        const result = await runEffect(workFlow({ id: 1 }), undefined, { flowName: 'noop-tracer' });
         assert.equal(result.type, 'Success');
     });
 
@@ -836,7 +838,7 @@ describe('examples/opentelemetry-example.js', function () {
             telemetryHooks({ tracer }),
             recordingHooks({ keep: () => true, sink: async (/** @type {any} */ t) => void written.push(t) })
         );
-        const result = await runEffect(workFlow({ id: 1 }), { flowName: 'both' });
+        const result = await runEffect(workFlow({ id: 1 }), undefined, { flowName: 'both' });
         assert.equal(result.type, 'Success');
         assert.deepEqual(
             spans.map((/** @type {any} */ s) => s.name),

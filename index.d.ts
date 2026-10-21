@@ -1341,8 +1341,8 @@ export type ParallelDecision =
       };
 
 /**
- * `flowName` is `context.flowName`, or `''` when the context has none. `initialInput` is what the flow was called with
- * when `effectPipe` built it, and `undefined` otherwise. A hook that calls another passes both on.
+ * `flowName` is the run's `flowName`, or `''` when it has none. `initialInput` is what the flow was called with when
+ * `effectPipe` built it, and `undefined` otherwise. A hook that calls another passes both on.
  */
 export type RunWrapper = (
     effect: Effect<unknown>,
@@ -1366,15 +1366,14 @@ export interface EffectConfiguration {
 /** Adds a layer of hooks and returns a function that removes it. With no arguments, removes every layer. */
 export declare function configureEffect(...configs: (EffectConfiguration | undefined)[]): () => void;
 
-/** Hooks for one `runEffect` call, inside the installed ones; `inherit: false` leaves those out. */
-export type CallConfiguration = EffectConfiguration & { inherit?: boolean | undefined };
-
-/** The context a run is given: what the flow reads, and a `flowName` naming the run in traces and spans. */
-export type RunContext<Ctx> = unknown extends Ctx
-    ? Ctx
-    : Ctx extends object
-      ? Ctx & { flowName?: string | undefined }
-      : Ctx;
+/**
+ * Hooks for one `runEffect` call, inside the installed ones; `inherit: false` leaves those out. `flowName` names the run
+ * in traces and spans.
+ */
+export type CallConfiguration = EffectConfiguration & {
+    inherit?: boolean | undefined;
+    flowName?: string | undefined;
+};
 
 // TypeScript 5.1's stand-in for NoInfer: it defers this indexed access, so it infers nothing from it.
 /** A context checked against the one the flow reads, and never inferred from. */
@@ -1388,7 +1387,7 @@ export declare function runEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     ...args: unknown extends Ctx
         ? [context?: CheckedContext<Ctx>, callConfig?: CallConfiguration]
-        : [context: RunContext<CheckedContext<Ctx>>, callConfig?: CallConfiguration]
+        : [context: CheckedContext<Ctx>, callConfig?: CallConfiguration]
 ): Promise<SuccessState<T> | FailureState<E>>;
 
 export type ReplayStep = {
@@ -1465,9 +1464,11 @@ export declare function recorder(options?: RecorderOptions): {
     toTrace<I = unknown, C = unknown>(meta?: TraceMeta<I, C>): TraceLog<I, C>;
 };
 
-/** `recordEffect`'s options: recorder options, plus the context the run gets and a build id. */
+/** `recordEffect`'s options: recorder options, plus the context the run gets, the run's name and a build id. */
 export type RecordOptions<Ctx = unknown> = RecorderOptions & {
-    context?: RunContext<Ctx> | undefined;
+    context?: Ctx | undefined;
+    /** Names the run in the trace, and in spans an installed hook makes. */
+    flowName?: string | undefined;
     version?: string | undefined;
 };
 
@@ -1480,12 +1481,12 @@ export declare function recordEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     ...options: unknown extends Ctx
         ? [options?: RecordOptions<CheckedContext<Ctx>>]
-        : [options: RecordOptions<CheckedContext<Ctx>> & { context: RunContext<CheckedContext<Ctx>> }]
+        : [options: RecordOptions<CheckedContext<Ctx>> & { context: CheckedContext<Ctx> }]
 ): Promise<{ result: SuccessState<T> | FailureState<E>; trace: TraceLog<unknown, Ctx> }>;
 
 export interface ReplayOptions<Ctx = unknown> {
     /** Context for `Ask`; defaults to the one the trace recorded. */
-    context?: RunContext<Ctx> | undefined;
+    context?: Ctx | undefined;
     /** Strip `Retry` delays so a replay does not wait out production backoff (default `true`). */
     fastRetry?: boolean | undefined;
     /** Runs the replay inside the installed hooks, so they see it. Off by default. */
@@ -1546,21 +1547,21 @@ export declare function replayEffect<T, E = unknown, Ctx = unknown>(
     resolver: Resolver,
     ...options: unknown extends Ctx
         ? [options?: ReplayOptions<CheckedContext<Ctx>>]
-        : [options: ReplayOptions<CheckedContext<Ctx>> & { context: RunContext<CheckedContext<Ctx>> }]
+        : [options: ReplayOptions<CheckedContext<Ctx>> & { context: CheckedContext<Ctx> }]
 ): Promise<Omit<Replay<T, E>, 'unreached'>>;
 export declare function replayEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     traceOrResolver: Resolver | TraceLog | TraceEntry[],
     ...options: unknown extends Ctx
         ? [options?: ReplayOptions<CheckedContext<Ctx>>]
-        : [options: ReplayOptions<CheckedContext<Ctx>> & { context: RunContext<CheckedContext<Ctx>> }]
+        : [options: ReplayOptions<CheckedContext<Ctx>> & { context: CheckedContext<Ctx> }]
 ): Promise<Omit<Replay<T, E>, 'unreached'> & { unreached?: TraceEntry[] }>;
 
 export interface TimeTravelOptions<Ctx = unknown> {
     /** Receives each narrated line; `console.log` by default. */
     log?: ((...args: any[]) => void) | undefined;
     /** Context for `Ask`; defaults to the one the trace recorded. */
-    context?: RunContext<Ctx> | undefined;
+    context?: Ctx | undefined;
     /** The build replaying the trace; a trace recorded at another build gets a warning. */
     version?: string | undefined;
 }

@@ -111,7 +111,7 @@ Pure Effect is a zero-dependency effect system for JavaScript implementing the "
 - Deliberate type errors are `// @ts-expect-error` directives, never `tsd`'s `expectError`, each on one line, small enough that only the intended mistake can fail it, with a reason.
 - `index.d.ts` ends with `export {}`, so only a declaration marked `export` is public; a helper type stays unmarked.
 - Change `effectPipe`'s overloads in `scripts/effect-pipe-overloads.js` and run `npm run generate`, **never by hand**.
-- Some declarations exist for a reason, and each is pinned in `test/types.test-d.ts`: `Retry`'s error and `RetryState`'s `R`, every `next` as a method signature, the `settled?: false` overloads, `Parallel`'s last overload (its messages in `test/parallel.js`), `Command`'s `T = R` default and last overload, `Failure`'s `const`, functions typed from their whole return (`AnyEffect`, `EffectValue`, `EffectError`, `EffectContext`), `commandName`'s parameter, `RunContext`, the context parameters `CheckedContext` keeps out of inference, `CommandInterceptor`, `redact`'s `any`, `Parallel`'s branch typing, and the `readonly` options of `RetryState` and `ParallelState`. Read `DESIGN.md`'s TypeScript section before changing one, and extend the tsd file when touching the recording, replay or `CallConfiguration` types.
+- Some declarations exist for a reason, and each is pinned in `test/types.test-d.ts`: `Retry`'s error and `RetryState`'s `R`, every `next` as a method signature, the `settled?: false` overloads, `Parallel`'s last overload (its messages in `test/parallel.js`), `Command`'s `T = R` default and last overload, `Failure`'s `const`, functions typed from their whole return (`AnyEffect`, `EffectValue`, `EffectError`, `EffectContext`), `commandName`'s parameter, the context parameters `CheckedContext` keeps out of inference, `CommandInterceptor`, `redact`'s `any`, `Parallel`'s branch typing, and the `readonly` options of `RetryState` and `ParallelState`. Read `DESIGN.md`'s TypeScript section before changing one, and extend the tsd file when touching the recording, replay or `CallConfiguration` types.
 
 ### Reference integrations
 
@@ -158,6 +158,7 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 - Thrown errors stay out of the declared error union.
 - `meta` is unchecked: a `meta.name` that is not a non-empty string falls back to the function's name.
 - A `Failure` carries only its error; the flow's input reaches `onRun`, never an outcome.
+- A run's name is `flowName` in `runEffect`'s call configuration and `recordEffect`'s options, never the context; supporting both was dropped.
 - Sharp edges are documented, not guarded: `Retry` repeating its whole wrapped tree, a branch whose Command ignores its signal running to completion, a function passed by name taking the signal for a plain first parameter it treats as optional, and a step before the first Command that changes its input.
 
 ## Tests

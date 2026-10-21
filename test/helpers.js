@@ -56,7 +56,7 @@ export const registerUserFlow = (/** @type {User} */ input) =>
     effectPipe(validateRegistration, ensureEmailIsAvailable, saveUser)(input);
 
 export async function registerUser(/** @type {User} */ input) {
-    return await runEffect(registerUserFlow(input), { flowName: 'registerUser' });
+    return await runEffect(registerUserFlow(input), undefined, { flowName: 'registerUser' });
 }
 
 /** Reads `.value` off a runEffect result once its type has been asserted. */

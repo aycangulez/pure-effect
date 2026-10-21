@@ -148,7 +148,7 @@ describe('Replay', function () {
                     return { sent: true };
                 })
         );
-        const { trace } = await recordEffect(flow('cart_1'), { context: { flowName: 'checkout' } });
+        const { trace } = await recordEffect(flow('cart_1'), { flowName: 'checkout' });
         // Without timings, so the lines are the same on every run.
         const untimed = { ...trace, trace: trace.trace.map(({ durationMs, ...entry }) => entry) };
         /** @type {string[]} */
@@ -401,7 +401,7 @@ describe('Replay', function () {
                 )
             );
 
-        const { trace } = await recordEffect(flow('sku-1'), { context: { tenant: 'acme', flowName: 'lookup' } });
+        const { trace } = await recordEffect(flow('sku-1'), { context: { tenant: 'acme' }, flowName: 'lookup' });
         assert.equal(/** @type {any} */ (trace.context).tenant, 'acme');
 
         const { result: replayed } = await replayEffect(flow('sku-1'), trace, { context: trace.context });
@@ -1399,7 +1399,7 @@ describe('Replay', function () {
         await assert.rejects(recordEffect(flow({ id: 'x' }), /** @type {any} */ ({ ctx: {} })), {
             name: 'TypeError',
             message:
-                /recordEffect has no option named 'ctx'; its options are context, version, redact, maxEntries and stack\./
+                /recordEffect has no option named 'ctx'; its options are context, flowName, version, redact, maxEntries and stack\./
         });
         assert.deepEqual(calls, { read: 0, write: 0 }, 'refused before the flow runs');
 
@@ -1825,7 +1825,7 @@ describe('Replay', function () {
     });
 
     it('should record and replay a run whose context is null, as runEffect runs one', async function () {
-        // recordEffect read the context's flowName and threw a bare TypeError on null, which runEffect accepts; and a
+        // recordEffect read the context's flowName, which then named the run, and threw a bare TypeError on null, which runEffect accepts; and a
         // replay defaulted a recorded null to {}, so Ask got a context production never had.
         const flow = () =>
             Ask((/** @type {any} */ ctx) =>
@@ -1840,6 +1840,40 @@ describe('Replay', function () {
         assert.deepEqual(result, Success(null));
         assert.equal(trace.context, null);
         assert.deepEqual((await replayEffect(flow(), trace)).result, Success(null));
+    });
+
+    it("should keep the run's name out of its context, and name a replay run under hooks as production did", async function () {
+        // The name was read off the context, so every trace stored it twice and Ask saw it; a replay under hooks
+        // named its run from the recorded context.
+        const flow = () =>
+            Ask((/** @type {any} */ ctx) =>
+                Command(
+                    function cmdLoad() {
+                        return 1;
+                    },
+                    () => Success(ctx)
+                )
+            );
+        const { result, trace } = await recordEffect(flow(), { context: { tenant: 'acme' }, flowName: 'nightly' });
+        assert.deepEqual(result, Success({ tenant: 'acme' }));
+        assert.equal(trace.flowName, 'nightly');
+        assert.deepEqual(trace.context, { tenant: 'acme' });
+
+        /** @type {string[]} */
+        const named = [];
+        configureEffect({
+            onRun: async (effect, op, flowName) => {
+                named.push(flowName);
+                return await op();
+            }
+        });
+        await replayEffect(flow(), trace, { hooks: true });
+        await replayEffect(flow(), { ...trace, flowName: undefined }, { hooks: true });
+        assert.deepEqual(named, ['nightly', '']);
+        await assert.rejects(
+            recordEffect(flow(), /** @type {any} */ ({ flowName: 3 })),
+            /^TypeError: recordEffect 'flowName' must be a string, received the number 3\.$/
+        );
     });
 
     it('should give Ask the recorded context in timeTravel, or the one it is handed', async function () {

@@ -750,16 +750,19 @@ runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { wrong: 'thing'
 runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }));
 // a flow that reads no context still needs none
 runEffect(Success(1));
-// flowName names a run in traces and spans, so a typed context takes it beside what the flow reads, while a key the
-// flow does not read is still refused
+// flowName names a run beside its context, in runEffect's call configuration and recordEffect's options
+runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { db: 'conn' }, { flowName: 'signup' });
+recordEffect(ctxFlow({ email: 'a@b.c', password: 'x' }), { context: { db: 'conn' }, flowName: 'signup' });
+runEffect(Success(1), undefined, { flowName: 'nightly' });
+recordEffect(Success(1), { flowName: 'nightly' });
+// @ts-expect-error a typed context no longer takes flowName, which names the run in the call configuration
 runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { db: 'conn', flowName: 'signup' });
+// @ts-expect-error nor does recordEffect's context
 recordEffect(ctxFlow({ email: 'a@b.c', password: 'x' }), { context: { db: 'conn', flowName: 'signup' } });
-replayEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), [], { context: { db: 'conn', flowName: 'signup' } });
-timeTravel(ctxFlow, { trace: [] }, { context: { db: 'conn', flowName: 'signup' } });
-// @ts-expect-error a key the flow does not read is still refused
-runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { db: 'conn', flowname: 'signup' });
 // @ts-expect-error flowName is a string
-runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { db: 'conn', flowName: 1 });
+runEffect(Success(1), undefined, { flowName: 1 });
+// @ts-expect-error a run's name is not a hook, so configureEffect refuses it
+configureEffect({ flowName: 'signup' });
 // a flow that reads no context takes any, as before, including an undefined one passed on with a call configuration
 runEffect(Success(1), { tenant: 'acme' });
 runEffect(Success(1), undefined, {});
@@ -1082,10 +1085,15 @@ expectType<ParallelState<[number], number, never>>(
 // @ts-expect-error a settled flag that may be true still matches no overload
 Parallel([Success(42)], { settled: fromConfig.flag });
 configureEffect({ onStep: fromConfig.hook, onRun: undefined, onBeforeCommand: undefined });
-runEffect(configured, { flowName: fromConfig.name }, { onStep: fromConfig.hook, inherit: fromConfig.flag });
+runEffect(configured, undefined, { onStep: fromConfig.hook, inherit: fromConfig.flag, flowName: fromConfig.name });
 const configuredRecorder = recorder({ redact: undefined, maxEntries: fromConfig.count, stack: fromConfig.flag });
 configuredRecorder.toTrace({ flowName: fromConfig.name, version: fromConfig.name });
-recordEffect(Success(1), { context: undefined, version: fromConfig.name, stack: fromConfig.flag });
+recordEffect(Success(1), {
+    context: undefined,
+    flowName: fromConfig.name,
+    version: fromConfig.name,
+    stack: fromConfig.flag
+});
 replayEffect(configured, traceLog, {
     context: undefined,
     fastRetry: fromConfig.flag,

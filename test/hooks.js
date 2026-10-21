@@ -106,7 +106,7 @@ describe('configureEffect merging', function () {
                 return await op();
             };
         configureEffect({ onRun: wrap('a') }, { onRun: wrap('b') });
-        const result = await runEffect(work('ok'), { flowName: 'checkout' });
+        const result = await runEffect(work('ok'), undefined, { flowName: 'checkout' });
         assert.equal(valueOf(result), 'ok');
         assert.deepEqual(seen, [
             ['a', 'checkout'],
@@ -114,7 +114,8 @@ describe('configureEffect merging', function () {
         ]);
     });
 
-    it('should pass onRun an empty flowName when the context names none', async function () {
+    it('should pass onRun an empty flowName when the run names none, whatever the context holds', async function () {
+        // The name moved out of the context, so a context's own flowName field is data the flow reads, not the name.
         /** @type {any[]} */
         const seen = [];
         configureEffect({
@@ -125,7 +126,20 @@ describe('configureEffect merging', function () {
         });
         await runEffect(work('ok'));
         await runEffect(work('ok'), {});
-        assert.deepEqual(seen, ['', '']);
+        await runEffect(work('ok'), { flowName: 'data' });
+        assert.deepEqual(seen, ['', '', '']);
+    });
+
+    it('should refuse a flowName that is not a string, and one given to configureEffect', function () {
+        assert.throws(() => configureEffect(/** @type {any} */ ({ flowName: 'checkout' })), TypeError);
+        return Promise.all(
+            [1, null, ['checkout']].map((name) =>
+                assert.rejects(
+                    runEffect(work('ok'), undefined, /** @type {any} */ ({ flowName: name })),
+                    /^TypeError: callConfig\.flowName must be a string/
+                )
+            )
+        );
     });
 
     it('should run every onBeforeCommand interceptor in order', async function () {

@@ -286,6 +286,12 @@ const isBoolean = (value) => typeof value === 'boolean';
 const isFunction = (value) => typeof value === 'function';
 
 /**
+ * @param {any} value
+ * @returns {boolean}
+ */
+const isString = (value) => typeof value === 'string';
+
+/**
  * An object that can hold options or meta: not an array, and not an Effect passed in the wrong place.
  * @param {any} value
  * @returns {boolean}
@@ -1159,9 +1165,10 @@ const checkConfiguration = (config, source, prefix, known) => {
 
 /**
  * A per-call configuration. With `inherit: true` (the default) its hooks merge over the installed wiring, global
- * outermost; with `inherit: false` that wiring is ignored.
+ * outermost; with `inherit: false` that wiring is ignored. `flowName` names the run for `onRun`, and so in traces and
+ * spans.
  *
- * @typedef {EffectConfiguration & { inherit?: boolean }} CallConfiguration
+ * @typedef {EffectConfiguration & { inherit?: boolean, flowName?: string }} CallConfiguration
  */
 
 /** @type {EffectConfiguration[]} */
@@ -1447,15 +1454,18 @@ const interpret = async (effect, context = {}, callConfig = {}, fastRetry = fals
     if (!isOptionsObject(callConfig)) {
         throw new TypeError(`runEffect's callConfig must be an object, got ${describeConfiguration(callConfig)}.`);
     }
-    checkConfiguration(callConfig, "runEffect's callConfig", 'callConfig.', [...hookNames, 'inherit']);
+    checkConfiguration(callConfig, "runEffect's callConfig", 'callConfig.', [...hookNames, 'inherit', 'flowName']);
     // An Ask would read its fields off a number or a string as undefined.
     if (!isContext(context)) {
         throw new TypeError(`runEffect's context must be an object, got ${describeArgument(context)}.`);
     }
-    const { inherit = true, ...local } = callConfig;
+    const { inherit = true, flowName = '', ...local } = callConfig;
     // Not coerced, so `'false'` cannot inherit everything.
     if (typeof inherit !== 'boolean') {
         throw new TypeError(`callConfig.inherit must be true or false, got ${describeArgument(inherit)}.`);
+    }
+    if (!isString(flowName)) {
+        throw new TypeError(`callConfig.flowName must be a string, got ${describeArgument(flowName)}.`);
     }
     const base = inherit ? globalConfig : {};
     const resolved = Object.keys(local).length ? chainHooks(base, local) : base;
@@ -1470,7 +1480,7 @@ const interpret = async (effect, context = {}, callConfig = {}, fastRetry = fals
     const onRun = resolved.onRun || defaultRunWrapper;
     // An I/O fault becomes a plain Failure here, where every outcome leaves.
     const calls = trackCalls(async () => asOutcome(await execute(runtime, effect)));
-    const returned = await onRun(effect, calls.op, context?.flowName || '', flowInputs.get(effect));
+    const returned = await onRun(effect, calls.op, flowName, flowInputs.get(effect));
     if (isOutcome(returned)) return returned;
     // As with onStep, a hook that returned while the run went on is judged once the run has finished.
     const unwaited = calls.running;
@@ -1933,7 +1943,7 @@ const runCommand = async (runtime, command, signal, cmdPath) => {
  * @param {Effect} effect - The Effect tree returned by a pipeline
  * @param {any} [context] - Optional context object. Passed to Ask continuations and the Command Interceptor.
  * @param {CallConfiguration} [callConfig] - Per-call configuration, added to the wiring `configureEffect`
- *        installed unless `inherit: false`, which ignores that wiring for this run.
+ *        installed unless `inherit: false`, which ignores that wiring for this run, and the run's `flowName`.
  * @returns {Promise<SuccessState | FailureState>}
  */
 const runEffect = (effect, context, callConfig) => interpret(effect, context, callConfig);
@@ -2339,21 +2349,26 @@ const packTrace = (settings, meta, entries, dropped) => {
  * application, give each run its own recorder, as examples/recording-example.js does.
  *
  * @param {Effect} effect - The flow, called with its input
- * @param {RecorderOptions & { context?: any, version?: string }} [options] - Recorder options, plus the
- *        `context` given to `runEffect` (stored so `Ask` can be replayed) and a build id
+ * @param {RecorderOptions & { context?: any, flowName?: string, version?: string }} [options] - Recorder options,
+ *        plus the `context` given to `runEffect` (stored so `Ask` can be replayed), the run's name and a build id
  * @returns {Promise<{ result: SuccessState | FailureState, trace: TraceLog }>}
  */
 const recordEffect = async (effect, options = {}) => {
     // Before the options, so a call written the old way, with the flow function and its input, is named as that.
     asEffect(effect, 'The flow');
-    checkOptions(options, 'recordEffect', { context: contextOptionRule, version: null, ...recorderOptionRules });
-    const { context, version, ...recorderOptions } = options ?? {};
+    checkOptions(options, 'recordEffect', {
+        context: contextOptionRule,
+        flowName: [isString, 'a string'],
+        version: null,
+        ...recorderOptionRules
+    });
+    const { context, flowName, version, ...recorderOptions } = options ?? {};
     const rec = recorder(recorderOptions);
     // Before the run, so a Command that writes to the input or the context cannot rewrite what the trace received.
     const initialInput = flowInputs.get(effect);
-    const head = rec.toTrace({ initialInput, flowName: context?.flowName, context, version });
+    const head = rec.toTrace({ initialInput, flowName, context, version });
     // Merged over the global wiring, so recording inside an instrumented application keeps its spans.
-    const result = await runEffect(effect, context, { onStep: rec.onStep });
+    const result = await runEffect(effect, context, { onStep: rec.onStep, flowName });
     const { dropped, trace } = rec.toTrace();
     // A context nobody passed holds nothing to redact, so it is recorded as the empty one the run got, unredacted.
     return { result, trace: { ...head, ...(context === undefined && { context: {} }), dropped, trace } };
@@ -2894,7 +2909,16 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     // A replay fault becomes a Failure here, outside the flow, where nothing can absorb it.
     let result;
     try {
-        result = await interpret(effect, context, { onStep: hook.onStep, inherit: hooks }, fastRetry, noContext);
+        // The recorded name, so an onRun hook a replay runs under `hooks` names the run as production did.
+        const recordedName = traceLog?.flowName;
+        const flowName = isString(recordedName) ? recordedName : undefined;
+        result = await interpret(
+            effect,
+            context,
+            { onStep: hook.onStep, inherit: hooks, flowName },
+            fastRetry,
+            noContext
+        );
     } catch (e) {
         if (hook.failure) throw hook.failure.error;
         if (!hasMark(e, replayFault)) throw e;

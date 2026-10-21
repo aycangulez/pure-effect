@@ -276,8 +276,9 @@ One built inside a `next` is checked when that `next` runs.
 
 Runs a flow and resolves with its `Success` or `Failure`. See [Which Errors Are Data](README.md#which-errors-are-data).
 
-- `context`: what `Ask` reads, also passed to `onBeforeCommand`. `context.flowName` names the run in traces and telemetry. Anything but an object or `null` makes `runEffect` reject with a `TypeError` before the run, and the `context` option of `recordEffect`, `replayEffect` and `timeTravel` is checked the same way.
+- `context`: what `Ask` reads, also passed to `onBeforeCommand`. Anything but an object or `null` makes `runEffect` reject with a `TypeError` before the run, and the `context` option of `recordEffect`, `replayEffect` and `timeTravel` is checked the same way.
 - `callConfig`: `onStep`, `onRun` and `onBeforeCommand` for this call only, added to the configured hooks, or used alone with `inherit: false`; see [Hooks](README.md#hooks).
+- `callConfig.flowName`: a string naming the run, which `onRun` receives, so a recorder's trace and a telemetry span carry it. Left out, the name is `''`. `configureEffect` refuses it, since a name belongs to one run.
 - A throw from a Command's function, or an `onBeforeCommand` veto, ends the run with a `Failure` holding the error thrown; under a `Retry` that gave up, it holds `{ retryExhausted, lastError, retries }`.
 - A malformed flow, or a throw from a `next` or a pure step, is a bug. The call that builds the flow throws it before the first Command, and `runEffect` rejects with it after.
 
@@ -292,7 +293,7 @@ Adds a layer of hooks for the whole process and returns a function that removes 
 - Several configurations passed to one call form one layer.
 - `configureEffect()` with no arguments removes every layer, and a call whose arguments are all `undefined` changes nothing.
 - Throws a `TypeError`, before installing anything, for a configuration that is not an object, a key other than the three below (`retry` included), or a hook that is not a function (`null` included).
-- `onRun(effect, op, flowName, initialInput)`: wraps the whole run once, retries included. It must `await op()` and return its result; anything but a `Success` or `Failure` rejects the run with a `TypeError`. `initialInput` is what the flow was called with when `effectPipe` or `effectGen` built it, and `undefined` otherwise; pass it on to any hook it calls.
+- `onRun(effect, op, flowName, initialInput)`: wraps the whole run once, retries included. It must `await op()` and return its result; anything but a `Success` or `Failure` rejects the run with a `TypeError`. `flowName` is the run's `callConfig.flowName`, or `''`. `initialInput` is what the flow was called with when `effectPipe` or `effectGen` built it, and `undefined` otherwise; pass both on to any hook it calls.
 - `onStep(name, type, op, path)`: wraps each Command, and each `Parallel` with `name` and `type` both `'Parallel'`. It must `await op()` and return its result, and pass `path` on to any hook it calls, since a replay matches steps on it.
     - For a Command, `op()` returns a promise, even for a synchronous function. Returning a value without calling `op()` answers for the Command, which is how replay works, and throwing without calling it counts as the Command failing.
     - A throw after `op()` succeeded, or `undefined` in place of its value (a forgotten `return` or `await`), is a bug in the hook: the run rejects, and `Retry` does not run the Command again.
@@ -346,7 +347,7 @@ Returns `{ onStep, entries, toTrace }`, a hook that records every step of a run,
 
 ### `recordEffect(effect, options?)`
 
-Runs a flow for real while recording, returning `{ result, trace }`. The trace holds the flow's input when `effectPipe` or `effectGen` built it, so `timeTravel` can build the flow again. Accepts `recorder` options plus `context` and `version`; without a `context`, the trace records the empty one the run gets, which `redact` is not handed. For tests and scripts; to record an application without changing call sites, use the wiring in [`examples/recording-example.js`](https://github.com/aycangulez/pure-effect/blob/main/examples/recording-example.js), which gives each run its own recorder.
+Runs a flow for real while recording, returning `{ result, trace }`. The trace holds the flow's input when `effectPipe` or `effectGen` built it, so `timeTravel` can build the flow again. Accepts `recorder` options plus `context`, `flowName` and `version`; without a `context`, the trace records the empty one the run gets, which `redact` is not handed. For tests and scripts; to record an application without changing call sites, use the wiring in [`examples/recording-example.js`](https://github.com/aycangulez/pure-effect/blob/main/examples/recording-example.js), which gives each run its own recorder.
 
 - A run whose own code throws makes it reject without a trace. The recording example keeps the trace of such a run; see [The recording example](#the-recording-example).
 

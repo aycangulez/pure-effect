@@ -322,7 +322,7 @@ describe('Retry options and the removed global retry', function () {
         await assert.rejects(() => runEffect(Success(1), undefined, /** @type {any} */ ({ retry: { retries: 5 } })), {
             name: 'TypeError',
             message:
-                "runEffect's callConfig has no option named 'retry'; its options are onStep, onRun, onBeforeCommand and inherit."
+                "runEffect's callConfig has no option named 'retry'; its options are onStep, onRun, onBeforeCommand, inherit and flowName."
         });
     });
 
@@ -358,7 +358,7 @@ describe('Retry options and the removed global retry', function () {
         );
         await assert.rejects(
             () => runEffect(flow, {}, /** @type {any} */ ({ onstep: () => {} })),
-            /runEffect's callConfig has no option named 'onstep'; its options are onStep, onRun, onBeforeCommand and inherit\./
+            /runEffect's callConfig has no option named 'onstep'; its options are onStep, onRun, onBeforeCommand, inherit and flowName\./
         );
         assert.equal(calls, 0, 'nothing ran under a refused configuration');
         assert.deepEqual(await runEffect(flow), Success(1), 'and nothing was installed');

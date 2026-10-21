@@ -159,6 +159,8 @@ The rest are the same in both styles, and a generator flow runs each one with `y
 
 One rule is behind both columns: each decision lives in a small step function that receives the answer it depends on and returns `Success` or `Failure`, so a test can call it directly. A pipeline joins those steps with `effectPipe`; a generator flow puts them in order with `yield*`. An `if` around a `yield*` works, but it can be tested only by walking the whole flow, so keep the body to putting steps in order. A `for` loop that runs a step for each item decides nothing, so it is fine.
 
+JavaScript cannot stop the code between two steps from doing I/O, so each decision lives in a function that receives one value and returns the next step, where a call that does I/O stands out. That is what lets a test call a decision directly with the value it depends on, and lets a replay run every decision again against the recorded answers. The cost is more small functions than `async` code would have.
+
 The Quick Start's `registerUserFlow` is this function, translated row by row: each `await` became a Command, the code after it became that Command's `next`, and each `throw` became a `Failure`.
 
 ```js
@@ -1077,10 +1079,10 @@ In production, record each run with a version and a flow name, and replay its tr
 ```js
 import { recordEffect, replayEffect, timeTravel } from 'pure-effect';
 
-// Record a real run. The context's flowName names the flow in the trace.
+// Record a real run. flowName names the flow in the trace.
 const { result, trace } = await recordEffect(checkoutFlow(input), {
     version: process.env.BUILD_ID,
-    context: { flowName: 'checkout' }
+    flowName: 'checkout'
 });
 
 // Later, somewhere else, with nothing connected. Given the build, timeTravel warns when the trace came from another one.
@@ -1144,7 +1146,7 @@ A trace is plain JSON. This one is from a checkout whose card charge timed out o
   "flowName": "checkout",
   "version": "b42",
   "initialInput": { "cartId": "cart_1" },
-  "context": { "flowName": "checkout" },
+  "context": {},
   "dropped": 0,
   "trace": [
     { "command": "cmdFetchCart", "path": "0", "result": { "total": 120 }, "durationMs": 41.3 },
