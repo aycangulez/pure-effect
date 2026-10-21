@@ -507,7 +507,11 @@ Every state's `next` is a method signature rather than a function-typed property
 
 #### `Parallel`'s non-settled overloads accept only `settled?: false`
 
-A `settled` known only as a `boolean` matched the overload that types `next` as values, while the runtime handed it outcomes. An options variable used only for its `limit` is typed `{ limit: number }`. They take `settled: undefined` too, which the runtime reads as not settled, and a `settled` typed `boolean | undefined` still matches neither kind of overload. The error says `Type 'boolean' is not assignable to type 'true'`, since `N` has a default that any `next` fits (see Defaults below).
+A `settled` known only as a `boolean` matched the overload that types `next` as values, while the runtime handed it outcomes. An options variable used only for its `limit` is typed `{ limit: number }`. They take `settled: undefined` too, which the runtime reads as not settled, and a `settled` typed `boolean | undefined` still matches neither kind of overload. The error says `Type 'boolean' is not assignable to type 'false'`, since `N` has a default that any `next` fits (see Defaults below), and the last overload takes either a `next` or the options.
+
+#### `Parallel`'s last overload takes either a `next` or the options
+
+When a call matches no overload, TypeScript 7 reports only the last one, and TypeScript 5 does the same once more than three take the call's number of arguments. The last overload took a `next`, so in the October 2026 DX experiments a two-argument call with an options mistake, such as `Parallel(branches, { settled: flag })` with `flag` a `boolean`, was reported as `'settled' does not exist in type '(values: [number]) => Effect<...>'`. The fix in 0.22.0 for a three-argument call did not reach it. The last overload's second parameter is now a type parameter constrained to either a `next` that takes the values or the non-settled options, so the error names what is wrong with the argument actually passed, and its third parameter is `never` when the second is the options. It accepts only calls the overloads above it accept, so no call is typed by it, and its return type is loose for that reason. A test in `test/parallel.js` pins the messages, since `tsd` sees only whether a call fails.
 
 #### `Command` without a `next`
 
@@ -849,7 +853,7 @@ Saving lines is not enough: `pair`, `Loop`, `flow(fn)`, `tap` and `observe` each
 
 `commandName` passed, since a test checking which Command a step is had to restate the identity rule, and a copy drifts from the one traces use.
 
-`assertCommand`, the README's TypeScript walking helper, stays a snippet readers copy. Shipped, it would have to throw its own error rather than use `node:assert`, since the library is not Node-only, and it would make the library part of how tests are written.
+`assertStep` and `assertCommand`, the README's TypeScript walking helpers, stay a snippet readers copy. Shipped, it would have to throw its own error rather than use `node:assert`, since the library is not Node-only, and it would make the library part of how tests are written.
 
 ### The conveniences stay
 

@@ -621,6 +621,9 @@ Parallel([Success(42)], { limit: 'five' });
 // @ts-expect-error settled is a boolean
 Parallel([Success(42)], { settled: 'yes' });
 
+// @ts-expect-error the options go in one argument, not two
+Parallel([Success(42)], { limit: 1 }, { limit: 2 });
+
 // A settled flag known only as a boolean could be true at runtime, so it matches no overload rather than the
 // one that types next as the values
 const batchOptions = { limit: 2, settled: true };

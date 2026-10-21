@@ -987,22 +987,33 @@ const counted = await runEffect(nightlyCount());
 
 ### Testing a flow in TypeScript
 
-A flow is typed as any kind of step it could start with, since validation may already have returned a `Success` or a `Failure`. So `.cmd` and `.next` compile only after the test checks that the step is a Command. `node:assert`'s `assert(step.type === 'Command')` is such a check, and TypeScript follows it. Jest's and Vitest's `expect` is not, so a walk needs a check at every step, and a small helper makes that one line per step with any test framework:
+A flow is typed as any kind of step it could start with, since validation may already have returned a `Success` or a `Failure`. So `.cmd` and `.next` compile only after the test checks that the step is a Command. `node:assert`'s `assert(step.type === 'Command')` is such a check, and TypeScript follows it. Jest's and Vitest's `expect` is not, so a walk needs a check at every step, and two small helpers make that one line per step with any test framework. `assertStep` checks the kind of step, and `assertCommand` checks a Command's name too:
 
 ```ts
 import assert from 'node:assert/strict';
 import { commandName } from 'pure-effect';
 import type { Effect } from 'pure-effect';
 
+// Fails unless the step is of the kind given, and returns it typed as one. It takes undefined for a Parallel's branch read by index.
+function assertStep<T, E, C, K extends Effect<T, E, C>['type']>(step: Effect<T, E, C> | undefined, type: K) {
+    assert(step?.type === type, `expected a ${type}, got ${step?.type}`);
+    return step as Extract<Effect<T, E, C>, { type: K }>;
+}
+
 // Fails unless the step is the Command named, and returns it typed as one.
-function assertCommand<T, E, C>(step: Effect<T, E, C>, name: string) {
-    assert(step.type === 'Command', `expected ${name}, got ${step.type}`);
-    assert.equal(commandName(step), name);
-    return step;
+function assertCommand<T, E, C>(step: Effect<T, E, C> | undefined, name: string) {
+    const command = assertStep(step, 'Command');
+    assert.equal(commandName(command), name);
+    return command;
 }
 
 const step1 = assertCommand(registerUserFlow(input), 'cmdFindUser');
 assertCommand(step1.next(null), 'cmdSaveUser');
+
+// A Retry holds its Command as effect, and the step after it is the Retry's next, not the Command's.
+const retry = assertStep(saveUserWithRetry(input), 'Retry');
+assertCommand(retry.effect, 'cmdSaveUser');
+assertStep(retry.next({ id: 1 }), 'Success');
 ```
 
 Exact rules: [walking a flow in a test](REFERENCE.md#walking-a-flow-in-a-test).

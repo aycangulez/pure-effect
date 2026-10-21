@@ -263,7 +263,8 @@ describe('README TypeScript examples', function () {
             declare function listUsers(): Effect<{ id: number }[], never>;`,
         'Testing a flow in TypeScript': `
             declare const input: { email: string; password: string };
-            declare function registerUserFlow(input: { email: string; password: string }): Effect<{ id: number }, string>;`,
+            declare function registerUserFlow(input: { email: string; password: string }): Effect<{ id: number }, string>;
+            declare function saveUserWithRetry(input: { email: string; password: string }): Effect<{ id: number }, string>;`,
         'Replaying in TypeScript': `
             declare function registerUserFlow(input: Signup): Effect<{ id: number; email: string }, string>;
             declare function readTrace(id: string): Promise<string>;`
