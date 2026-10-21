@@ -214,7 +214,10 @@ export declare function commandName(command: CommandState<any, any, any, any>): 
 /** Reads the context passed to `runEffect`. With no argument it succeeds with the context; name its type as `Ask<AppCtx>()`. */
 export declare function Ask<Ctx = unknown>(): AskState<Ctx, never, Ctx>;
 
-/** Reads the context passed to `runEffect`. Give the value, error and context types, or none and annotate `ctx`. */
+/**
+ * Reads the context passed to `runEffect`. The first type argument is the value, not the context: annotate `ctx`, as in
+ * `Ask((ctx: AppCtx) => ...)`, or give the value, error and context types.
+ */
 export declare function Ask<T = never, E = never, Ctx = unknown, N extends AnyEffect = Effect<T, E, Ctx>>(
     next: (context: Ctx) => N
 ): AskState<EffectValue<N>, EffectError<N>, Ctx & EffectContext<N>>;

@@ -947,6 +947,8 @@ const findProduct = (productId: string): Effect<Product, 'not_found', AppContext
 const result = await runEffect(findProduct('abc'), { tenant: 'acme', requestId: '123' });
 ```
 
+Given a function, `Ask`'s first type argument is the value, not the context, so `Ask<AppContext>((ctx) => ...)` leaves `ctx` typed `unknown`. Give all three, as above, or annotate the parameter, `Ask((ctx: AppContext) => ...)`, and let the rest be inferred.
+
 Exact rules: [context in TypeScript](REFERENCE.md#context).
 
 ### Generator flows

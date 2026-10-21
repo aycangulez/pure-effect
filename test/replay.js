@@ -9,6 +9,8 @@ import {
     Retry,
     Parallel,
     effectPipe,
+    effectGen,
+    step,
     runEffect,
     configureEffect,
     recorder,
@@ -1748,9 +1750,6 @@ describe('Replay', function () {
         const lines = [];
         const log = (/** @type {string} */ line) => void lines.push(line);
         await timeTravel(bare, (await recordEffect(bare())).trace, { log });
-        assert.ok(lines.some((l) => /^Warning: the trace holds no initial input/.test(l)));
-        // A flow that takes no input gets this warning too, since a trace cannot tell undefined from none, so the
-        // advice is for a flow that does take one.
         assert.ok(
             lines.some((l) =>
                 l.endsWith('If the flow takes an input, build its outermost flow with effectPipe or effectGen.')
@@ -1762,6 +1761,49 @@ describe('Replay', function () {
         const { flow } = makeFlow();
         await timeTravel(flow, (await recordEffect(flow({ id: 'in' }))).trace, { log });
         assert.ok(!lines.some((l) => /no initial input/.test(l)));
+
+        // A trace that holds its input needs no warning, whoever built the flow that replays it.
+        lines.length = 0;
+        const piped = effectPipe((/** @type {number} */ n) => bare());
+        await timeTravel(bare, (await recordEffect(piped(5))).trace, { log });
+        assert.ok(!lines.some((l) => /no initial input/.test(l)), lines.join('\n'));
+    });
+
+    it('should not warn in timeTravel about a missing input for a flow effectPipe or effectGen built from undefined', async function () {
+        // The warning fired for a flow that takes no input, such as a nightly job, which the README builds this
+        // way; a root either builds from undefined shows the recorded input was undefined.
+        const cmdCount = () => 3;
+        const flows = [
+            effectPipe((/** @type {void} */ _input) => Command(cmdCount)),
+            effectGen(function* () {
+                return yield* step(Command(cmdCount));
+            })
+        ];
+        for (const flow of flows) {
+            /** @type {string[]} */
+            const lines = [];
+            const { result } = await timeTravel(flow, (await recordEffect(flow(undefined))).trace, {
+                log: (/** @type {string} */ line) => void lines.push(line)
+            });
+            assert.deepEqual(result, Success(3));
+            assert.ok(!lines.some((l) => /no initial input/.test(l)), lines.join('\n'));
+        }
+    });
+
+    it('should warn in timeTravel before a flow that cannot be built from undefined throws', async function () {
+        // The flow is built before the warnings are given, to see who built it, so its throw is held until after them.
+        const needsInput = (/** @type {any} */ input) => Success(input.id);
+        /** @type {string[]} */
+        const lines = [];
+        const trace = { trace: [], initialInput: undefined };
+        await assert.rejects(
+            timeTravel(needsInput, trace, { log: (/** @type {string} */ line) => void lines.push(line) }),
+            TypeError
+        );
+        assert.ok(
+            lines.some((l) => /^Warning: the trace holds no initial input/.test(l)),
+            lines.join('\n')
+        );
     });
 
     it('should reject a trace timeTravel cannot read with a ReplayError, as replayEffect does', async function () {

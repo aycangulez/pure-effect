@@ -3052,7 +3052,20 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
         throw unrecordedError('initialInput', inputCause, 'The flow is rebuilt from it, so', { field: 'initialInput' });
     }
 
-    for (const warning of traceWarnings(traceLog, trace, version)) log(warning);
+    // Built before the warnings, since a root `effectPipe` or `effectGen` built from undefined shows the recorded input
+    // was undefined; a throw is held so the warnings still come first.
+    /** @type {Effect | undefined} */
+    let root;
+    /** @type {{ error: unknown } | undefined} */
+    let buildFault;
+    let inputKept = false;
+    try {
+        root = flowFn(initialInput);
+        inputKept = flowInputs.has(root);
+    } catch (error) {
+        buildFault = { error };
+    }
+    for (const warning of traceWarnings(traceLog, trace, version, inputKept)) log(warning);
     const decisions = trace.filter(isDecisionEntry);
     const steps = counted(trace.length - decisions.length, 'recorded step');
     const andDecisions = decisions.length ? ` and ${counted(decisions.length, 'Parallel decision')}` : '';
@@ -3063,8 +3076,9 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
     const timing = stepTimings(trace);
     let replay;
     try {
+        if (buildFault) throw buildFault.error;
         // `replayEffect` defaults the context to the trace's.
-        replay = await replayEffect(flowFn(initialInput), traceLog, {
+        replay = await replayEffect(/** @type {Effect} */ (root), traceLog, {
             context,
             onResolved: (step, outcome) => {
                 // A step the trace does not hold is refused or run live by `replayEffect`, not narrated here.
@@ -3198,22 +3212,23 @@ const narrationTree = (narrated, decisionAt) => {
 
 /**
  * The warnings `timeTravel` gives before it replays: a trace recorded at another build, one that holds no initial
- * input, and steps a replay cannot tell apart.
+ * input for a flow whose trace could not have held one, and steps a replay cannot tell apart.
  * @param {TraceLog} traceLog
  * @param {TraceEntry[]} trace - Its entries, checked
  * @param {string | undefined} version - The build replaying it
+ * @param {boolean} inputKept - Whether `effectPipe` or `effectGen` built the flow's root, so a trace keeps its input
  * @returns {string[]}
  */
-const traceWarnings = (traceLog, trace, version) => {
+const traceWarnings = (traceLog, trace, version, inputKept) => {
     const warnings = [];
     if (version && traceLog.version && version !== traceLog.version) {
         warnings.push(`Warning: trace was recorded at ${traceLog.version}, replaying against ${version}.`);
     }
-    if (traceLog.initialInput === undefined) {
+    if (traceLog.initialInput === undefined && !inputKept) {
         warnings.push(
             'Warning: the trace holds no initial input, so the flow is rebuilt from undefined. A trace holds the ' +
-                'input only of a flow effectPipe or effectGen built, and cannot tell an input of undefined from ' +
-                'none. If the flow takes an input, build its outermost flow with effectPipe or effectGen.'
+                'input only of a flow effectPipe or effectGen built, and this one was built some other way. If the ' +
+                'flow takes an input, build its outermost flow with effectPipe or effectGen.'
         );
     }
     const anonymous = trace.filter((e) => e.command === 'anonymous').length;

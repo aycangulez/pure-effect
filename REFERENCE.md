@@ -436,9 +436,11 @@ To type what a Command's function returns, such as a JSON response, write the fu
 
 Every step's context counts, so a pipeline needs all the contexts its steps read, even when the first step reads none, and a `Parallel` needs every context its branches read. `runEffect` requires a context whenever the flow reads one, since the flow would otherwise get an empty object. Left out, it is reported as TypeScript's `Expected 2-3 arguments, but got 1` (`Expected 2 arguments` from `recordEffect`), which means the context is missing. It checks one passed as a variable against what the flow reads, as it checks one written in place, so a variable whose type lacks a field the flow reads does not compile. `recordEffect`, `replayEffect` and `timeTravel` check a context the same way, and `replayEffect` given a resolver requires one, since a resolver holds none.
 
+Name the context `Ask()` reads as `Ask<AppContext>()`. Given a function, `Ask`'s first type argument is the value instead, so `Ask<AppContext>((ctx) => ...)` types `ctx` as `unknown` and reports `'ctx' is of type 'unknown'`. Annotate the parameter, `Ask((ctx: AppContext) => ...)`, and the rest is inferred, or give all three: `Ask<Value, Error, AppContext>`.
+
 ### Generator flows
 
-`yield* x` without `step`, a bare `yield` of an Effect, reading a property of a step, and an `async function*` do not compile; the error for a bare `yield` ends by naming `yield* step(effect)`, and a body that returns an untyped value keeps its steps' errors. Returning a step or a Promise compiles, so that a generic helper returning a value of its type parameter does too, and fails when it runs. `yield step(x)` without the star does, and fails when it runs. Name the context `Ask()` reads as `Ask<AppContext>()`. Given a function, `Ask`'s first type argument is the value instead, so annotate the parameter: `Ask((ctx: AppContext) => ...)`.
+`yield* x` without `step`, a bare `yield` of an Effect, reading a property of a step, and an `async function*` do not compile; the error for a bare `yield` ends by naming `yield* step(effect)`, and a body that returns an untyped value keeps its steps' errors. Returning a step or a Promise compiles, so that a generic helper returning a value of its type parameter does too, and fails when it runs. `yield step(x)` without the star does, and fails when it runs.
 
 ### Walking a flow in a test
 
