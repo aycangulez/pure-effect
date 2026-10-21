@@ -306,7 +306,7 @@ Twelve rules cover most of what goes wrong. The same rules ship in the package a
 9. **Get the time, random IDs and anything else that changes between runs from a Command.** A replay then gets the recorded value, and a generator body, which can run more than once, sees the same value each time. See [What runs once, and what runs again](REFERENCE.md#what-runs-once-and-what-runs-again).
 10. **Return plain data from Commands, and keep the context to plain values.** A trace stores JSON, so a `Date` comes back as a string. Reach a service from the Command's function, and hand it to the function that builds the flow. See [Passing Runtime Context](#passing-runtime-context).
 11. **Clean up in a `try`/`finally` around `runEffect`,** not inside the flow. See [How a generator flow stops](REFERENCE.md#how-a-generator-flow-stops).
-12. **Check a replay's error, not only its type.** A replay of a flow that changed shape ends in a `Failure` holding a `TimeParadox`, the error naming where the flow and the trace part ways, so a test that only expects a `Failure` passes by accident. See [Time-Travel Debugging](#time-travel-debugging).
+12. **Check a replay's error, not only its type.** A replay of a flow that changed shape ends in a `Failure` holding a `TimeParadox`, the error naming where the flow and the trace part ways, or a `ReplayError` when the flow asks for a step past the end of the recording, so a test that only expects a `Failure` passes by accident. See [Time-Travel Debugging](#time-travel-debugging).
 
 <!-- rules:end -->
 
@@ -816,7 +816,7 @@ assert.deepEqual(await runEffect(pay(25)), Success({ chargeId: 'ch_1', amount: 2
 | a Command's function threw | an I/O fault | retries it | the exhaustion, once the attempts are gone | the error thrown, or, once a `Retry` gives up, `{ retryExhausted, lastError, retries }` |
 | a `next` function or a pure step threw, or the flow is malformed | a bug | nothing; it is thrown, not returned | nothing | nothing; `runEffect` rejects |
 
-In short, **you can recover from an error your I/O produced, but you cannot catch a `Failure` a step returned.** Only the code that called `runEffect` acts on it. For the same reason, do not throw business errors from a Command's function: a throw there tells `Retry` that the I/O broke, and `Retry` will try again. A throw anywhere else in the flow is a bug, and is thrown as it is rather than returned as a `Failure`. `runEffect` rejects with it, or, from a step before the first Command, the call that builds the flow throws it.
+In short, **you can recover from an error your I/O produced, but you cannot catch a `Failure` a step returned.** Only the code that called `runEffect` acts on it. For the same reason, do not throw business errors from a Command's function: a throw there tells `Retry` that the I/O broke, and `Retry` will try again. A throw anywhere else in the flow is a bug, and is thrown as it is rather than returned as a `Failure`. `runEffect` rejects with it, or, from a step before the first Command, the call that builds the flow throws it. Nor does a Command's function return `Failure(...)`: whatever it returns is its result, so a returned `Failure` reaches `next` as a value and the flow keeps going. Return the data and let a step decide, as `requireCharge` does above.
 
 Exact rules: [a malformed flow](REFERENCE.md#a-malformed-flow).
 
@@ -1056,7 +1056,7 @@ const { result: live, trace } = await recordEffect(registerUserFlow(input));
 
 // Anywhere else, with nothing connected, the same flow gets the same answers.
 const { result: replayed } = await replayEffect(registerUserFlow(trace.initialInput), trace);
-assert.deepEqual(replayed, live);
+assert.deepEqual(replayed, live); // holds while every result is plain data; see Keeping a replay faithful
 ```
 
 In production, record each run with a version and a flow name, and replay its trace anywhere with `timeTravel`, which narrates each step:

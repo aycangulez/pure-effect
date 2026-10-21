@@ -21,7 +21,7 @@ Returns `{ type: 'Failure', error }`. Stops the pipeline immediately.
 Returns `{ type: 'Command', cmd, next, meta }`.
 
 - `cmd`: the function, sync or async, that does the I/O. Inside a `Parallel` branch, one that declares a parameter without a default value gets an `AbortSignal` that fires when a sibling fails; see [Cancellation and the signal](#cancellation-and-the-signal).
-- `next`: receives `cmd`'s result and returns the next Effect; by default `(result) => Success(result)`.
+- `next`: receives `cmd`'s result and returns the next Effect; by default `(result) => Success(result)`. Whatever `cmd` returns is the result, an Effect included: a `Failure` it returns reaches `next` as a value and stops nothing.
 - `meta`: metadata passed to `onBeforeCommand`, with any keys your hooks need. A non-empty string `meta.name` names the Command; any other `name` is ignored, and the function's name is used.
 
 **Every Command needs a name**, which tests, traces, replay matching and telemetry all use. It is `meta.name`, else the function's name, else `'anonymous'`:
@@ -283,7 +283,7 @@ Runs a flow and resolves with its `Success` or `Failure`. See [Which Errors Are 
 
 #### The context
 
-The context is copied once per run. So a value that can change while a run is under way, such as a switch an operator can flip to stop a batch, belongs in a Command, whose result the trace records each time. A context whose properties throw when read, as a lazy client's can, leaves the whole context out, and a replay then needs it passed in.
+A trace records the context once, as the run starts, but `Ask` hands the flow the object you passed. A change made to it during a run reaches the live run and not the trace, so a replay sees the value as it was at the start. So a value that can change while a run is under way, such as a switch an operator can flip to stop a batch, belongs in a Command, whose result the trace records each time. A context whose properties throw when read, as a lazy client's can, leaves the whole context out, and a replay then needs it passed in.
 
 ### `configureEffect(...configs)`
 

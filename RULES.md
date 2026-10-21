@@ -17,7 +17,7 @@ The rules for writing a correct flow, and where the README covers each task.
 9. **Get the time, random IDs and anything else that changes between runs from a Command.** A replay then gets the recorded value, and a generator body, which can run more than once, sees the same value each time. See [What runs once, and what runs again](REFERENCE.md#what-runs-once-and-what-runs-again).
 10. **Return plain data from Commands, and keep the context to plain values.** A trace stores JSON, so a `Date` comes back as a string. Reach a service from the Command's function, and hand it to the function that builds the flow. See [Passing Runtime Context](README.md#passing-runtime-context).
 11. **Clean up in a `try`/`finally` around `runEffect`,** not inside the flow. See [How a generator flow stops](REFERENCE.md#how-a-generator-flow-stops).
-12. **Check a replay's error, not only its type.** A replay of a flow that changed shape ends in a `Failure` holding a `TimeParadox`, the error naming where the flow and the trace part ways, so a test that only expects a `Failure` passes by accident. See [Time-Travel Debugging](README.md#time-travel-debugging).
+12. **Check a replay's error, not only its type.** A replay of a flow that changed shape ends in a `Failure` holding a `TimeParadox`, the error naming where the flow and the trace part ways, or a `ReplayError` when the flow asks for a step past the end of the recording, so a test that only expects a `Failure` passes by accident. See [Time-Travel Debugging](README.md#time-travel-debugging).
 
 ## Find It by Task
 

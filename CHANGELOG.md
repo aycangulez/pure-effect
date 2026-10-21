@@ -2,7 +2,7 @@
 
 All notable changes to Pure Effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
-## [Unreleased]
+## [0.22.0] - 2026-10-21
 
 ### Added
 
@@ -341,6 +341,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 
 - Initial release: `Success`, `Failure`, `Command`, `effectPipe`, and `runEffect`.
 
+[0.22.0]: https://github.com/aycangulez/pure-effect/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/aycangulez/pure-effect/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/aycangulez/pure-effect/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/aycangulez/pure-effect/compare/v0.19.0...v0.20.0
