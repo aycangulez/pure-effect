@@ -86,7 +86,7 @@ const quickStartValidate = (input: User) => {
     return Success(input);
 };
 const quickStartResult = await runEffect(effectPipe(quickStartValidate)({ email: 'a@b.c', password: 'secret123' }));
-expectType<SuccessState<User> | FailureState<'invalid_email' | 'weak_password'>>(quickStartResult);
+expectType<SuccessState<User> | FailureState<'invalid_email' | 'weak_password' | Error>>(quickStartResult);
 
 // --- Command ---
 
@@ -141,14 +141,15 @@ flow({ email: 'a@b.com' });
 // --- runEffect return type ---
 
 const result = await runEffect(flow({ email: 'a@b.com', password: 'secret123' }));
-expectType<SuccessState<SavedUser> | FailureState<never>>(result);
+expectType<SuccessState<SavedUser> | FailureState<Error>>(result);
 
 // --- discriminated union narrowing ---
 
 if (result.type === 'Success') {
     expectType<SavedUser>(result.value);
 } else {
-    expectType<never>(result.error);
+    // No step returns a Failure, so the only error is what a Command's function threw.
+    expectType<Error>(result.error);
 }
 
 // --- commandName ---
@@ -164,7 +165,24 @@ if (walked.type === 'Command') expectType<string>(commandName(walked));
 
 const failFlow = effectPipe((input: User): Effect<User, string> => Failure<string>('bad'));
 const failResult = await runEffect(failFlow({ email: 'a@b.com', password: 'x' }));
-expectType<SuccessState<User> | FailureState<string>>(failResult);
+expectType<SuccessState<User> | FailureState<string | Error>>(failResult);
+
+// A result's error includes Error, for what a Command's function threw, so a handler narrows it away before reading a
+// domain error's fields, and what remains is the declared union.
+type Billing = { type: 'NoSubscription' } | { type: 'CardDeclined'; code: string };
+declare const billing: Effect<number, Billing>;
+const billed = await runEffect(billing);
+if (billed.type === 'Failure') {
+    // @ts-expect-error a thrown Error has no type field, so the check for it comes first
+    billed.error.type;
+    if (billed.error instanceof Error) expectType<Error>(billed.error);
+    else expectType<Billing>(billed.error);
+}
+// A domain error shaped like an Error is not narrowed away with it.
+type Conflict = { name: 'Conflict'; message: string };
+declare const conflicting: Effect<number, Conflict>;
+const conflicted = await runEffect(conflicting);
+if (conflicted.type === 'Failure' && !(conflicted.error instanceof Error)) expectType<Conflict>(conflicted.error);
 
 // --- Ask ---
 
@@ -223,9 +241,9 @@ expectType<RetryState<number, 'net_down' | RetryExhaustedError>>(retriedTyped);
 
 const retryResult = await runEffect(Retry(Success(1) as Effect<number, 'flaky'>, { retries: 1 }));
 if (retryResult.type === 'Failure') {
-    expectType<'flaky' | RetryExhaustedError>(retryResult.error);
-    // An abort arrives as itself, so the union has to be narrowed before `lastError` is there.
-    if (typeof retryResult.error === 'object') {
+    expectType<'flaky' | RetryExhaustedError | Error>(retryResult.error);
+    // An abort arrives as itself and a throw as an Error, so both are narrowed away before `lastError` is there.
+    if (typeof retryResult.error === 'object' && !(retryResult.error instanceof Error)) {
         expectType<unknown>(retryResult.error.lastError);
         // @ts-expect-error lastError is what a Command's function threw, never the wrapped tree's abort type
         const abortAsLastError: 'flaky' = retryResult.error.lastError;
@@ -245,7 +263,7 @@ expectType<RetryState<number, 'flaky' | 'cache_miss'>>(recovered);
 
 const recoveredResult = await runEffect(recovered);
 if (recoveredResult.type === 'Failure') {
-    expectType<'flaky' | 'cache_miss'>(recoveredResult.error);
+    expectType<'flaky' | 'cache_miss' | Error>(recoveredResult.error);
 }
 
 // A Retry that starts a pipeline hands its next what the retried Command returned, not the pipeline's value, so a
@@ -293,7 +311,7 @@ const typedFlow = effectPipe(validateStep, saveStep);
 expectType<Effect<SavedUser, ValidationError | DbError>>(typedFlow({ email: 'a@b.com', password: 'secret123' }));
 
 const typedResult = await runEffect(typedFlow({ email: 'a@b.com', password: 'secret123' }));
-expectType<SuccessState<SavedUser> | FailureState<ValidationError | DbError>>(typedResult);
+expectType<SuccessState<SavedUser> | FailureState<ValidationError | DbError | Error>>(typedResult);
 
 // The union needs no annotations. A step that cannot return a Failure, such as a Command with the default next or a
 // pure step that only succeeds, contributes never, where it used to contribute unknown and absorb every other member.
@@ -309,7 +327,7 @@ const normalize = (input: User) => Success({ ...input, email: input.email.toLowe
 const saveInferred = (input: User) => Command(() => users.save(input));
 const inferredFlow = effectPipe(validateInferred, ensureFree, normalize, saveInferred);
 const inferredResult = await runEffect(inferredFlow({ email: 'a@b.com', password: 'secret123' }));
-expectType<SuccessState<SavedUser> | FailureState<'invalid_email' | 'email_taken'>>(inferredResult);
+expectType<SuccessState<SavedUser> | FailureState<'invalid_email' | 'email_taken' | Error>>(inferredResult);
 
 // A Retry whose fallback cannot fail declares no error of its own
 const savedOrPlaceholder = Retry(
@@ -388,7 +406,7 @@ const mixedSettled = Parallel(
     { settled: true }
 );
 expectType<
-    ParallelState<[number], never, 'too_many' | Banned, unknown, [SuccessState<number> | FailureState<never>], never>
+    ParallelState<[number], never, 'too_many' | Banned, unknown, [SuccessState<number> | FailureState<Error>], never>
 >(mixedSettled);
 const mixedFallback = Retry(Command(findSaved), {
     onExhausted: () => (inStock ? Failure('down') : Failure({ code: 'banned', id: bannedId }))
@@ -565,7 +583,7 @@ expectType<Effect<{ email: string; password: string }, never>>(
 
 // runEffect return type flows through Parallel
 const parallelResult = await runEffect(Parallel([Success(1), Success('x')], ([n, s]) => Success({ n, s })));
-expectType<SuccessState<{ n: number; s: string }> | FailureState<never>>(parallelResult);
+expectType<SuccessState<{ n: number; s: string }> | FailureState<Error>>(parallelResult);
 
 // With next omitted, the Parallel resolves to the values tuple itself
 const parBare = Parallel([Success(42), Success('hello')]);
@@ -587,7 +605,7 @@ expectType<ParallelState<[number, string], { n: number; s: string }, never>>(par
 const parSettled = Parallel([Success(42), Success('hello')], { settled: true });
 const parSettledResult = await runEffect(parSettled);
 if (parSettledResult.type === 'Success') {
-    expectType<[SuccessState<number> | FailureState<never>, SuccessState<string> | FailureState<never>]>(
+    expectType<[SuccessState<number> | FailureState<Error>, SuccessState<string> | FailureState<Error>]>(
         parSettledResult.value
     );
 }
@@ -595,8 +613,8 @@ if (parSettledResult.type === 'Success') {
 const parSettledNext = Parallel(
     [Success(42), Success('hello')],
     ([first, second]) => {
-        expectType<SuccessState<number> | FailureState<never>>(first);
-        expectType<SuccessState<string> | FailureState<never>>(second);
+        expectType<SuccessState<number> | FailureState<Error>>(first);
+        expectType<SuccessState<string> | FailureState<Error>>(second);
         return Success(first.type === 'Success' ? first.value : 0);
     },
     { settled: true }
@@ -672,15 +690,15 @@ const tooNarrow = (): Effect<string, 'small'> => Parallel([failsA], () => Failur
 const settledBatch = Parallel(
     [failsA, failsB],
     ([first, second]) => {
-        expectType<SuccessState<number> | FailureState<'a'>>(first);
-        expectType<SuccessState<string> | FailureState<'b'>>(second);
+        expectType<SuccessState<number> | FailureState<'a' | Error>>(first);
+        expectType<SuccessState<string> | FailureState<'b' | Error>>(second);
         return first.type === 'Failure' && second.type === 'Failure' ? Failure('all_failed' as const) : Success(true);
     },
     { settled: true }
 );
 const settledBatchResult = await runEffect(settledBatch);
 if (settledBatchResult.type === 'Failure') {
-    expectType<'all_failed'>(settledBatchResult.error);
+    expectType<'all_failed' | Error>(settledBatchResult.error);
 }
 
 // Branches built with map, as the README writes a loop, keep their error, and so does a pipeline holding one
@@ -695,7 +713,7 @@ const chargeAll = effectPipe(
     (ids: number[]) => Parallel(ids.map(chargeOne), { limit: 1 })
 );
 const chargeAllResult = await runEffect(chargeAll([1, 2]));
-expectType<SuccessState<number[]> | FailureState<'no_invoices' | 'declined'>>(chargeAllResult);
+expectType<SuccessState<number[]> | FailureState<'no_invoices' | 'declined' | Error>>(chargeAllResult);
 
 // A Parallel written inside effectPipe's arguments, whose next cannot fail, adds no error. Its next's error
 // was once inferred from the pipeline's expected type as well, and came out as any.
@@ -741,7 +759,7 @@ expectType<Effect<{ email: string; password: string; conn: string }, never, AppC
 
 // runEffect enforces context argument matches Ctx
 const ctxResult = await runEffect(ctxFlow({ email: 'a@b.com', password: 'secret123' }), { db: 'conn' });
-expectType<SuccessState<{ email: string; password: string; conn: string }> | FailureState<never>>(ctxResult);
+expectType<SuccessState<{ email: string; password: string; conn: string }> | FailureState<Error>>(ctxResult);
 
 // wrong context shape should error
 // @ts-expect-error context does not match Ctx
@@ -915,10 +933,10 @@ expectType<Promise<Replay<number, never>>>(replayEffect(readRow, traceLog, repla
 expectType<Promise<Replay<number, never>>>(replayEffect(readRow, traceLog.trace));
 (async () => {
     const { result, unreached } = await replayEffect(readRow, traceLog);
-    expectType<SuccessState<number> | FailureState<never>>(result);
+    expectType<SuccessState<number> | FailureState<Error>>(result);
     expectType<TraceEntry[]>(unreached);
     const fromResolver = await replayEffect(readRow, () => ({ result: 42 }));
-    expectType<SuccessState<number> | FailureState<never>>(fromResolver.result);
+    expectType<SuccessState<number> | FailureState<Error>>(fromResolver.result);
     // @ts-expect-error a Resolver cannot know what was left unreached
     fromResolver.unreached;
 })();
@@ -926,7 +944,7 @@ expectType<Promise<Replay<number, never>>>(replayEffect(readRow, traceLog.trace)
 declare const traceOrResolver: TraceLog | TraceEntry[] | Resolver;
 (async () => {
     const forwarded = await replayEffect(readRow, traceOrResolver);
-    expectType<SuccessState<number> | FailureState<never>>(forwarded.result);
+    expectType<SuccessState<number> | FailureState<Error>>(forwarded.result);
     expectType<TraceEntry[] | undefined>(forwarded.unreached);
 })();
 // @ts-expect-error strict was removed: paths make it unnecessary
@@ -992,12 +1010,12 @@ recorder({ redact: (value, name, kind) => (kind === 'initialInput' ? { ...value,
 (async () => {
     const input: User = { email: 'a@b.c', password: 'x' };
     const recorded = await recordEffect(typedFlow(input), { version: 'v1' });
-    expectType<SuccessState<SavedUser> | FailureState<ValidationError | DbError>>(recorded.result);
+    expectType<SuccessState<SavedUser> | FailureState<ValidationError | DbError | Error>>(recorded.result);
     expectType<TraceLog<unknown, unknown>>(recorded.trace);
     const replayedFromMemory = await replayEffect(typedFlow(input), recorded.trace);
-    expectType<SuccessState<SavedUser> | FailureState<ValidationError | DbError>>(replayedFromMemory.result);
+    expectType<SuccessState<SavedUser> | FailureState<ValidationError | DbError | Error>>(replayedFromMemory.result);
     const withCtx = await recordEffect(ctxFlow({ email: 'a@b.c', password: 'x' }), { context: { db: 'conn' } });
-    expectType<SuccessState<{ email: string; password: string; conn: string }> | FailureState<never>>(withCtx.result);
+    expectType<SuccessState<{ email: string; password: string; conn: string }> | FailureState<Error>>(withCtx.result);
     expectType<AppCtx | undefined>(withCtx.trace.context);
     // A trace read back from storage is untyped until the caller says otherwise
     const stored: TraceLog = JSON.parse(JSON.stringify(recorded.trace));
@@ -1032,6 +1050,10 @@ const fault = (replayed.result as FailureState<unknown>).error as ReplayFault;
 expectType<'ReplayError' | 'TimeParadox'>(fault.name);
 expectType<string | undefined>(fault.path);
 expectAssignable<Error>(fault);
+// A result's error includes Error, which a ReplayFault is, so it casts directly even when the flow's errors are objects.
+declare const objectErrors: Effect<number, { type: 'zero' }>;
+const replayedObjects = await replayEffect(objectErrors, { trace: [] });
+if (replayedObjects.result.type === 'Failure') expectType<ReplayFault>(replayedObjects.result.error as ReplayFault);
 // `name` tells the two apart, and each declares only the fields the runtime sets on it
 if (fault.name === 'TimeParadox') {
     expectType<unknown>(fault.expected);

@@ -11,6 +11,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 ### Changed
 
 - Breaking: a run is named by `flowName` in `runEffect`'s third argument or `recordEffect`'s options, not by `context.flowName`, which is now ordinary context data. Move the name: `runEffect(flow, ctx, { flowName })` and `recordEffect(flow, { context, flowName })`.
+- Breaking: a result's error, and each settled `Parallel` outcome's, is typed with `Error` added to the declared union, for what a Command's function threw. Check `error instanceof Error` before reading a domain error's fields.
 - Breaking: `effectGen` refuses a generator function that declares more than one parameter, whose extra parameters were always `undefined`. Pass several values as one object.
 - Breaking: the `RunContext` type is removed, since a context no longer carries `flowName`.
 - A `Command` given only its result type, with a `next` that keeps the value and cannot fail, types its error as `never` rather than `unknown`.

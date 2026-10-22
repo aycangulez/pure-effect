@@ -355,7 +355,7 @@ Runs a flow for real while recording, returning `{ result, trace }`. The trace h
 
 Runs a flow with each Command answered from a trace instead of run, and returns `{ result, unreached }`: the flow's outcome, and the recorded steps it never asked for. See [Time-Travel Debugging](README.md#time-travel-debugging).
 
-- A flow that no longer matches the trace ends in a `Failure` whose `error` is a `TimeParadox`, or a `ReplayError` for a step the trace lacks. Neither is thrown, so a test checks `error.name`. In TypeScript, cast the error through `unknown`, as in `result.error as unknown as ReplayFault`, since the result's type is the flow's own errors; `ReplayFault` types `name` and the fields locating the stop, such as `path`.
+- A flow that no longer matches the trace ends in a `Failure` whose `error` is a `TimeParadox`, or a `ReplayError` for a step the trace lacks. Neither is thrown, so a test checks `error.name`. In TypeScript, a result's error includes `Error`, which both are, so cast it directly, as in `result.error as ReplayFault`; `ReplayFault` types `name` and the fields locating the stop, such as `path`.
 - A malformed trace rejects with a `ReplayError`.
 - `traceOrResolver`: a trace, its bare entries, or a resolver: a function that answers each step with `{ result }`, `{ error }`, or `undefined` for a step it has no record of. See [Testing a whole flow](README.md#testing-a-whole-flow) and [Replaying from your own storage](README.md#replaying-from-your-own-storage).
 - Any other answer from a resolver, `null` included, or a throw from it, rejects the replay. With a resolver, `unreached` is absent.
@@ -424,6 +424,14 @@ A reference back to an object the value is inside of, as between an HTTP client'
 ### Typing what a Command returns
 
 To type what a Command's function returns, such as a JSON response, write the function's result type, as in `Command((): Promise<User | null> => fetchJson(url), next)`. `Command<User | null>(…)` also compiles, but with some type arguments given TypeScript infers none of the others, so that Command's errors are typed `unknown`, which hides the rest of the union.
+
+### A result's error
+
+- `runEffect`, `recordEffect` and `replayEffect` type a `Failure`'s error as the union the flow's steps declare plus `Error`, for what a Command's function threw or an `onBeforeCommand` veto threw. A settled `Parallel` types each outcome's error the same way. A step's own `Effect<T, E, Ctx>` keeps only `E`.
+- `result.error instanceof Error` narrows to `Error`, and its other side to the declared union, so the check comes before reading a field of a domain error. A domain error shaped like an `Error`, with a `name` and a `message`, stays on the union's side.
+- A domain error that is a class extending `Error` lands on the `Error` side too, so check for it with its own `instanceof` first.
+- A thrown value that is not an `Error`, as `throw 'boom'` is, is typed `Error` but fails the check at runtime, so throw `Error`s.
+- Under a `Retry`, a throw becomes `RetryExhaustedError` once the attempts run out, so an `Error` there comes from an `onBeforeCommand` veto.
 
 ### Literals in `Success` and `Failure`
 

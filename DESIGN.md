@@ -478,7 +478,7 @@ Deliberate type errors in `test/types.test-d.ts` are `// @ts-expect-error` direc
 - `runEffect` and `recordEffect` require the context when the flow's context type is not `unknown`, since the runtime would hand `Ask` an empty object. So does `replayEffect` given a `Resolver`, which holds no context; a trace carries its own.
 - The context's type comes from the flow alone; see [A run's context is never inferred from](#a-runs-context-is-never-inferred-from).
 - An error union survives without return annotations. Every function a flow is built from is typed from its whole return, so its `Failure`s join into a union, and a step that cannot return one contributes `never` (see below). `Failure` takes a `const` type parameter, so a string passed to it keeps its literal type with no `as const`.
-- The declared union leaves out what a Command's function throws, which `runEffect` returns as a `Failure` all the same. So the code handling a result needs one fallback, as the settled decision on thrown errors says.
+- A step's declared union leaves out what a Command's function throws, which `runEffect` returns as a `Failure` all the same, so a result adds `Error` to it and the code handling the result checks for that first, as [A result's error includes `Error`](#a-results-error-includes-error) says.
 
 ### `effectPipe`'s overloads
 
@@ -884,22 +884,25 @@ It once held two algorithms, running live and reproducing a recorded cancellatio
 
 Splitting the modes into `decideByTiming` and `reproduceCancellation` was tried and folded back: following one `Parallel` went through seven functions, with the same four arguments handed down unchanged.
 
-### Thrown errors stay out of the declared error union
+### A result's error includes `Error`
 
-A `Failure` can also carry what a Command's function threw, what an `onBeforeCommand` veto threw, or, in a replay, a `ReplayError` or `TimeParadox`. The types name none of them.
+A `Failure` can also carry what a Command's function threw, what an `onBeforeCommand` veto threw, or, in a replay, a `ReplayError` or `TimeParadox`. `runEffect`, `recordEffect` and `replayEffect` type a result's error as the union the flow's steps declare plus `Error`, and a settled `Parallel` types each outcome's error the same way. A step's own `Effect<T, E, Ctx>` keeps only `E`, so the union a pipeline or a generator flow collects is unchanged until it reaches a result.
 
-Declaring results as `FailureState<E | Error>` was weighed and dropped:
+The types named none of the thrown values until 0.22.0. `FailureState<E | Error>` had been weighed and dropped, on the grounds that whatever reaches the caller undeclared needs one fallback where the result is handled, and that widening every result would make every handler spell out a case it treats generically anyway. The README told readers to write that fallback, as `const thrown: unknown = result.error; if (thrown instanceof Error)`, before a `switch` ending in `never`. But nothing required it: the `switch` compiled without it, a flow that declared no failures typed its error `never`, and a settled batch of plain Commands typed its `Failure` branch `never` while that branch could hold only thrown errors. All four TypeScript readers in the fifth round of the October 2026 DX experiments named it as a type that lies by omission, one as the worst thing about the library.
 
-- An application handles the `Failure`s its steps return.
-- A Command's function catches what the flow can handle and returns it as data, and the rest is left to throw so `Retry` can act on it.
-- Whatever reaches the caller undeclared needs one fallback where the result is handled, not one per Command.
-- Widening every result type would make every handler spell out a case it treats generically anyway.
+Adding `Error` to the result types makes the compiler require the fallback the earlier decision called for: a handler cannot read a domain error's field until `instanceof Error` has narrowed the `Error` away, which also replaces the copy into `unknown`. Handlers spell out the case once, which the README already told them to. A spike measured it before it was adopted: the README's handler and the four experiments' shells compiled with the check in place on TypeScript 5.1, 5.9 and 7; a domain error shaped like `{ name, message }` survives the narrowing; an `Error` subclass narrows with its own `instanceof`; the code of the four experiments broke in four lines, two of them a handler whose signature now names the `Error` its body already answered with a 500; and a replay's error casts to `ReplayFault` directly, which TypeScript refused for a flow whose errors are objects.
 
-`ReplayFault` types a replay's error for a test that casts to it, and leaves the result types alone. It was added after a TypeScript DX experiment in October 2026 could only read a `TimeParadox` as `unknown`. It is a union on `name`, each member declaring only the fields the runtime sets on it: a `TimeParadox` names the two sides in `expected` and `actual` and never sets `command`, and a `ReplayError` sets `command` or `field` and compares nothing. One shape with every field optional said `command` was the Command the flow asked for, which a `TimeParadox` never carries, as the next experiment found.
+The alternatives were weighed then as well:
 
-The README says to write that fallback and to treat it as a server error, and its checkout handler answers a thrown error with a 500 rather than a 400.
+- `FailureState<E | unknown>` is `FailureState<unknown>`, and loses the union.
+- Wrapping a thrown value, as in `{ thrown: error }`, would change what the `Failure` holds at runtime, and put provenance in a value user code holds.
+- An `isThrown(result)` helper could only test `instanceof Error`, as user code does, since the runtime keeps no provenance, so it fails the bar for a shipped helper.
 
-It holds for a settled `Parallel`'s outcomes too, though in a batch of plain Commands the `Failure` branch holds only thrown errors, so its error is typed `never`. Typing settled outcomes' errors `unknown` was weighed in October 2026 and dropped, to keep one rule for every result.
+What it costs: a thrown value that is not an `Error` is typed `Error`, a returned `Failure(new MyError())` lands on the `Error` side unless its own `instanceof` comes first, and under a `Retry`, where a throw becomes `RetryExhaustedError`, the `Error` a handler must check for can come only from a veto.
+
+`ReplayFault` types a replay's error for a test that casts to it. It was added after a TypeScript DX experiment in October 2026 could only read a `TimeParadox` as `unknown`. It is a union on `name`, each member declaring only the fields the runtime sets on it: a `TimeParadox` names the two sides in `expected` and `actual` and never sets `command`, and a `ReplayError` sets `command` or `field` and compares nothing. One shape with every field optional said `command` was the Command the flow asked for, which a `TimeParadox` never carries, as the next experiment found.
+
+The README's checkout handler answers a thrown error with a 500 rather than a 400.
 
 ### A `Failure` carries only its error
 

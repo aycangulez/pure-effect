@@ -900,9 +900,7 @@ if (result.type === 'Failure') {
 
 The annotations are optional. Without them, the union holds whatever each step can pass to `Failure`, each error kept exactly as written, whether a string or an object. A step that cannot fail, such as a Command without a `next`, adds nothing.
 
-**The union covers only the `Failure`s your steps return.** A Command whose function throws, or that an `onBeforeCommand` hook vetoes, also ends the run with a `Failure`, and its error is not in the union. So where the result is handled, give it one fallback, such as a `default` in a `switch` over `result.error`, and treat what reaches it as a server error. The same goes for the outcomes a settled `Parallel` hands `next`. One fallback covers the whole flow: catch inside a Command's function only what the flow can handle, and let the rest throw, which is also what lets `Retry` act on it.
-
-To check for a thrown error, copy it into a variable typed `unknown` first, as in `const error: unknown = result.error`. TypeScript refuses `instanceof Error` on an error type made only of strings, or on a flow that declares none.
+**A result's error also holds `Error`, for what a Command's function threw.** A Command whose function throws, or that an `onBeforeCommand` hook vetoes, ends the run with a `Failure` holding what was thrown, so `result.error` is typed as your steps' union plus `Error`, and so is each outcome a settled `Parallel` hands `next`. Check for it first with `result.error instanceof Error` and treat it as a server error; what remains is the union your steps declare, and TypeScript refuses to read a field of it until the check is there. One check covers the whole flow: catch inside a Command's function only what the flow can handle, and let the rest throw, which is also what lets `Retry` act on it.
 
 Value types are checked through the pipeline too, so a step that reads a field the previous step does not return is a compile error. This only works while every step uses the value it receives. A step written as `() => doSomething(outer)` ignores it, and the types stop being checked at that point.
 
@@ -910,7 +908,7 @@ Exact rules: [TypeScript](REFERENCE.md#typescript).
 
 ### Handling every error
 
-A `switch` over a flow's error union can make TypeScript refuse a case you forgot. Check first for a thrown error, which reaches `result.error` without being in the union, and end the `switch` with a `never`, so a case added to the union later is a compile error until it is handled. TypeScript narrows a `switch` only over a union, so with a single error type, leave out the `default` and its `never`; the check for a thrown error stays the fallback:
+A `switch` over a flow's error union can make TypeScript refuse a case you forgot. Check first for a thrown error with `instanceof Error`, and end the `switch` with a `never`, so a case added to the union later is a compile error until it is handled. TypeScript narrows a `switch` only over a union, so with a single error type, leave out the `default` and its `never`; the check for a thrown error stays the fallback:
 
 ```ts
 type BillingError = { type: 'NoSubscription' } | { type: 'CardDeclined'; code: string };
@@ -918,8 +916,7 @@ type BillingError = { type: 'NoSubscription' } | { type: 'CardDeclined'; code: s
 async function billAndReport(tenantId: string) {
     const result = await runEffect(billTenant(tenantId));
     if (result.type === 'Success') return billed(result.value);
-    const thrown: unknown = result.error;
-    if (thrown instanceof Error) return serverError(thrown); // a Command's function threw
+    if (result.error instanceof Error) return serverError(result.error); // a Command's function threw
     switch (result.error.type) {
         case 'NoSubscription':
             return skipTenant();
@@ -1047,10 +1044,10 @@ const stored: TraceLog<Signup> = JSON.parse(await readTrace('incident-8f3a'));
 if (stored.initialInput === undefined) throw new Error('the trace holds no input to rebuild the flow from');
 const { result } = await replayEffect(registerUserFlow(stored.initialInput), stored);
 
-// A replay that stops ends in a Failure the flow's error union leaves out: read the error as unknown, then cast it.
-const error: unknown = result.type === 'Failure' ? result.error : undefined;
-if (error instanceof Error && (error.name === 'TimeParadox' || error.name === 'ReplayError')) {
-    const fault = error as ReplayFault;
+// A replay that stops ends in a Failure holding a TimeParadox or a ReplayError, each an Error: check its name, then cast.
+const stopped = result.type === 'Failure' && result.error instanceof Error ? result.error : undefined;
+if (stopped && (stopped.name === 'TimeParadox' || stopped.name === 'ReplayError')) {
+    const fault = stopped as ReplayFault;
     assert.fail(`the replay stopped at ${fault.path}: ${fault.message}`);
 }
 ```

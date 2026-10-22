@@ -170,7 +170,7 @@ export type ParallelValues<B extends readonly unknown[]> = { -readonly [K in key
 
 /** What a settled `Parallel` hands to `next`: one outcome per branch, in array order, with that branch's error. */
 export type ParallelOutcomes<B extends readonly unknown[]> = {
-    -readonly [K in keyof B]: SuccessState<EffectValue<B[K]>> | FailureState<EffectError<B[K]>>;
+    -readonly [K in keyof B]: SuccessState<EffectValue<B[K]>> | FailureState<EffectError<B[K]> | Error>;
 };
 
 /** Every branch's context together, which is what `runEffect` needs for a `Parallel`. */
@@ -1380,15 +1380,15 @@ export type CallConfiguration = EffectConfiguration & {
 type CheckedContext<T> = [T][T extends any ? 0 : never];
 
 /**
- * Runs a flow and returns its `Success` or `Failure`. A flow that reads a context requires one, so "Expected 2-3
- * arguments" here means the context was left out.
+ * Runs a flow and returns its `Success` or `Failure`, whose error includes `Error` for what a Command's function threw.
+ * A flow that reads a context requires one, so "Expected 2-3 arguments" here means the context was left out.
  */
 export declare function runEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     ...args: unknown extends Ctx
         ? [context?: CheckedContext<Ctx>, callConfig?: CallConfiguration]
         : [context: CheckedContext<Ctx>, callConfig?: CallConfiguration]
-): Promise<SuccessState<T> | FailureState<E>>;
+): Promise<SuccessState<T> | FailureState<E | Error>>;
 
 export type ReplayStep = {
     /** Position in completion order, which varies with a `Parallel`; prefer `path`. */
@@ -1482,7 +1482,7 @@ export declare function recordEffect<T, E = unknown, Ctx = unknown>(
     ...options: unknown extends Ctx
         ? [options?: RecordOptions<CheckedContext<Ctx>>]
         : [options: RecordOptions<CheckedContext<Ctx>> & { context: CheckedContext<Ctx> }]
-): Promise<{ result: SuccessState<T> | FailureState<E>; trace: TraceLog<unknown, Ctx> }>;
+): Promise<{ result: SuccessState<T> | FailureState<E | Error>; trace: TraceLog<unknown, Ctx> }>;
 
 export interface ReplayOptions<Ctx = unknown> {
     /** Context for `Ask`; defaults to the one the trace recorded. */
@@ -1501,13 +1501,13 @@ export interface ReplayOptions<Ctx = unknown> {
 
 /** The replay's outcome and, for a trace, the recorded steps the flow never asked for. */
 export interface Replay<T, E = unknown> {
-    result: SuccessState<T> | FailureState<E>;
+    result: SuccessState<T> | FailureState<E | Error>;
     unreached: TraceEntry[];
 }
 
 /**
  * The error a replay stops with, in its result's `Failure`: a `TimeParadox` when the flow asked for a different step,
- * else a `ReplayError`. The result's type leaves it out, so read the error as `unknown` and cast it.
+ * else a `ReplayError`. Each is an `Error`, which a result's error includes, so cast it directly.
  */
 export type ReplayFault =
     | (Error & {

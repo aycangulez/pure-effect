@@ -155,7 +155,7 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 - `effectPipe` stops at 20 steps, and nesting is the workaround.
 - `index.js` stays one file, divided into sections; a `utils.js` and a split into the core and recording and replay were weighed and dropped.
 - `runBranches` runs both modes through `settleBranches`.
-- Thrown errors stay out of the declared error union.
+- A result's error, and a settled outcome's, includes `Error` for what was thrown; a step's `Effect` keeps only its declared errors.
 - `meta` is unchecked: a `meta.name` that is not a non-empty string falls back to the function's name.
 - A `Failure` carries only its error; the flow's input reaches `onRun`, never an outcome.
 - A run's name is `flowName` in `runEffect`'s call configuration and `recordEffect`'s options, never the context; supporting both was dropped.
