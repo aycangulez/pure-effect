@@ -900,7 +900,11 @@ describe('effectGen: stopping', function () {
         // A sibling whose catch swallows the stop would otherwise replace the real error in the replay.
         const sibling = effectGen(function* () {
             try {
-                yield* step(Command(() => new Promise((resolve) => setTimeout(resolve, 20))));
+                yield* step(
+                    Command(function cmdWait() {
+                        return new Promise((resolve) => setTimeout(resolve, 20));
+                    })
+                );
                 yield* step(
                     Parallel([
                         effectGen(function* () {
@@ -921,7 +925,9 @@ describe('effectGen: stopping', function () {
             }
         });
         const bug = Command(
-            () => new Promise((resolve) => setTimeout(resolve, 5)),
+            function cmdSlow() {
+                return new Promise((resolve) => setTimeout(resolve, 5));
+            },
             () => {
                 throw new Error('the real bug');
             }
@@ -940,7 +946,11 @@ describe('effectGen: stopping', function () {
         // generator, and the replay, which knows only the order the trace gives it, must not either.
         const swallowing = effectGen(function* () {
             try {
-                yield* step(Command(() => new Promise((resolve) => setTimeout(resolve, 20))));
+                yield* step(
+                    Command(function cmdWait() {
+                        return new Promise((resolve) => setTimeout(resolve, 20));
+                    })
+                );
                 return yield* step(Command(function cmdAfter() {}));
             } catch {
                 seen.push('catch');
@@ -948,13 +958,17 @@ describe('effectGen: stopping', function () {
             }
         });
         const bug = Command(
-            () => new Promise((resolve) => setTimeout(resolve, 5)),
+            function cmdSlow() {
+                return new Promise((resolve) => setTimeout(resolve, 5));
+            },
             () => {
                 throw new Error('the real bug');
             }
         );
         // Fails while the bug's Command is already running, which ignores the cancellation and then throws.
-        const declined = Command(() => new Promise((_, reject) => setTimeout(() => reject(new Error('declined')), 2)));
+        const declined = Command(function cmdDeclined() {
+            return new Promise((_, reject) => setTimeout(() => reject(new Error('declined')), 2));
+        });
         const flow = () => Parallel([swallowing(undefined), declined, bug]);
         const recording = recorder();
         await assert.rejects(runEffect(flow(), {}, { onStep: recording.onStep }), /^Error: the real bug$/);

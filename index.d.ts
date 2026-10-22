@@ -1526,7 +1526,7 @@ export type ReplayFault =
           name: 'ReplayError';
           /** Where the replay stopped. */
           path?: string | undefined;
-          /** The Command the replay had no answer for. */
+          /** The Command the replay had no answer for, or `'anonymous'` for one with no name. */
           command?: string | undefined;
           index?: number | undefined;
           /** The trace field a replay needed and lacked. */

@@ -297,8 +297,8 @@ Twelve rules cover most of what goes wrong. The same rules ship in the package a
 
 <!-- rules:start -->
 
-1. **Put every call that does I/O inside a Command, and keep its function to that one call:** `Command(() => db.findUser(email))`, never `step(db.findUser(email))`. Tests never run the function, so anything else in it goes untested. See [Testing Without Mocks](#testing-without-mocks).
-2. **Name every Command,** with a named function such as `const cmdFindUser = () => ...`, or with `meta.name`. Traces, replay and telemetry use the name, and a minifier can strip a function's name. See [`Command`](REFERENCE.md#commandcmdfn-nextfn-meta).
+1. **Put every call that does I/O inside a Command, and keep its function to that one call:** `Command(cmdFindUser)`, with `const cmdFindUser = () => db.findUser(email)`, never `step(db.findUser(email))`. Tests never run the function, so anything else in it goes untested. See [Testing Without Mocks](#testing-without-mocks).
+2. **Name every Command,** with a named function such as `const cmdFindUser = () => ...`, or with `meta.name`. Traces, replay and telemetry use the name, a replay stops at a Command that has none, and a minifier can strip a function's name. See [`Command`](REFERENCE.md#commandcmdfn-nextfn-meta).
 3. **Put each decision in a step function** that receives one value and returns `Success`, `Failure` or the next Command, so a test can call it directly. See [Coming from async/await](#coming-from-asyncawait).
 4. **Return an outcome the caller should see as `Failure(error)`; never throw it.** A `Failure` stops the flow, is never retried, and only the code that calls `runEffect` acts on it. See [Which Errors Are Data](#which-errors-are-data).
 5. **A `catch` in a generator flow cannot recover.** It can log and rethrow, and it sees a `FlowStopped` error saying where the flow stopped, not the original. To handle an error, catch it inside the Command's function and return it as data. See [How a generator flow stops](REFERENCE.md#how-a-generator-flow-stops).
@@ -504,10 +504,16 @@ A Command whose function throws, such as on a network error, also stops the batc
 
 ```js
 // Cancellable: the request is aborted the moment a sibling branch fails.
-const fetchProfile = (userId) => Command((signal) => fetch(`/users/${userId}`, { signal }).then((r) => r.json()));
+const fetchProfile = (userId) => {
+    const cmdFetchProfile = (signal) => fetch(`/users/${userId}`, { signal }).then((r) => r.json());
+    return Command(cmdFetchProfile);
+};
 
 // Not cancellable: this runs to completion even after a sibling fails.
-const fetchProfileUncancellable = (userId) => Command(() => fetch(`/users/${userId}`).then((r) => r.json()));
+const fetchProfileUncancellable = (userId) => {
+    const cmdFetchProfile = () => fetch(`/users/${userId}`).then((r) => r.json());
+    return Command(cmdFetchProfile);
+};
 ```
 
 Exact rules: [`Parallel`](REFERENCE.md#paralleleffects-next-options).
@@ -605,7 +611,7 @@ const applyLoyaltyDiscount = (orderId) =>
     effectPipe(fetchOrder, withCustomer, ({ order, customer }) => Success(discountedTotal(order, customer)))(orderId);
 ```
 
-When the lookup is written in place rather than reused, the Command's own `next` does the join, with no pipeline inside the step: `Command(() => db.findCustomer(order.customerId), (customer) => Success({ order, customer }))`.
+When the lookup is written in place rather than reused, the Command's own `next` does the join, with no pipeline inside the step: with `const cmdFindCustomer = () => db.findCustomer(order.customerId)` in the step, `Command(cmdFindCustomer, (customer) => Success({ order, customer }))`.
 
 **Pass only what the next steps need.** Avoid one object that collects everything computed so far. When a step's input is all it gets, it cannot depend on a value from far upstream without showing it, stale fields do not linger, and two steps cannot clash over the same key. Data also lives only as long as the flow needs it, which matters for credentials and personal data. In TypeScript, it keeps the pipeline type-checked: if an upstream step changes what it returns, the step that reads the value fails to compile instead of getting `undefined` at runtime.
 

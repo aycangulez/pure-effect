@@ -25,6 +25,46 @@ import { registerUserFlow, valueOf, errorOf, makeFlow } from './helpers.js';
 describe('Replay', function () {
     beforeEach(() => configureEffect());
 
+    it('should refuse to replay a Command with no name, unless it is named anonymous on purpose', async function () {
+        // An unnamed Command ran live and recorded as 'anonymous', so a replay could not notice two of them trading
+        // places; it now stops at the first, with the path and the fix, by a trace or a Resolver alike.
+        let calls = 0;
+        const unnamed = () =>
+            Command(
+                () => ++calls,
+                (/** @type {number} */ n) => Success(n)
+            );
+        const live = await recordEffect(unnamed());
+        assert.deepEqual(live.result, Success(1), 'a live run is unaffected');
+        assert.equal(live.trace.trace[0]?.command, 'anonymous');
+
+        const fromTrace = await replayEffect(unnamed(), live.trace);
+        const fromResolver = await replayEffect(unnamed(), () => ({ result: 5 }));
+        for (const { result } of [fromTrace, fromResolver]) {
+            const error = errorOf(result);
+            assert.equal(error.name, 'ReplayError');
+            assert.equal(error.path, '0');
+            assert.equal(error.command, 'anonymous');
+            assert.match(error.message, /^A replay reached a Command with no name at path '0'\./);
+            assert.match(
+                error.message,
+                /Name its function, as in const cmdLoadUser = \(\) => db\.loadUser\(id\), or set meta\.name/
+            );
+            assert.match(error.message, /set meta\.name to 'anonymous'\.$/);
+        }
+        assert.equal(calls, 1, 'a replay executes nothing');
+
+        // Named 'anonymous' on purpose, the same Command replays the trace recorded while it was unnamed.
+        const optedOut = () =>
+            Command(
+                () => ++calls,
+                (/** @type {number} */ n) => Success(n),
+                { name: 'anonymous' }
+            );
+        assert.deepEqual((await replayEffect(optedOut(), live.trace)).result, Success(1));
+        assert.equal(calls, 1);
+    });
+
     it('should warn in timeTravel when recorded steps are anonymous', async function () {
         // Inline arrow Commands are all 'anonymous', and a replay tells steps apart by name, so a refactor that swapped
         // two of them replayed as a Success with each handed the other's recorded result.

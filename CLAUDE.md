@@ -63,7 +63,7 @@ Pure Effect is a zero-dependency effect system for JavaScript implementing the "
 
 - Outside `effectGen`, control structures stay in pipeline functions: an `if` or a loop never wraps a Command. A decision sits in a function that receives one value, and control that spans I/O is a node. `effectGen` is the one API that lets control span a Command, and its body yields only Effects; `DESIGN.md`'s Overview says why.
 - A `Failure` carries only its error, untrimmed, and no node or outcome carries the flow's input. `effectPipe` records the input in the private `flowInputs` map, keyed on a copy of the root it returns, since the last step can return a shared object; `interpret` hands it to `onRun` as `initialInput`, which is how a hook-based recorder finds it, and `recordEffect` reads it there for its trace. Only `effectPipe` and `effectGen` record one.
-- A Command's identity is `commandName(eff)`: a non-empty string `meta.name`, else `cmd.name`, else `'anonymous'`. Traces, replay matching, spans and tests all use it; never restate the rule.
+- A Command's identity is `commandName(eff)`: a non-empty string `meta.name`, else `cmd.name`, else `'anonymous'`. Traces, replay matching, spans and tests all use it; never restate the rule. A replay refuses a Command with no name of its own (`ownName`), and an explicit `meta.name: 'anonymous'` counts as one.
 - Docs and examples thread minimal values between steps rather than a growing accumulator object.
 
 ### Generator flows

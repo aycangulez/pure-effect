@@ -31,12 +31,13 @@ Command(cmdFn, next, { name: 'chargeCard' }); // 1. meta.name, independent of ho
 Command(function cmdChargeCard() {
     return api.charge();
 }, next); // 2. the function's own name
-Command(() => api.charge(), next); // 3. neither, so 'anonymous'
+Command(() => api.charge(), next); // 3. neither, so 'anonymous', which a replay refuses
 ```
 
 - Use `meta.name` in code that gets minified, since a minifier renames functions and with them every step in every trace.
 - Otherwise naming the function is enough. An arrow assigned to a `const` first, as in `const cmdChargeCard = () => api.charge()`, takes the `const`'s name.
-- An inline arrow does not. A replay cannot tell two `'anonymous'` Commands apart, so a refactor that swaps them replays without complaint, each handed the other's recorded result.
+- An inline arrow does not. A replay tells steps apart by name, so two `'anonymous'` Commands that a refactor swapped would each be handed the other's recorded result. A replay therefore stops at a Command with no name, in a `Failure` holding a `ReplayError` whose `path` says where; a live run is unaffected.
+- To replay a trace recorded while a Command was unnamed, give it `meta.name: 'anonymous'`, which counts as a name.
 
 ### `commandName(command)`
 
@@ -357,6 +358,7 @@ Runs a flow with each Command answered from a trace instead of run, and returns 
 
 - A flow that no longer matches the trace ends in a `Failure` whose `error` is a `TimeParadox`, or a `ReplayError` for a step the trace lacks. Neither is thrown, so a test checks `error.name`. In TypeScript, a result's error includes `Error`, which both are, so cast it directly, as in `result.error as ReplayFault`; `ReplayFault` types `name` and the fields locating the stop, such as `path`.
 - A malformed trace rejects with a `ReplayError`.
+- A Command with no name, neither `meta.name` nor a function name, stops the replay in a `Failure` holding a `ReplayError` with its `path` and `command: 'anonymous'`, with a trace or a resolver; see [`Command`](#commandcmdfn-nextfn-meta).
 - `traceOrResolver`: a trace, its bare entries, or a resolver: a function that answers each step with `{ result }`, `{ error }`, or `undefined` for a step it has no record of. See [Testing a whole flow](README.md#testing-a-whole-flow) and [Replaying from your own storage](README.md#replaying-from-your-own-storage).
 - Any other answer from a resolver, `null` included, or a throw from it, rejects the replay. With a resolver, `unreached` is absent.
 - A resolver is also asked about each `Parallel`, with `step.type` set to `'Parallel'`. Answering with the recorded cancellation as `{ result }` replays it as production decided, and a recorded decision whose number of branches or `settled` differs from the flow's is a `TimeParadox`. Answering `undefined` or `{ error }` replays it by timing.

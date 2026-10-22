@@ -134,9 +134,19 @@ const commandName = (eff) => {
     if (eff?.type !== 'Command') {
         throw malformed(`commandName expects a Command, got ${describeArgument(eff)}.`, eff);
     }
+    return ownName(eff) ?? 'anonymous';
+};
+
+/**
+ * The name a Command was given, as `meta.name` or its function's name, or `undefined` for one `commandName` calls
+ * `'anonymous'`, which a replay refuses (`runCommand`).
+ * @param {CommandState} eff
+ * @returns {string | undefined}
+ */
+const ownName = (eff) => {
     const meta = eff.meta;
     const named = isObject(meta) ? meta.name : undefined;
-    return typeof named === 'string' && named !== '' ? named : eff.cmd.name || 'anonymous';
+    return typeof named === 'string' && named !== '' ? named : eff.cmd.name || undefined;
 };
 
 /**
@@ -1428,12 +1438,14 @@ const delayFor = (requested, signal) =>
 
 /**
  * What every part of the interpreter needs from one run: the context `Ask` reads, whether retries wait, and the two
- * hooks a step calls, resolved from the installed wiring and the call's own configuration. `noContext` is set only by
- * `replayEffect`, for a replay that has no context, and builds the fault an `Ask` raises there.
+ * hooks a step calls, resolved from the installed wiring and the call's own configuration. `noContext` and `unnamed` are
+ * set only by `replayEffect`: they build the fault an `Ask` raises in a replay with no context, and the one a Command
+ * with no name raises in any replay.
  * @typedef {{
  *   context: any,
  *   fastRetry: boolean,
  *   noContext: (() => Error) | undefined,
+ *   unnamed: ((path: string) => Error) | undefined,
  *   onStep: StepRunner,
  *   onBeforeCommand: CommandInterceptor
  * }} Runtime
@@ -1441,16 +1453,24 @@ const delayFor = (requested, signal) =>
 
 /**
  * The interpreter, which `runEffect` and `replayEffect` share, so a replay cannot drift from a run. Only a replay
- * sets `fastRetry`, which waits no time between retry attempts, and `noContext`.
+ * sets `fastRetry`, which waits no time between retry attempts, `noContext` and `unnamed`.
  *
  * @param {Effect} effect
  * @param {any} [context]
  * @param {CallConfiguration} [callConfig]
  * @param {boolean} [fastRetry]
  * @param {() => Error} [noContext]
+ * @param {(path: string) => Error} [unnamed]
  * @returns {Promise<SuccessState | FailureState>}
  */
-const interpret = async (effect, context = {}, callConfig = {}, fastRetry = false, noContext = undefined) => {
+const interpret = async (
+    effect,
+    context = {},
+    callConfig = {},
+    fastRetry = false,
+    noContext = undefined,
+    unnamed = undefined
+) => {
     if (!isOptionsObject(callConfig)) {
         throw new TypeError(`runEffect's callConfig must be an object, got ${describeConfiguration(callConfig)}.`);
     }
@@ -1474,6 +1494,7 @@ const interpret = async (effect, context = {}, callConfig = {}, fastRetry = fals
         context,
         fastRetry,
         noContext,
+        unnamed,
         onStep: resolved.onStep || defaultStepRunner,
         onBeforeCommand: resolved.onBeforeCommand || defaultCommandInterceptor
     };
@@ -1896,6 +1917,8 @@ const runCommand = async (runtime, command, signal, cmdPath) => {
             cmd
         );
     }
+    // A replay tells steps apart by name, so two unnamed Commands that traded places would each get the other's answer.
+    if (runtime.unnamed && ownName(command) === undefined) throw runtime.unnamed(cmdPath);
     const cmdName = commandName(command);
     // Only inside a Parallel, and only to a function that declares a parameter. A parameter with a default
     // value does not count toward `length`, so `nanoid(size = 21)` keeps its default; a plain first parameter
@@ -2905,6 +2928,15 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
                       { field: 'context' }
                   )
             : undefined;
+    /** @param {string} path */
+    const unnamed = (path) =>
+        replayError(
+            `A replay reached a Command with no name at path '${path}'. A replay tells steps apart by name, so two ` +
+                "unnamed Commands that traded places would each be handed the other's recorded result. Name its " +
+                'function, as in const cmdLoadUser = () => db.loadUser(id), or set meta.name; to replay a trace ' +
+                "recorded while it was unnamed, set meta.name to 'anonymous'.",
+            { path, command: 'anonymous' }
+        );
 
     // A replay fault becomes a Failure here, outside the flow, where nothing can absorb it.
     let result;
@@ -2917,7 +2949,8 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
             context,
             { onStep: hook.onStep, inherit: hooks, flowName },
             fastRetry,
-            noContext
+            noContext,
+            unnamed
         );
     } catch (e) {
         if (hook.failure) throw hook.failure.error;
