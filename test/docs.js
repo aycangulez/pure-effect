@@ -247,8 +247,9 @@ describe('README TypeScript examples', function () {
         'Error union across pipeline steps': `
             declare function submitSignup(input: { email: string }): Effect<{ id: number }, ApiError>;`,
         'Handling every error': `
-            declare function billTenant(tenantId: string): Effect<{ amount: number }, BillingError>;
+            declare function billTenant(tenantId: string): Effect<{ amount: number }, BillingError | RetryExhaustedError>;
             declare function billed(value: { amount: number }): string;
+            declare function retryLater(retries: number): string;
             declare function serverError(error: unknown): string;
             declare function skipTenant(): string;
             declare function notifyDecline(code: string): string;`,

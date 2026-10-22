@@ -297,7 +297,7 @@ Twelve rules cover most of what goes wrong. The same rules ship in the package a
 
 <!-- rules:start -->
 
-1. **Put every call that does I/O inside a Command, and keep its function to that one call:** `Command(cmdFindUser)`, with `const cmdFindUser = () => db.findUser(email)`, never `step(db.findUser(email))`. Tests never run the function, so anything else in it goes untested. See [Testing Without Mocks](#testing-without-mocks).
+1. **Put every call that does I/O inside a Command, and keep its function to that one call:** `Command(cmdFindUser)`, with `const cmdFindUser = () => db.findUser(email)`, never `step(db.findUser(email))`. Tests never run the function, so anything else in it goes untested. The one addition rule 6 calls for, catching an error to return it as data, belongs there too; give it to an integration test. See [Testing Without Mocks](#testing-without-mocks).
 2. **Name every Command,** with a named function such as `const cmdFindUser = () => ...`, or with `meta.name`. Traces, replay and telemetry use the name, a replay stops at a Command that has none, and a minifier can strip a function's name. See [`Command`](REFERENCE.md#commandcmdfn-nextfn-meta).
 3. **Put each decision in a step function** that receives one value and returns `Success`, `Failure` or the next Command, so a test can call it directly. See [Coming from async/await](#coming-from-asyncawait).
 4. **Return an outcome the caller should see as `Failure(error)`; never throw it.** A `Failure` stops the flow, is never retried, and only the code that calls `runEffect` acts on it. See [Which Errors Are Data](#which-errors-are-data).
@@ -305,7 +305,7 @@ Twelve rules cover most of what goes wrong. The same rules ship in the package a
 6. **Let a Command's function throw only when `Retry` should try again.** An error it catches and returns is data, and `Retry` never sees it. To retry some errors and not others, rethrow the first kind and return the second. A throw also skips any undo the Command's `next` would have run. See [Which Errors Are Data](#which-errors-are-data).
 7. **Wrap only the Command that fails in `Retry`, and continue in a later step.** `Retry` runs everything it wraps again, the Command's `next` included. `retries: 2` means up to three calls, and `onExhausted` is where you give up. See [Retrying Transient Failures](#retrying-transient-failures).
 8. **Write a loop as a step that gets the list, then `Parallel(list.map(f), { limit: 1 })`.** `limit` caps how many run at once, and `settled: true` keeps going past a failure. A generator flow can use a `for` loop with `yield*`. See [Writing Loops](#writing-loops).
-9. **Get the time, random IDs and anything else that changes between runs from a Command.** A replay then gets the recorded value, and a generator body, which can run more than once, sees the same value each time. See [What runs once, and what runs again](REFERENCE.md#what-runs-once-and-what-runs-again).
+9. **Get the time, random IDs and anything else that changes between runs from a Command,** or, for a value read once per request, such as its start time, from the context, which a trace records too. A replay then gets the recorded value, and a generator body, which can run more than once, sees the same value each time. See [What runs once, and what runs again](REFERENCE.md#what-runs-once-and-what-runs-again).
 10. **Return plain data from Commands, and keep the context to plain values.** A trace stores JSON, so a `Date` comes back as a string. Reach a service from the Command's function, and hand it to the function that builds the flow. See [Passing Runtime Context](#passing-runtime-context).
 11. **Clean up in a `try`/`finally` around `runEffect`,** not inside the flow. See [How a generator flow stops](REFERENCE.md#how-a-generator-flow-stops).
 12. **Check a replay's error, not only its type.** A replay of a flow that changed shape ends in a `Failure` holding a `TimeParadox`, the error naming where the flow and the trace part ways, or a `ReplayError` when the flow asks for a step past the end of the recording, so a test that only expects a `Failure` passes by accident. See [Time-Travel Debugging](#time-travel-debugging).
@@ -335,7 +335,7 @@ app.post('/checkout', async (req, res) => {
 });
 ```
 
-Recording stores the context alongside the trace, so `Ask` replays with the values the original request saw.
+Recording stores the context alongside the trace, so `Ask` replays with the values the original request saw. That makes the context a fit for a request's own time, read once in the shell, as in `{ now: Date.now() }`. Time a flow reads as it goes, such as after a slow call, comes from a Command.
 
 Keep the context to plain values such as IDs, flags and settings. Recording copies it into every trace, so a database client or connection pool in it puts its connection string there. Reach a service from the Command's function, as `findProduct` reaches `db`. To run a flow against fakes or a test database, have the function that builds it take the services, and pass them in the test:
 
@@ -365,7 +365,7 @@ const flakyNetwork = { retries: 3, delay: 200, backoff: 2 };
 Retry(fetchPrice(sku), flakyNetwork);
 ```
 
-The settings are a plain object, so a test can check them without running anything. The `Retry` wraps only the Command, and the decision about its answer comes in the next step, outside the `Retry`:
+The settings are a plain object, so a test can check them without running anything. `Retry` takes no `next`, since it passes on what it wraps unchanged: the `Retry` wraps only the Command, and the decision about its answer comes in the next step of the pipeline, or the next `yield*`, outside the `Retry`:
 
 ```js
 import { Success, Failure, Command, Retry, effectPipe } from 'pure-effect';
@@ -464,7 +464,7 @@ Parallel(subscriptions.map(billOne), { limit: 5 });
 Parallel(subscriptions.map(billOne), { limit: 5, settled: true });
 ```
 
-Without `settled`, one failing branch cancels the rest and becomes the result of the whole `Parallel`, so one bad record can stop a batch halfway through. With `settled: true`, every branch runs to the end, and `next` receives one `Success` or `Failure` per branch, in order. A failed record is then something you can count instead of the end of the job.
+Without `settled`, one failing branch cancels the rest and becomes the result of the whole `Parallel`, so one bad record can stop a batch halfway through. With `settled: true`, every branch runs to the end, and `next` receives one `Success` or `Failure` per branch, in order. A failed record is then something you can count instead of the end of the job. In TypeScript, write `settled` as `true` or `false`, since it changes what `next` receives; to choose at runtime, branch on the flag and write each `Parallel`.
 
 ```js
 Parallel(subscriptions.map(billOne), (outcomes) => Success(outcomes.map(summarize)), { limit: 5, settled: true });
@@ -904,7 +904,7 @@ if (result.type === 'Failure') {
 }
 ```
 
-The annotations are optional. Without them, the union holds whatever each step can pass to `Failure`, each error kept exactly as written, whether a string or an object. A step that cannot fail, such as a Command without a `next`, adds nothing.
+The annotations are optional. Without them, the union holds whatever each step can pass to `Failure`, each error kept exactly as written, whether a string or an object, so `Failure('invalid_email')` needs no `as const`, and errors of different shapes join into one union with no type argument. A step that cannot fail, such as a Command without a `next`, adds nothing.
 
 **A result's error also holds `Error`, for what a Command's function threw.** A Command whose function throws, or that an `onBeforeCommand` hook vetoes, ends the run with a `Failure` holding what was thrown, so `result.error` is typed as your steps' union plus `Error`, and so is each outcome a settled `Parallel` hands `next`. Check for it first with `result.error instanceof Error` and treat it as a server error; what remains is the union your steps declare, and TypeScript refuses to read a field of it until the check is there. One check covers the whole flow: catch inside a Command's function only what the flow can handle, and let the rest throw, which is also what lets `Retry` act on it.
 
@@ -923,6 +923,7 @@ async function billAndReport(tenantId: string) {
     const result = await runEffect(billTenant(tenantId));
     if (result.type === 'Success') return billed(result.value);
     if (result.error instanceof Error) return serverError(result.error); // a Command's function threw
+    if ('retryExhausted' in result.error) return retryLater(result.error.retries); // the charge kept failing
     switch (result.error.type) {
         case 'NoSubscription':
             return skipTenant();
@@ -935,6 +936,8 @@ async function billAndReport(tenantId: string) {
     }
 }
 ```
+
+`billTenant` retries its charge, so its union also holds `RetryExhaustedError`, for a call that kept failing until the `Retry` gave up; its `retryExhausted` field tells it apart. When the union also holds strings, check `typeof result.error === 'object'` before the `in`, which TypeScript accepts only on an object.
 
 ### Typed context with `Ask`
 
@@ -1179,7 +1182,7 @@ When a Command's result changes shape, rename the Command. A trace matches it by
 
 ## Recording in Production
 
-`recordEffect` suits tests and scripts, where one call covers the whole run. To record an application without changing any call site, install the hooks once at startup. The two files imported below ship in the package's `examples` folder, `node_modules/pure-effect/examples`, and in the repository's [examples folder](https://github.com/aycangulez/pure-effect/blob/main/examples); copy them into your project.
+`recordEffect` suits tests and scripts, where one call covers the whole run. To record an application without changing any call site, install the hooks once at startup. The two files imported below ship in the package's `examples` folder, `node_modules/pure-effect/examples`, and in the repository's [examples folder](https://github.com/aycangulez/pure-effect/blob/main/examples); copy them into your project. They are JavaScript checked with `// @ts-check` and ship no declarations, so a TypeScript project imports its copies with `allowJs` set in `tsconfig.json`. The telemetry example needs `@opentelemetry/api` installed. Its `startTelemetrySdk` also loads `@opentelemetry/sdk-node`, `@opentelemetry/exporter-trace-otlp-proto` and `@opentelemetry/sdk-trace-base`, so leave that function out of your copy if you start the SDK yourself.
 
 ```js
 import { randomUUID } from 'node:crypto';

@@ -244,7 +244,7 @@ export declare function Retry<T, E = never, Ctx = unknown>(
 // `N` defaults to an Effect rather than `never`, so a call no overload matches reports its options, not `next`.
 /**
  * Runs the branches at the same time and hands `next` their values in order. The first to fail cancels the rest, unless
- * `settled`, which hands `next` every outcome.
+ * `settled`, which hands `next` every outcome. Write `settled` as `true` or `false`; to choose at runtime, branch.
  */
 export declare function Parallel<B extends readonly unknown[] | []>(
     effects: ParallelBranches<B>,
