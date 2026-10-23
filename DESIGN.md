@@ -1098,6 +1098,12 @@ The Core and the other orientation sections are a few plain sentences. In Septem
 
 So a gap gets a sentence or two, shown as exact wording before anything is rewritten, and moving something is proposed apart from changing it.
 
+### Docs are written for a reader who skims
+
+The maintainer's choice, made in October 2026. In a DX round where four agents built projects from the published package, all four named the README's length, and they read it by jumping to the section they needed. What they missed had been stated once, in a section about something else: reading an operator's switch in a Command rather than vetoing it, under errors no branch returned in `REFERENCE.md`, and the recording example taking the context at the first Command, stated only in its comment. Rules repeated where they apply, such as wrapping only the Command in `Retry`, were followed.
+
+So a section works on its own. It says where its code comes from, and it reminds the reader of each hazard that applies to it, in a sentence or a code comment that links to the full statement in `REFERENCE.md`, which still lives there once. Cutting length is not the goal; a reminder at the point of use is worth its sentence. Prose is written in short sentences, one idea each, since dense sentences were what the maintainer kept asking to have rewritten.
+
 ### No em dashes
 
 The `—` character appears nowhere in the repository: not in the README, this file, JSDoc, comments, test names or assertion messages.
