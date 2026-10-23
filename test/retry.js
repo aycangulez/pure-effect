@@ -284,6 +284,13 @@ describe('Retry options and the removed global retry', function () {
         );
     });
 
+    it('should treat an onExhausted passed as undefined as no fallback', async function () {
+        // The types refused it, as no other option, so a fallback chosen at runtime needed two Retry calls.
+        const result = await runEffect(Retry(failing(), { retries: 1, delay: 0, onExhausted: undefined }));
+        assert.equal(result.type, 'Failure');
+        assert.equal(/** @type {any} */ (result).error.retryExhausted, true);
+    });
+
     it('should refuse a delay or backoff that is not a finite number of 0 or more as the Retry is built', function () {
         // Each of these used to mean no wait at all, so a flapping dependency was called back to back.
         for (const bad of [NaN, -1, Infinity, '250ms', null]) {

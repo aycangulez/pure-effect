@@ -28,6 +28,7 @@ Returns `{ type: 'Command', cmd, next, meta }`.
 
 ```js
 Command(cmdFn, next, { name: 'chargeCard' }); // 1. meta.name, independent of how cmdFn was written
+Command(cmdFn, { name: 'chargeCard' }); // 1. the same, for a Command with no next
 Command(function cmdChargeCard() {
     return api.charge();
 }, next); // 2. the function's own name

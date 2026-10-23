@@ -64,7 +64,7 @@ export function recordingHooks(options = {}) {
     const warned = new Set();
 
     /** @type {RunWrapper} */
-    const onRun = async (pipeline, flowName, initialInput, context) => {
+    const onRun = async (op, flowName, initialInput, context) => {
         const rec = recorder({ redact, maxEntries, stack });
         // Packaged before the run, so a Command that changes its input or context cannot rewrite what the trace says
         // the run received, and a run that stops before its first Command keeps both. `toTrace` never throws, which
@@ -75,7 +75,7 @@ export function recordingHooks(options = {}) {
             /** @type {{ result: SuccessState<any> | FailureState<any> } | { error: unknown }} */
             let outcome;
             try {
-                outcome = { result: await pipeline() };
+                outcome = { result: await op() };
             } catch (error) {
                 outcome = { error };
             }

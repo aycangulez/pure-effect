@@ -114,7 +114,7 @@ assert.deepEqual(taken, Failure('Email already in use.'));
 
 [Testing Without Mocks](#testing-without-mocks) shows each kind of test, and how to run a whole flow with no I/O.
 
-**5. Run it.** `runEffect` makes the calls and returns a `Success` or a `Failure`. It is the only place a call is made, so it sits at the edge of your app:
+**5. Run it.** `runEffect` makes the calls and returns a `Success` or a `Failure`. It is the only place a call is made, so it sits at the edge of your app. A bug in a step before the first Command throws from `registerUserFlow(input)` itself, as the flow is built, so a `try` that should catch it goes around that call too:
 
 ```js
 async function registerUser(input) {
@@ -266,6 +266,23 @@ Write both kinds: only a step test sees the value passed from one step to the ne
 
 A walk meets a `Retry` or a `Parallel` as a step of its own. A `Retry` holds the step it repeats as `effect`, a `Parallel` holds its branches as `effects`, and the `next` of either is the rest of the flow. The walks in [Writing Loops](#writing-loops) and [Undoing what succeeded when a branch fails](#undoing-what-succeeded-when-a-branch-fails) go through each.
 
+So a flow does not always start with a Command. One that reads the context first starts with an `Ask`, whose `next` takes the context. Check each step's `type` as the walk goes, since `commandName` takes only a Command:
+
+```js
+// Reads the tenant's region from the context, then retries the lookup.
+const loadPlan = (tenantId) =>
+    Ask((ctx) => {
+        const cmdLoadPlan = () => db.findPlan(ctx.region, tenantId);
+        return Retry(Command(cmdLoadPlan), { retries: 2 });
+    });
+
+const asked = loadPlan('t_1');
+assert.equal(asked.type, 'Ask');
+const retried = asked.next({ region: 'eu' }); // hand the Ask a context
+assert.equal(retried.type, 'Retry');
+assert.equal(commandName(retried.effect), 'cmdLoadPlan'); // the Command the Retry repeats
+```
+
 `commandName` takes only a Command. To name the step a `Retry` repeats, pass the `Retry`'s `effect`, as in `commandName(retry.effect)`.
 
 A generator flow is tested the same way. Its decisions are in step functions, which get the step tests, and a walk or a whole-flow run works on `registerUserFlowGen` as it does on `registerUserFlow`. A walk straight through runs the body once, and walking a second branch runs it again.
@@ -310,7 +327,7 @@ Twelve rules cover most of what goes wrong. The same rules ship in the package a
 <!-- rules:start -->
 
 1. **Put every call that does I/O inside a Command, and keep its function to that one call:** `Command(cmdFindUser)`, with `const cmdFindUser = () => db.findUser(email)`, never `step(db.findUser(email))`. Tests never run the function, so anything else in it goes untested. The one addition rule 6 calls for, catching an error to return it as data, belongs there too; give it to an integration test. See [Testing Without Mocks](#testing-without-mocks).
-2. **Name every Command,** with a named function such as `const cmdFindUser = () => ...`, or with `meta.name`. Traces, replay and telemetry use the name, a replay stops at a Command that has none, and a minifier can strip a function's name. See [`Command`](REFERENCE.md#commandcmdfn-nextfn-meta).
+2. **Name every Command,** with a named function such as `const cmdFindUser = () => ...`, or with `meta.name`, as in `Command(cmd, { name: 'cmdFindUser' })`. Traces, replay and telemetry use the name, a replay stops at a Command that has none, and a minifier can strip a function's name. See [`Command`](REFERENCE.md#commandcmdfn-nextfn-meta).
 3. **Put each decision in a step function** that receives one value and returns `Success`, `Failure` or the next Command, so a test can call it directly. See [Coming from async/await](#coming-from-asyncawait).
 4. **Return an outcome the caller should see as `Failure(error)`; never throw it.** A `Failure` stops the flow, is never retried, and only the code that calls `runEffect` acts on it. See [Which Errors Are Data](#which-errors-are-data).
 5. **A `catch` in a generator flow cannot recover.** It can log and rethrow, and it sees a `FlowStopped` error saying where the flow stopped, not the original. To handle an error, catch it inside the Command's function and return it as data. See [How a generator flow stops](REFERENCE.md#how-a-generator-flow-stops).
@@ -434,6 +451,8 @@ effectPipe(
     (seat) => chargeCard(trip, seat)
 );
 ```
+
+A `next` that only returns a value is safe inside the `Retry`, as in `Command(cmdHoldSeat, (seat) => Success({ trip, seat }))`. Running it again changes nothing. The danger is a `next` that returns more Commands.
 
 When every attempt fails, `runEffect` returns a `Failure` with this error:
 
@@ -687,7 +706,7 @@ When the rest of the flow is longer, the step returns it as a pipeline of its ow
 A claim like this has to be released if a later step fails. Otherwise the provider's retry is answered as `duplicate`, and the event is never processed. A flow has no `finally`, so the release goes in one of two places:
 
 - **In the flow, for a failure the flow handles as data.** Have the `next` that returns the `Failure` release the claim first, and give a `Retry` after the claim an `onExhausted` that does the same. See [Translating `try`/`catch`](#translating-trycatch).
-- **In the code that calls `runEffect`, for everything else,** such as a Command that throws. That code has the event, so it can release the claim when the run fails. Release only a claim this run made, for example one recorded with the delivery's own ID. Otherwise a duplicate delivery that fails would release the claim of one still running.
+- **In the code that calls `runEffect`, for everything else,** such as a Command that throws. That code has the event, so it can release the claim when the run fails. Release only a claim this run made, for example one recorded with the delivery's own ID, as in `eventLog.release(event.eventId, deliveryId)` that deletes the claim only when `deliveryId` made it. Otherwise a duplicate delivery that fails would release the claim of one still running.
 
 ## Writing Loops
 
@@ -946,7 +965,7 @@ if (result.type === 'Failure') {
 
 The annotations are optional. Without them, the union holds whatever each step can pass to `Failure`, each error kept exactly as written, whether a string or an object, so `Failure('invalid_email')` needs no `as const`, and errors of different shapes join into one union with no type argument. A step that cannot fail, such as a Command without a `next`, adds nothing.
 
-If you do annotate a step, give the error type too. `Effect<User>` leaves the error as `unknown`, and `unknown` swallows the rest of the union, so the whole flow's error becomes `unknown`. TypeScript also treats an annotated step as able to return any kind of Effect, so code that calls it directly checks `result.type === 'Failure'` before reading `result.error`; an `else` after a check for `'Success'` is not enough.
+If you do annotate a step, give the error type too. `Effect<User>` leaves the error as `unknown`, and `unknown` swallows the rest of the union, so the whole flow's error becomes `unknown`. That holds for a step written inline too, as in `(outcomes): Effect<Outcome> => ...`. For a step that cannot fail, write `Effect<Outcome, never>`. TypeScript also treats an annotated step as able to return any kind of Effect, so code that calls it directly checks `result.type === 'Failure'` before reading `result.error`; an `else` after a check for `'Success'` is not enough.
 
 Annotating also makes hovers and error messages easier to read. Without it, they list every `Failure(...)` the flow can return. With it, they show the type you named, as `validate` and `submit` do above.
 
@@ -1121,7 +1140,7 @@ const { result: live, trace } = await recordEffect(registerUserFlow(input));
 
 // Anywhere else, with nothing connected, the same flow gets the same answers.
 const { result: replayed } = await replayEffect(registerUserFlow(trace.initialInput), trace);
-assert.deepEqual(replayed, live); // holds while every result is plain data; see Keeping a replay faithful
+assert.deepEqual(replayed, live); // holds while results are plain data and errors plain Errors; see Keeping a replay faithful
 ```
 
 In production, record each run with a version and a flow name, and replay its trace anywhere with `timeTravel`, which narrates each step:
@@ -1291,6 +1310,8 @@ assert.equal(redact('card_declined', 'cmdCharge', 'error'), 'card_declined'); //
 
 A replay rebuilds the flow from the redacted input and context. So a field a step checks, such as a password, needs a stand-in the check treats the same way, as the `redact` in [Recording in Production](#recording-in-production) does. A context field an `Ask` reads should stay.
 
+Some checks have no such stand-in. A webhook's signature check needs the real signature and the secret. Make that check a Command, as in `const cmdVerifySignature = () => verifySignature(event, secret)`. The trace then records its verdict, and a replay uses the recorded verdict instead of checking the redacted field again.
+
 Exact rules: [what `redact` gets](REFERENCE.md#what-redact-gets).
 
 ## Hooks
@@ -1360,7 +1381,7 @@ assert.deepEqual(
 removeStepLog();
 ```
 
-A Command that `onBeforeCommand` vetoes never reaches `onStep`, so log a veto where you make it.
+A Command that `onBeforeCommand` vetoes never reaches `onStep`, so log a veto where you make it. The run's `Failure` holds what the hook threw. Throw an error with a `code`, as in `Object.assign(new Error('Missing permission.'), { code: 'FORBIDDEN' })`, so the code that calls `runEffect` can answer it, with a 403 say, without matching the message.
 
 In tests, call `configureEffect()` with no arguments in a `beforeEach`, so a test that fails before removing its hooks does not leave them installed for the next. A bare call removes every layer, your app's own hooks included. So when a test needs the app's hooks, such as a server's permission check or its recording, install them after the reset, in the same `beforeEach`, not once in a `before`. Nothing warns when they are missing: the run just goes ahead without them.
 

@@ -25,6 +25,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 ### Fixed
 
 - `timeTravel` no longer warns that a trace holds no initial input when the flow was built with `effectPipe` or `effectGen` and takes none.
+- `Retry`'s types accept `onExhausted: undefined`, as they do every other option, so a fallback chosen at runtime compiles. Its errors then keep `RetryExhaustedError`.
 - Hovers and type errors show a generator flow's error union rather than an unexpanded `GenError<Step<...>>`.
 - A bare `yield` of an Effect in a generator flow gets a type error that ends by naming `yield* step(effect)`.
 - A `Parallel` whose `settled` is typed `boolean`, or whose options are otherwise wrong, gets a type error that names the option, rather than one about `next`.

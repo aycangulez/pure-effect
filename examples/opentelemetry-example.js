@@ -66,11 +66,11 @@ export function telemetryHooks(options = {}) {
      * ends in a `finally`, so a thrown Command cannot leak one.
      * @type {RunWrapper}
      */
-    const onRun = (pipeline, flowName) =>
+    const onRun = (op, flowName) =>
         tracer.startActiveSpan(flowName || 'Effect Pipeline', async (rootSpan) => {
             rootSpan.setAttribute('effect.flow', flowName || '');
             try {
-                const result = await pipeline();
+                const result = await op();
                 if (result.type === 'Failure') {
                     // Left out rather than set to undefined, which a project with exactOptionalPropertyTypes refuses.
                     const message = statusMessage(result.error);

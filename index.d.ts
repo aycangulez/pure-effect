@@ -233,13 +233,15 @@ export declare function Retry<T, E = never, E2 = never, Ctx = unknown, N extends
 ): RetryState<T | EffectValue<N>, E | EffectError<N>, Ctx & EffectContext<N>>;
 
 /**
- * Runs `effect` again when a Command in it throws, and fails with `RetryExhaustedError` once the attempts run out. Give
- * every type argument or none.
+ * Runs `effect` again when a Command in it throws, and fails with `RetryExhaustedError` once the attempts run out, unless
+ * an `onExhausted` given here runs instead. Give every type argument or none.
  */
-export declare function Retry<T, E = never, Ctx = unknown>(
+// `onExhausted` may be left out or `undefined`, as any option may, so a fallback chosen at runtime compiles too; the
+// exhaustion then stays among the errors. `N` comes after `Ctx`, so a caller giving `<T, E, Ctx>` keeps their meaning.
+export declare function Retry<T, E = never, Ctx = unknown, N extends AnyEffect = Effect<T, never, Ctx>>(
     effect: Effect<T, E, Ctx>,
-    options?: RetryOptions
-): RetryState<T, E | RetryExhaustedError, Ctx>;
+    options?: RetryOptions & { onExhausted?: ((error: RetryExhaustedError) => N) | undefined }
+): RetryState<T | EffectValue<N>, E | EffectError<N> | RetryExhaustedError, Ctx & EffectContext<N>>;
 
 // `settled?: false | undefined` keeps a `settled` typed boolean from matching; `| []` infers tuples on TypeScript 5.1.
 // `N` defaults to an Effect rather than `never`, so a call no overload matches reports its options, not `next`.

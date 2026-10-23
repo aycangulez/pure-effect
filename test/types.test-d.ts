@@ -275,6 +275,18 @@ const recovered = Retry(Success(1) as Effect<number, 'flaky'>, {
 // The fallback consumes the exhaustion, and an abort still leaves as itself, so both remain.
 expectType<RetryState<number, 'flaky' | 'cache_miss'>>(recovered);
 
+// onExhausted set to undefined keeps its default, as any option does, so it types as no fallback at all
+expectType<RetryState<number, 'flaky' | RetryExhaustedError>>(
+    Retry(Success(1) as Effect<number, 'flaky'>, { retries: 1, onExhausted: undefined })
+);
+// A fallback chosen at runtime may be absent, so the exhaustion stays among the errors beside the fallback's own
+declare const withFallback: boolean;
+const maybeRecovered = Retry(Success(1) as Effect<number, 'flaky'>, {
+    retries: 1,
+    onExhausted: withFallback ? () => Success(0) as Effect<number, 'cache_miss'> : undefined
+});
+expectType<RetryState<number, 'flaky' | 'cache_miss' | RetryExhaustedError>>(maybeRecovered);
+
 const recoveredResult = await runEffect(recovered);
 if (recoveredResult.type === 'Failure') {
     expectType<'flaky' | 'cache_miss' | Error>(recoveredResult.error);
