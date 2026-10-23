@@ -22,7 +22,7 @@ Returns `{ type: 'Command', cmd, next, meta }`.
 
 - `cmd`: the function, sync or async, that does the I/O. Inside a `Parallel` branch, one that declares a parameter without a default value gets an `AbortSignal` that fires when a sibling fails; see [Cancellation and the signal](#cancellation-and-the-signal).
 - `next`: receives `cmd`'s result and returns the next Effect; by default `(result) => Success(result)`. Whatever `cmd` returns is the result, an Effect included: a `Failure` it returns reaches `next` as a value and stops nothing.
-- `meta`: metadata passed to `onBeforeCommand`, with any keys your hooks need. A non-empty string `meta.name` names the Command; any other `name` is ignored, and the function's name is used.
+- `meta`: metadata passed to `onBeforeCommand`, with any keys your hooks need. A non-empty string `meta.name` names the Command; any other `name` is ignored, and the function's name is used. With no `next`, `meta` can come second, as in `Command(cmdFn, { name: 'chargeCard' })`. Given both second and third, the Command throws.
 
 **Every Command needs a name**, which tests, traces, replay matching and telemetry all use. It is `meta.name`, else the function's name, else `'anonymous'`:
 

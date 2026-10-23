@@ -193,18 +193,19 @@ export declare function Failure<const E = unknown>(error: E): FailureState<E>;
 // Without `next`, `N` takes its default, so `T = R` types the value the result passes through as.
 /**
  * Defers a side effect: `cmd` makes the call and `next` decides what follows; without `next` the result passes through.
- * `meta.name` names it, else `cmd.name`.
+ * `meta.name` names it, else `cmd.name`. With no `next`, `meta` can come second: `Command(cmd, { name })`.
  */
+// `next` also takes `CommandMeta`, rather than a third overload, so a mistake in `next` reports two overloads, not three.
 export declare function Command<R, T = R, E = never, Ctx = unknown, N extends AnyEffect = Effect<T, E, Ctx>>(
     cmd: (signal?: AbortSignal) => Promise<R> | R,
-    next?: (result: R) => N,
+    next?: ((result: R) => N) | CommandMeta,
     meta?: CommandMeta
 ): CommandState<R, EffectValue<N>, EffectError<N>, EffectContext<N>>;
 
 /** For `Command<User | null>(fetchJson, next)`: given some type arguments, TypeScript infers none of the rest. */
 export declare function Command<R, T = R, E = unknown, Ctx = unknown>(
     cmd: (signal?: AbortSignal) => Promise<R> | R,
-    next?: (result: R) => Effect<T, E, Ctx>,
+    next?: ((result: R) => Effect<T, E, Ctx>) | CommandMeta,
     meta?: CommandMeta
 ): CommandState<R, T, E, Ctx>;
 

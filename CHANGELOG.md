@@ -7,6 +7,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 ### Added
 
 - `REFERENCE.md` ships the API reference and the exact rules, moved from the README, which now teaches each feature and links to it.
+- `Command(cmd, { name })` names a Command with no `next`, which had to be written `Command(cmd, undefined, { name })`.
 - Each example ships a `.d.ts` beside it, so a TypeScript project copies it with its declarations and needs no `allowJs`.
 - The OpenTelemetry example puts each step's path on its span as `effect.path`, so `Retry` attempts and `Parallel` branches are told apart.
 

@@ -545,7 +545,7 @@ In TypeScript, write the parameter as optional: `(signal?: AbortSignal) =>`. Out
 
 A function passed by name gets the signal too. Inside a `Parallel`, `Command(listUsers)` calls `listUsers(signal)`. If `listUsers(page)` treats `page` as optional, it gets the signal as its page. Wrap such a function: `Command(() => listUsers())`.
 
-Branches built by the same function share their Commands' names. A trace tells them apart by their path, so recording and replay work. A test that answers Commands by name, though, gives every branch the same answer. To answer each branch differently, give each Command its own `meta.name`, or answer by `path`.
+Branches built by the same function share their Commands' names. A trace tells them apart by their path, so recording and replay work. A test that answers Commands by name, though, gives every branch the same answer. To answer each branch differently, give each Command its own `meta.name`, or answer by `path`. With no `next`, `meta` can come second: `Command(cmdQuote, { name: 'cmdQuote:ups' })`.
 
 Exact rules: [`Parallel`](REFERENCE.md#paralleleffects-next-options).
 

@@ -100,6 +100,20 @@ expectType<CommandState<number, string, never>>(
     )
 );
 Command(() => 42, undefined, { name: 'readRow' });
+// With no next, meta can come second, and the result passes through as with the default next
+expectType<CommandState<number, number, never>>(Command(() => 42, { name: 'readRow' }));
+expectType<CommandState<number, number, never>>(Command<number>(() => 42, { name: 'readRow' }));
+// A next given with meta third still infers its parameter and its errors
+expectType<CommandState<number, number, 'cheap'>>(
+    Command(
+        () => 42,
+        (n) => (n > 10 ? Success(n) : Failure('cheap')),
+        { name: 'quote' }
+    )
+);
+const plainNext = (n: number) => n + 1;
+// @ts-expect-error a next that returns a plain value is still refused, though next also takes meta
+Command(() => 42, plainNext);
 // @ts-expect-error missing cmd
 Command();
 

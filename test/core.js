@@ -743,11 +743,21 @@ describe('Constructor arguments', function () {
         );
     });
 
-    it('should refuse meta in the place of next before the Command can run', function () {
-        // The Command used to run, charging the card, and the run then rejected with `effect.next is not a function`.
+    it('should take meta in the place of next, for a Command with no next', async function () {
+        // It was refused with a message saying meta goes third, as `Command(fn, undefined, { name })`, after DX agents
+        // kept writing `Command(fn, { name })`: next is a function, so an object second can only be meta.
+        const charge = Command(() => 'ch_1', { name: 'chargeCard' });
+        assert.equal(commandName(charge), 'chargeCard');
+        assert.deepEqual(charge.meta, { name: 'chargeCard' });
+        assert.deepEqual(await runEffect(charge), Success('ch_1'));
+    });
+
+    it('should refuse meta both second and third before the Command can run', function () {
         let charged = 0;
-        const message = messageFrom(() => Command(() => charged++, /** @type {any} */ ({ name: 'chargeCard' })));
-        assert.match(message, /Command\(fn, undefined, \{ name: 'chargeCard' \}\)/);
+        const message = messageFrom(() =>
+            Command(() => charged++, { name: 'chargeCard' }, /** @type {any} */ ({ name: 'refund' }))
+        );
+        assert.match(message, /Command takes meta second or third, not both/);
         assert.equal(charged, 0);
     });
 

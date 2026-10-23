@@ -96,8 +96,8 @@ const Failure = (error) => ({ type: 'Failure', error });
  * @param {(signal?: AbortSignal) => Promise<any>|any} cmd - The function that does the I/O. Inside a `Parallel`, a
  *        function that declares a parameter receives an `AbortSignal` that fires when a sibling branch fails. A
  *        parameter with a default value does not count, so `nanoid(size = 21)` keeps its default.
- * @param {(result: any) => Effect} [next] - Receives the result of `cmd`. Defaults to `Success(result)`; `null`
- *        counts as omitted.
+ * @param {((result: any) => Effect) | CommandMeta} [next] - Receives the result of `cmd`. Defaults to
+ *        `Success(result)`; `null` counts as omitted. An object in its place is `meta`, for a Command with no `next`.
  * @param {CommandMeta} [meta] - Passed to `onBeforeCommand`. A non-empty string `meta.name` is the Command's identity;
  *        any other `name` is ignored.
  * @returns {CommandState}
@@ -112,15 +112,23 @@ const Command = (cmd, next, meta) => {
             cmd
         );
     }
-    if (next != null && typeof next !== 'function') {
+    // `next` is a function, so an object second can only be `meta`, as in `Command(fn, { name })`.
+    const metaSecond = isOptionsObject(next);
+    if (metaSecond && meta != null) {
         throw malformed(
-            isOptionsObject(next)
-                ? "Command's second argument is next, and meta goes third: Command(fn, undefined, { name: 'chargeCard' })."
-                : `Command's next must be a function, got ${describeArgument(next)}.`,
-            next
+            "Command takes meta second or third, not both: Command(fn, { name: 'chargeCard' }) or Command(fn, next, { name: 'chargeCard' }).",
+            meta
         );
     }
-    return { type: 'Command', cmd, next: next ?? ((/** @type {any} */ result) => Success(result)), meta };
+    if (next != null && !metaSecond && typeof next !== 'function') {
+        throw malformed(`Command's next must be a function, got ${describeArgument(next)}.`, next);
+    }
+    // Cast: a `typeof` check narrows `CommandMeta`, an object type, to `Function` rather than leaving it out.
+    const nextFn =
+        typeof next === 'function'
+            ? /** @type {(result: any) => Effect} */ (next)
+            : (/** @type {any} */ result) => Success(result);
+    return { type: 'Command', cmd, next: nextFn, meta: metaSecond ? /** @type {CommandMeta} */ (next) : meta };
 };
 
 /**
