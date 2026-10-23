@@ -1902,7 +1902,7 @@ describe('Replay', function () {
         /** @type {string[]} */
         const named = [];
         configureEffect({
-            onRun: async (effect, op, flowName) => {
+            onRun: async (op, flowName) => {
                 named.push(flowName);
                 return await op();
             }

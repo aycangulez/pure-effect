@@ -1342,13 +1342,14 @@ export type ParallelDecision =
 
 /**
  * `flowName` is the run's `flowName`, or `''` when it has none. `initialInput` is what the flow was called with when
- * `effectPipe` built it, and `undefined` otherwise. A hook that calls another passes both on.
+ * `effectPipe` built it, and `undefined` otherwise. `context` is what `Ask` reads, `{}` when the run was given none. A
+ * hook that calls another passes all three on.
  */
 export type RunWrapper = (
-    effect: Effect<unknown>,
     op: () => Promise<SuccessState<unknown> | FailureState<unknown>>,
     flowName: string,
-    initialInput: unknown
+    initialInput: unknown,
+    context: any
 ) => Promise<SuccessState<unknown> | FailureState<unknown>>;
 
 // A union, so a JSDoc `@type` on an async function fits it too.

@@ -1124,11 +1124,12 @@ const effectGen = (body) => {
 const defaultStepRunner = async (name, type, op) => await op();
 
 /**
- * Wraps one run. `initialInput` is what the flow was called with, when `effectPipe` built it.
- * @typedef {(effect: Effect, op: function, flowName?: string, initialInput?: any) => Promise<any>} RunWrapper
+ * Wraps one run. `initialInput` is what the flow was called with, when `effectPipe` built it, and `context` is what
+ * `Ask` reads.
+ * @typedef {(op: function, flowName?: string, initialInput?: any, context?: any) => Promise<any>} RunWrapper
  */
 /** @type RunWrapper */
-const defaultRunWrapper = async (effect, op, flowName, initialInput) => await op();
+const defaultRunWrapper = async (op) => await op();
 
 /** @typedef {(command: CommandState, context?: any) => Promise<any>} CommandInterceptor */
 /** @type CommandInterceptor */
@@ -1169,7 +1170,8 @@ const checkConfiguration = (config, source, prefix, known) => {
 /**
  * @typedef {Object} EffectConfiguration
  * @property {StepRunner} [onStep] - Wraps each Command's execution, and each Parallel's branches.
- * @property {RunWrapper} [onRun] - Wraps a whole run once, and is handed the flow's input when `effectPipe` built it.
+ * @property {RunWrapper} [onRun] - Wraps a whole run once, and is handed the run's context and the flow's input when
+ *           `effectPipe` built it.
  * @property {CommandInterceptor} [onBeforeCommand] - Runs before each Command; a throw vetoes it.
  */
 
@@ -1262,8 +1264,8 @@ const chainHooks = (...configs) => {
     }
     if (runs.length) {
         merged.onRun = runs.reduceRight(
-            (inner, outer) => (effect, op, flowName, initialInput) =>
-                outer(effect, () => inner(effect, op, flowName, initialInput), flowName, initialInput)
+            (inner, outer) => (op, flowName, initialInput, context) =>
+                outer(() => inner(op, flowName, initialInput, context), flowName, initialInput, context)
         );
     }
     if (interceptors.length) {
@@ -1501,7 +1503,7 @@ const interpret = async (
     const onRun = resolved.onRun || defaultRunWrapper;
     // An I/O fault becomes a plain Failure here, where every outcome leaves.
     const calls = trackCalls(async () => asOutcome(await execute(runtime, effect)));
-    const returned = await onRun(effect, calls.op, flowName, flowInputs.get(effect));
+    const returned = await onRun(calls.op, flowName, flowInputs.get(effect), context);
     if (isOutcome(returned)) return returned;
     // As with onStep, a hook that returned while the run went on is judged once the run has finished.
     const unwaited = calls.running;
@@ -1964,7 +1966,7 @@ const runCommand = async (runtime, command, signal, cmdPath) => {
  * fires once per call, around every Retry attempt.
  *
  * @param {Effect} effect - The Effect tree returned by a pipeline
- * @param {any} [context] - Optional context object. Passed to Ask continuations and the Command Interceptor.
+ * @param {any} [context] - Optional context object. Passed to Ask continuations, `onRun` and the Command Interceptor.
  * @param {CallConfiguration} [callConfig] - Per-call configuration, added to the wiring `configureEffect`
  *        installed unless `inherit: false`, which ignores that wiring for this run, and the run's `flowName`.
  * @returns {Promise<SuccessState | FailureState>}

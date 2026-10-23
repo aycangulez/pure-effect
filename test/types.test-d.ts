@@ -862,12 +862,12 @@ expectType<ParallelState<[string, number], [string, number], RetryExhaustedError
 // accepts full configuration
 configureEffect({
     onStep: async (_name, _type, op) => op(),
-    onRun: async (_effect, op, _flowName) => op(),
+    onRun: async (op, _flowName) => op(),
     onBeforeCommand: async (_cmd, _ctx) => {}
 });
 
 // accepts partial configuration
-configureEffect({ onRun: async (_effect, op) => op() });
+configureEffect({ onRun: async (op) => op() });
 configureEffect({});
 
 // rejects invalid shapes
@@ -893,10 +893,10 @@ const myStep: StepRunner = async (name, type, op) => {
 // A hook that declares the step's type a plain string still fits, as one written before it was narrowed does
 const wideStep: StepRunner = async (name: string, type: string, op) => op();
 
-const myRun: RunWrapper = async (effect, op, flowName, initialInput) => {
-    expectType<Effect<unknown>>(effect);
+const myRun: RunWrapper = async (op, flowName, initialInput, context) => {
     expectType<string>(flowName);
     expectType<unknown>(initialInput);
+    expectType<any>(context);
     return op();
 };
 
@@ -906,7 +906,7 @@ const myInterceptor: CommandInterceptor = async (cmd, _ctx) => {
 
 // the runtime always passes a path and a flow name, so a hook may declare them as present
 const pathStep: StepRunner = async (name, type, op, path: string) => op();
-const namedRun: RunWrapper = async (effect, op, flowName: string) => op();
+const namedRun: RunWrapper = async (op, flowName: string) => op();
 // a guard that throws to abort needs no async
 const syncGuard: CommandInterceptor = (cmd, ctx) => {
     if (!ctx) throw new Error('no context');
@@ -914,7 +914,9 @@ const syncGuard: CommandInterceptor = (cmd, ctx) => {
 // @ts-expect-error a wrapper has to pass path on, or its trace cannot replay a Parallel
 const forgetsPath: StepRunner = async (name, type, op) => myStep(name, type, op);
 // @ts-expect-error a wrapper has to pass the input on, or a recorder inside it stores none
-const forgetsInput: RunWrapper = async (effect, op, flowName) => myRun(effect, op, flowName);
+const forgetsInput: RunWrapper = async (op, flowName, initialInput, context) => myRun(op, flowName);
+// @ts-expect-error a wrapper has to pass the context on, or a recorder inside it stores none
+const forgetsContext: RunWrapper = async (op, flowName, initialInput) => myRun(op, flowName, initialInput);
 
 // EffectConfiguration is a usable type
 const config: EffectConfiguration = { onStep: myStep, onRun: myRun, onBeforeCommand: myInterceptor };

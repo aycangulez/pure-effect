@@ -294,7 +294,7 @@ Adds a layer of hooks for the whole process and returns a function that removes 
 - Several configurations passed to one call form one layer.
 - `configureEffect()` with no arguments removes every layer, and a call whose arguments are all `undefined` changes nothing.
 - Throws a `TypeError`, before installing anything, for a configuration that is not an object, a key other than the three below (`retry` included), or a hook that is not a function (`null` included).
-- `onRun(effect, op, flowName, initialInput)`: wraps the whole run once, retries included. It must `await op()` and return its result; anything but a `Success` or `Failure` rejects the run with a `TypeError`. `flowName` is the run's `callConfig.flowName`, or `''`. `initialInput` is what the flow was called with when `effectPipe` or `effectGen` built it, and `undefined` otherwise; pass both on to any hook it calls.
+- `onRun(op, flowName, initialInput, context)`: wraps the whole run once, retries included. It must `await op()` and return its result; anything but a `Success` or `Failure` rejects the run with a `TypeError`. `flowName` is the run's `callConfig.flowName`, or `''`. `initialInput` is what the flow was called with when `effectPipe` or `effectGen` built it, and `undefined` otherwise. `context` is what `Ask` reads, `{}` when the run was given none. Pass all three on to any hook it calls.
 - `onStep(name, type, op, path)`: wraps each Command, and each `Parallel` with `name` and `type` both `'Parallel'`. It must `await op()` and return its result, and pass `path` on to any hook it calls, since a replay matches steps on it.
     - For a Command, `op()` returns a promise, even for a synchronous function. Returning a value without calling `op()` answers for the Command, which is how replay works, and throwing without calling it counts as the Command failing.
     - A throw after `op()` succeeded, or `undefined` in place of its value (a forgotten `return` or `await`), is a bug in the hook: the run rejects, and `Retry` does not run the Command again.
@@ -404,7 +404,7 @@ What the example does with each run:
 
 The example takes the input from `onRun`, which is handed it only for a flow `effectPipe` or `effectGen` built, so build the outermost flow with one of them. A flow that starts with a bare `Command`, `Ask`, `Retry`, or `Parallel` records no input, and `timeTravel` would rebuild it from `undefined`. A one-step pipeline is enough, as in `runEffect(effectPipe(loadProfile)(userId))`. The example warns through `onWarning`, which defaults to `console.warn`, the first time it keeps a trace of such a flow, and `timeTravel` warns when it replays one.
 
-The example also takes the context from the run's first Command, so a run that stops before any Command, for example at an `Ask` check, records no context. Such a run did no I/O, so running the flow again with its input and the context from your logs reproduces it.
+The example takes the context from `onRun` too, as the run starts, so a run that stops before its first Command, such as one a permission check refuses, still records it.
 
 ### What a trace keeps
 

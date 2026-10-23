@@ -1260,7 +1260,7 @@ describe('effectGen: the same as a pipeline', function () {
             registerUserGen(input),
             {},
             {
-                onRun: async (_effect, op, _flowName, given) => {
+                onRun: async (op, _flowName, given) => {
                     initialInput = given;
                     return op();
                 }

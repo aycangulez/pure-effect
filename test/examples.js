@@ -163,6 +163,28 @@ describe('examples/recording-example.js', function () {
         assert.deepEqual(replayed, result);
     });
 
+    it('should store the context of a run refused before its first Command, so it replays', async function () {
+        // The context was copied at the first Command, so a run a permission check refused, reading the context with
+        // Ask before any write as the README advises, kept no context, and its replay stopped asking for one.
+        /** @type {any[]} */
+        const written = [];
+        enableRecording({ sink: (t) => void written.push(t) });
+        const provision = (/** @type {any} */ input) =>
+            effectPipe(
+                (/** @type {any} */ i) =>
+                    Ask((/** @type {any} */ ctx) => (ctx.role === 'admin' ? Success(i) : Failure('Forbidden.'))),
+                (/** @type {any} */ i) =>
+                    Command(function cmdCreateTenant() {
+                        return i;
+                    })
+            )(input);
+        const result = await runEffect(provision({ name: 'acme' }), { role: 'intern' }, { flowName: 'provision' });
+        assert.deepEqual(result, Failure('Forbidden.'));
+        assert.deepEqual(written[0].context, { role: 'intern' });
+        const { result: replayed } = await replayEffect(provision(written[0].initialInput), written[0]);
+        assert.deepEqual(replayed, result);
+    });
+
     it('should not let an input or a context it cannot copy decide the run, and mark it on the trace', async function () {
         // The wiring copied the context in `onBeforeCommand`, where a throw vetoes the Command, so a context that
         // could not be copied stopped the charge and failed the run, and `onSinkError` never heard of it. The input
@@ -270,8 +292,7 @@ describe('examples/recording-example.js', function () {
     });
 
     it('should not let an in-place redact change the run it records', async function () {
-        // The wiring redacts the input as the run starts and the context at the first Command, both before any
-        // Command reads them, so a redact that deleted fields in place saved a user with no password and called
+        // The wiring redacts the input and the context as the run starts, before any Command reads them, so a redact that deleted fields in place saved a user with no password and called
         // the API with no token, but only while recording was installed.
         /** @type {any[]} */
         const written = [];
@@ -305,8 +326,7 @@ describe('examples/recording-example.js', function () {
     });
 
     it('should leave out an input or context redact throws on, and name both on the trace', async function () {
-        // The context is packaged at the first Command, apart from the input, so its failure has to reach the trace
-        // the run started with.
+        // Both are packaged as the run starts, and each one redact throws on is named on the trace.
         /** @type {any[]} */
         const written = [];
         /** @type {[string, string | undefined][]} */

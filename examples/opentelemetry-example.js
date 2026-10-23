@@ -66,7 +66,7 @@ export function telemetryHooks(options = {}) {
      * ends in a `finally`, so a thrown Command cannot leak one.
      * @type {RunWrapper}
      */
-    const onRun = (effect, pipeline, flowName) =>
+    const onRun = (pipeline, flowName) =>
         tracer.startActiveSpan(flowName || 'Effect Pipeline', async (rootSpan) => {
             rootSpan.setAttribute('effect.flow', flowName || '');
             try {

@@ -3,7 +3,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { configureEffect, recorder, Failure } from 'pure-effect';
 
-/** @import { EffectConfiguration, RunWrapper, StepRunner, CommandInterceptor, TraceEntry, TraceLog, SuccessState, FailureState, RecorderOptions } from "pure-effect" */
+/** @import { EffectConfiguration, RunWrapper, StepRunner, TraceEntry, TraceLog, SuccessState, FailureState, RecorderOptions } from "pure-effect" */
 
 /**
  * Records every run of an application without touching any call site, one trace per run. `recordEffect` covers
@@ -14,7 +14,6 @@ import { configureEffect, recorder, Failure } from 'pure-effect';
  * @typedef {Object} RecordingStore
  * @property {ReturnType<typeof recorder>} rec
  * @property {TraceLog} head - The trace's own fields, packaged as the run starts rather than after it
- * @property {boolean} contextCaptured
  */
 
 /**
@@ -41,7 +40,7 @@ import { configureEffect, recorder, Failure } from 'pure-effect';
  */
 
 /**
- * Builds the three hooks that record each run, without installing them, so the caller decides where recording sits
+ * Builds the two hooks that record each run, without installing them, so the caller decides where recording sits
  * among its other hooks.
  *
  * @param {RecordingOptions} [options]
@@ -65,13 +64,14 @@ export function recordingHooks(options = {}) {
     const warned = new Set();
 
     /** @type {RunWrapper} */
-    const onRun = async (effect, pipeline, flowName, initialInput) => {
+    const onRun = async (pipeline, flowName, initialInput, context) => {
         const rec = recorder({ redact, maxEntries, stack });
-        // Packaged before the run, so a Command that changes its input cannot rewrite what the trace says it received.
-        // `toTrace` never throws, which matters here, where a throw would stop the run before it started: an input it
-        // cannot record is left out and named in the trace's `unrecorded`.
-        const head = rec.toTrace({ flowName, initialInput, version });
-        return scope.run({ rec, head, contextCaptured: false }, async () => {
+        // Packaged before the run, so a Command that changes its input or context cannot rewrite what the trace says
+        // the run received, and a run that stops before its first Command keeps both. `toTrace` never throws, which
+        // matters here, where a throw would stop the run before it started: a value it cannot record is left out and
+        // named in the trace's `unrecorded`.
+        const head = rec.toTrace({ flowName, initialInput, context, version });
+        return scope.run({ rec, head }, async () => {
             /** @type {{ result: SuccessState<any> | FailureState<any> } | { error: unknown }} */
             let outcome;
             try {
@@ -165,23 +165,7 @@ export function recordingHooks(options = {}) {
         return store ? await store.rec.onStep(name, type, op, path) : await op();
     };
 
-    /**
-     * `onRun` never sees the context, so it is copied from the run's first Command, before that Command can change
-     * it. A run that stops before any Command records none. `toTrace` never throws, which matters here, where a throw
-     * would veto the Command.
-     * @type {CommandInterceptor}
-     */
-    const onBeforeCommand = async (command, context) => {
-        const store = scope.getStore();
-        if (!store || store.contextCaptured) return;
-        store.contextCaptured = true;
-        const withContext = store.rec.toTrace({ context });
-        store.head.context = withContext.context;
-        // A context it could not record is left out, and the trace the run started with has to say so too.
-        if (withContext.unrecorded) store.head.unrecorded = { ...store.head.unrecorded, ...withContext.unrecorded };
-    };
-
-    return { onRun, onStep, onBeforeCommand };
+    return { onRun, onStep };
 }
 
 /**

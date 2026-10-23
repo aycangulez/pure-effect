@@ -1260,8 +1260,6 @@ configureEffect(
 
 The example keeps the trace of a run that failed or in which a Command threw, passes every value through `redact`, caps a trace at `maxEntries`, reports a storage failure to `onSinkError`, and warns once per flow about a trace that was capped, is missing values, or has steps named `'anonymous'`.
 
-The example copies the context when the run reaches its first Command. A run that stops before any Command, such as one an early check turns away, keeps no context. To replay it, pass the context yourself, with `replayEffect`'s `context` option.
-
 **A trace keeps data, not objects.** A value is copied into the form JSON stores when it is recorded, and copied again each time a replay hands it to the flow.
 
 Return plain data from a Command's function. Turn a class instance into a plain object before returning it, with a small named function you can test on its own, as in `() => db.findCart(id).then(cartToData)`. Rebuild the object in `next` if the flow needs its methods. When you catch an error to return it as data, copy the fields the flow branches on, as in `.catch((error) => ({ ok: false, code: error.code }))`, rather than returning the error itself.
@@ -1318,8 +1316,6 @@ runEffect(flow(input))
 │  └─ recording.onRun                    last configuration: innermost
 │     │
 │     │  for each Command:
-│     ├─ telemetry.onBeforeCommand       interceptors all run, in the order given
-│     ├─ recording.onBeforeCommand
 │     ├─ telemetry.onStep
 │     │  └─ recording.onStep             closest to the Command
 │     │     └─ cmd()
@@ -1330,7 +1326,9 @@ runEffect(flow(input))
 ├─ telemetry.onRun returns
 ```
 
-**Knowing which request a step belongs to.** `onStep` and `onRun` get no context, so a hook that logs per request finds the request the way the rest of your logging does. An `AsyncLocalStorage` scope entered around `runEffect` reaches every hook the run calls, and the recording example uses one to give each run its own recorder:
+Neither example has an `onBeforeCommand` hook. One you add runs before `onStep` for each Command. If several layers have one, they run in the order the layers were installed.
+
+**Knowing which request a step belongs to.** `onRun` gets the run's context, but `onStep` does not, so a hook that logs each step per request finds the request the way the rest of your logging does. An `AsyncLocalStorage` scope entered around `runEffect` reaches every hook the run calls, and the recording example uses one to give each run its own recorder:
 
 ```js
 import { AsyncLocalStorage } from 'node:async_hooks';

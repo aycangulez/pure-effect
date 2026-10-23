@@ -83,9 +83,9 @@ Pure Effect is a zero-dependency effect system for JavaScript implementing the "
 
 ### Hooks
 
-- `onStep(name, type, op, path)` wraps each Command and each `Parallel`; a hook that only watches must `await op()` and return its result. `onRun(effect, op, flowName, initialInput)` wraps a whole run once. `onBeforeCommand(command, context)` runs before each Command, and throwing from it vetoes the Command as an abort.
+- `onStep(name, type, op, path)` wraps each Command and each `Parallel`; a hook that only watches must `await op()` and return its result. `onRun(op, flowName, initialInput, context)` wraps a whole run once. `onBeforeCommand(command, context)` runs before each Command, and throwing from it vetoes the Command as an abort.
 - `configureEffect` is additive. Each call adds one layer and returns a function that removes it; several configurations passed to one call form one layer; a bare call removes every layer; a call whose arguments are all `undefined` does nothing. `chainHooks` merges layers earliest outermost: `onStep` and `onRun` nest, and `onBeforeCommand` interceptors run in order. Keep those semantics if the hook shapes change. A per-call `callConfig` merges innermost, or over nothing under `inherit: false`, and a non-boolean `inherit` throws. A `retry` key throws as any key no hook has.
-- **Anything that wraps `onStep` passes `path` on as the fourth argument, and anything that wraps `onRun` passes `initialInput` on.** Only the innermost hook can pass `op` an argument, the recorded decision.
+- **Anything that wraps `onStep` passes `path` on as the fourth argument, and anything that wraps `onRun` passes `initialInput` and `context` on.** Only the innermost hook can pass `op` an argument, the recorded decision.
 - The recorder only watches: `op` always runs, its result is returned, and its error propagates. It catches exactly the two parts of recording a value that run the caller's code or read the caller's value, `redact` and the copy (`recordPart`), and marks the value `unrecorded` with which one threw. Every read of the caller's value, and of what `redact` returns, goes through `recordPart`. Nothing else in it may throw, and it has no catch-all to hide a bug of its own.
 
 ### Recording and replay

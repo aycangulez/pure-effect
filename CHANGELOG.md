@@ -15,16 +15,18 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 - Breaking: a run is named by `flowName` in `runEffect`'s third argument or `recordEffect`'s options, not by `context.flowName`, which is now ordinary context data. Move the name: `runEffect(flow, ctx, { flowName })` and `recordEffect(flow, { context, flowName })`.
 - Breaking: a result's error, and each settled `Parallel` outcome's, is typed with `Error` added to the declared union, for what a Command's function threw. Check `error instanceof Error` before reading a domain error's fields.
 - Breaking: a replay stops at a Command with no name, neither `meta.name` nor a function name, with a `ReplayError` naming its path, since a replay could not tell two of them apart. Name the function or set `meta.name`; `meta.name: 'anonymous'` replays a trace recorded while it was unnamed.
+- Breaking: `onRun` is `onRun(op, flowName, initialInput, context)`. It gets the run's context, and no longer the flow, which nothing read. Drop the first parameter from each `onRun` hook.
 - Breaking: `effectGen` refuses a generator function that declares more than one parameter, whose extra parameters were always `undefined`. Pass several values as one object.
 - Breaking: the `RunContext` type is removed, since a context no longer carries `flowName`.
+- The recording example records the context as the run starts, so a run that stops before its first Command, such as one a permission check refuses, still replays.
 - A `Command` given only its result type, with a `next` that keeps the value and cannot fail, types its error as `never` rather than `unknown`.
 
 ### Fixed
 
-- A `Parallel` whose `settled` is typed `boolean`, or whose options are otherwise wrong, gets a type error that names the option, rather than one about `next`.
 - `timeTravel` no longer warns that a trace holds no initial input when the flow was built with `effectPipe` or `effectGen` and takes none.
-- A bare `yield` of an Effect in a generator flow gets a type error that ends by naming `yield* step(effect)`.
 - Hovers and type errors show a generator flow's error union rather than an unexpanded `GenError<Step<...>>`.
+- A bare `yield` of an Effect in a generator flow gets a type error that ends by naming `yield* step(effect)`.
+- A `Parallel` whose `settled` is typed `boolean`, or whose options are otherwise wrong, gets a type error that names the option, rather than one about `next`.
 - A type error in a Command's `next` reports two overloads rather than three.
 
 ## [0.21.0] - 2026-10-17
