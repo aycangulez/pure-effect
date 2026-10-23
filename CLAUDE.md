@@ -142,7 +142,7 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 - Nested pipelines for dependent values are a TypeScript cost only.
 - No join helper: `pair(f)` was built and dropped.
 - No flows written as one function: `flow(fn)` was built and dropped; `effectGen` replaced it.
-- No loop helper: a loop is a step that gets the list, then `Parallel(list.map(f), { limit: 1 })`.
+- No loop helper: a loop is a `for` loop with `yield*` in a generator flow, or a step that gets the list, then `Parallel(list.map(f), { limit: 1 })`, in a pipeline.
 - A `TimeParadox` after a flow changes shape is the design; an incident test is re-recorded when its flow changes shape.
 - A trace records results, never Command arguments.
 - A trace keeps data, not objects, in one form, JSON.

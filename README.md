@@ -19,7 +19,7 @@
 - **Recording and replay:** [Time-Travel Debugging](#time-travel-debugging) · [Recording in Production](#recording-in-production) · [Hooks](#hooks) · [Replay in Depth](#replay-in-depth)
 - **Reference:** [Why Pure Effect](#why-pure-effect) · [Limitations](#limitations) · [REFERENCE.md](REFERENCE.md): the API and the exact rules
 
-The seven sections under Getting started are enough to write and test a flow. Come back to the rest when a flow needs it: retries, loops, steps that run at the same time, TypeScript, or recording.
+The sections under Getting started are enough to write and test a flow. Come back to the rest when a flow needs it.
 
 ## Installation
 
@@ -172,9 +172,7 @@ Cleanup that a `finally` would do goes outside the flow, in a `try`/`finally` ar
 
 `cmdFindUser` is the named function `() => db.findUser(email)`, and `findUser` stands for a step that returns the Command, as `ensureEmailAvailable` does in the Quick Start. A `catch` around `yield*` can log and rethrow, but it cannot recover; see [Which Errors Are Data](#which-errors-are-data).
 
-One rule is behind both columns: each decision lives in a small step function that receives the answer it depends on and returns `Success` or `Failure`, so a test can call it directly. A pipeline joins those steps with `effectPipe`; a generator flow puts them in order with `yield*`. An `if` around a `yield*` works, but it can be tested only by walking the whole flow, so keep the body to putting steps in order. A `for` loop that runs a step for each item decides nothing, so it is fine.
-
-JavaScript cannot stop the code between two steps from doing I/O, so each decision lives in a function that receives one value and returns the next step, where a call that does I/O stands out. That is what lets a test call a decision directly with the value it depends on, and lets a replay run every decision again against the recorded answers. A flow has more small functions than its `async` version, and each is a decision a test can call directly, with the value it depends on and no mock.
+One rule is behind both columns: each decision lives in a small step function that receives the answer it depends on and returns `Success` or `Failure`. JavaScript cannot stop the code between two steps from doing I/O, so keeping decisions there makes a call that does I/O stand out, lets a test call each decision directly with no mock, and lets a replay run every decision again against the recorded answers. A flow has more small functions than its `async` version for that reason. A pipeline joins the steps with `effectPipe`; a generator flow puts them in order with `yield*`. An `if` around a `yield*` works, but it can be tested only by walking the whole flow, so keep the body to putting steps in order. A `for` loop that runs a step for each item decides nothing, so it is fine.
 
 The Quick Start's `registerUserFlow` is this function, translated row by row: each `await` became a Command, the code after it became that Command's `next`, and each `throw` became a `Failure`.
 
@@ -205,7 +203,7 @@ await assert.rejects(registerUserAsync({ email: 'bad-email', password: '123' }),
 
 If the flow has a `Retry`, a `Failure` from one that gave up holds `{ retryExhausted, lastError, retries }`; throw its `lastError` to rethrow what the call threw, as the old function did.
 
-A loop becomes a step that gets the list and a `Parallel` over it, as the table shows; [Writing Loops](#writing-loops) translates one.
+A `for` loop stays a `for` loop in a generator flow, and becomes a `Parallel` over the list in a pipeline, as the table shows; [Writing Loops](#writing-loops) translates one.
 
 ## Writing Flows as Generators
 
@@ -305,11 +303,7 @@ assert.equal(retried.type, 'Retry');
 assert.equal(commandName(retried.effect), 'cmdLoadPlan'); // the Command the Retry repeats
 ```
 
-`commandName` takes only a Command. To name the step a `Retry` repeats, pass the `Retry`'s `effect`, as in `commandName(retry.effect)`.
-
 A generator flow is tested the same way. Its decisions are in step functions, which get the step tests, and a walk or a whole-flow run works on `registerUserFlowGen` as it does on `registerUserFlow`. A walk straight through runs the body once, and walking a second branch runs it again.
-
-[Testing a whole flow](#testing-a-whole-flow) shows how to run a whole flow in a test instead, `Retry` and `Parallel` included, with no I/O.
 
 Tests cannot see inside a Command's function without running it. If `cmdFindUser` said `db.findUser(input.name)` instead of `input.email`, every test on this page would still pass. Keep those functions to a single call, and let an integration test cover them, with the services passed in as [Passing Runtime Context](#passing-runtime-context) shows.
 
@@ -323,7 +317,6 @@ To run a whole flow in a test instead of walking it, `Retry` and `Parallel` incl
 import { replayEffect } from 'pure-effect';
 
 const answers = { cmdFindUser: null, cmdSaveUser: { id: 1, ...input } };
-// The function is asked about each Parallel too, under the name 'Parallel'. Answering undefined lets its branches run.
 const answer = (step) => (step.name in answers ? { result: answers[step.name] } : undefined);
 const { result } = await replayEffect(registerUserFlow(input), answer);
 assert.deepEqual(result, Success({ id: 1, ...input }));
@@ -355,7 +348,7 @@ Twelve rules cover most of what goes wrong. The same rules ship in the package a
 5. **A `catch` in a generator flow cannot recover.** It can log and rethrow, and it sees a `FlowStopped` error saying where the flow stopped, not the original. To handle an error, catch it inside the Command's function and return it as data. See [How a generator flow stops](REFERENCE.md#how-a-generator-flow-stops).
 6. **Let a Command's function throw only when `Retry` should try again.** An error it catches and returns is data, and `Retry` never sees it. To retry some errors and not others, rethrow the first kind and return the second. A throw also skips any undo the Command's `next` would have run. See [Which Errors Are Data](#which-errors-are-data).
 7. **Wrap only the Command that fails in `Retry`, and continue in a later step.** `Retry` runs everything it wraps again, the Command's `next` included. `retries: 2` means up to three calls, and `onExhausted` is where you give up. See [Retrying Transient Failures](#retrying-transient-failures).
-8. **Write a loop as a step that gets the list, then `Parallel(list.map(f), { limit: 1 })`.** `limit` caps how many run at once, and `settled: true` keeps going past a failure. A generator flow can use a `for` loop with `yield*`. See [Writing Loops](#writing-loops).
+8. **Write a loop as a `for` loop with `yield*` in a generator flow, or as `Parallel(list.map(f), { limit: 1 })` in a pipeline.** Use the `Parallel` in either form to run several items at once, with a higher `limit`, or to keep going past a failure, with `settled: true`. See [Writing Loops](#writing-loops).
 9. **Get the time, random IDs and anything else that changes between runs from a Command,** or, for a value read once per request, such as its start time, from the context, which a trace records too. A replay then gets the recorded value, and a generator body, which can run more than once, sees the same value each time. See [What runs once, and what runs again](REFERENCE.md#what-runs-once-and-what-runs-again).
 10. **Return plain data from Commands, and keep the context to plain values.** A trace stores JSON, so a `Date` comes back as a string. Reach a service from the Command's function, and hand it to the function that builds the flow. See [Passing Runtime Context](#passing-runtime-context).
 11. **Clean up in a `try`/`finally` around `runEffect`,** not inside the flow. See [How a generator flow stops](REFERENCE.md#how-a-generator-flow-stops).
@@ -605,14 +598,15 @@ const chargeOrder = (order) => {
     return Command(cmdChargeOrder, (c) => (c.ok ? Success(c.chargeId) : Failure('card_declined')));
 };
 
-const releaseStock = (reservationId) => {
+// Each undo step ends the flow with the error that made it necessary.
+const releaseStock = (reservationId, error) => {
     const cmdReleaseStock = () => inventory.release(reservationId);
-    return Command(cmdReleaseStock);
+    return Command(cmdReleaseStock, () => Failure(error));
 };
 
-const refundCharge = (chargeId) => {
+const refundCharge = (chargeId, error) => {
     const cmdRefundCharge = () => payments.refund(chargeId);
-    return Command(cmdRefundCharge);
+    return Command(cmdRefundCharge, () => Failure(error));
 };
 
 // Passes both results on, or undoes whichever step succeeded and then fails.
@@ -621,17 +615,16 @@ const reserveAndCharge = (order) =>
         [reserveStock(order), chargeOrder(order)],
         ([reservation, charge]) => {
             if (reservation.type === 'Failure') {
-                const undo = charge.type === 'Success' ? [refundCharge(charge.value)] : [];
-                return Parallel(undo, () => Failure(reservation.error));
+                return charge.type === 'Success' ? refundCharge(charge.value, reservation.error) : reservation;
             }
-            if (charge.type === 'Failure') {
-                return Parallel([releaseStock(reservation.value)], () => Failure(charge.error));
-            }
+            if (charge.type === 'Failure') return releaseStock(reservation.value, charge.error);
             return Success({ order, reservationId: reservation.value, chargeId: charge.value });
         },
         { settled: true }
     );
 ```
+
+With more than two branches, several steps may need undoing at once: return `Parallel(undos, () => Failure(error))` to run them all and then fail.
 
 `next` is a plain function, so each case is tested by handing it the outcomes, with no I/O:
 
@@ -640,8 +633,8 @@ const order = { id: 'order_1', customerId: 'cus_1', items: [], total: 120 };
 
 // The card was charged, then the stock ran out: the flow refunds the charge and fails.
 const undoing = reserveAndCharge(order).next([Failure('out_of_stock'), Success('ch_1')]);
-assert.equal(commandName(undoing.effects[0]), 'cmdRefundCharge');
-assert.deepEqual(undoing.next([null]), Failure('out_of_stock'));
+assert.equal(commandName(undoing), 'cmdRefundCharge');
+assert.deepEqual(undoing.next({ refunded: true }), Failure('out_of_stock'));
 
 // Both succeeded, so there is nothing to undo.
 assert.deepEqual(
@@ -682,8 +675,6 @@ const withCustomer = (order) => effectPipe(fetchCustomer, (customer) => Success(
 const applyLoyaltyDiscount = (orderId) =>
     effectPipe(fetchOrder, withCustomer, ({ order, customer }) => Success(discountedTotal(order, customer)))(orderId);
 ```
-
-When the lookup is written in place rather than reused, the Command's own `next` does the join, with no pipeline inside the step: with `const cmdFindCustomer = () => db.findCustomer(order.customerId)` in the step, `Command(cmdFindCustomer, (customer) => Success({ order, customer }))`.
 
 **Pass only what the next steps need.** Avoid one object that collects everything computed so far. When a step's input is all it gets, it cannot depend on a value from far upstream without showing it, stale fields do not linger, and two steps cannot clash over the same key. Data also lives only as long as the flow needs it, which matters for credentials and personal data. In TypeScript, it keeps the pipeline type-checked: if an upstream step changes what it returns, the step that reads the value fails to compile instead of getting `undefined` at runtime.
 
@@ -736,24 +727,14 @@ A claim like this has to be released if a later step fails. Otherwise the provid
 
 ## Writing Loops
 
-A loop is written in two parts: a step that gets the list, and a `Parallel` over it, with `limit: 1` so the items run one after another, as in a `for` loop. The `async` version is usually split the same way. Paying a customer's unpaid invoices in order, and stopping at the first that fails:
+In a generator flow, a loop is a `for` loop with `yield*`, as in `async` code. Paying a customer's unpaid invoices in order, and stopping at the first that fails:
 
 ```js
-async function payUnpaidAsync(customerId) {
-    const invoices = await billing.findUnpaid(customerId);
-    for (const invoice of invoices) {
-        const receipt = await payments.charge(invoice);
-        await mailer.sendReceipt(receipt);
-    }
-}
-
-// First part: get the list.
 const findUnpaidInvoices = (customerId) => {
     const cmdFindUnpaid = () => billing.findUnpaid(customerId);
     return Command(cmdFindUnpaid);
 };
 
-// Second part: the loop's body, a flow of its own for one invoice.
 const chargeInvoice = (invoice) => {
     const cmdChargeInvoice = () => payments.charge(invoice);
     return Retry(Command(cmdChargeInvoice), { retries: 3 });
@@ -764,78 +745,81 @@ const sendReceipt = (receipt) => {
     return Command(cmdSendReceipt);
 };
 
-const payInvoice = (invoice) => effectPipe(chargeInvoice, sendReceipt)(invoice);
-
-// The loop: one body per invoice, run one at a time.
-const payAll = (invoices) => Parallel(invoices.map(payInvoice), { limit: 1 });
-
-const payUnpaid = (customerId) => effectPipe(findUnpaidInvoices, payAll)(customerId);
-
-// The flow starts by getting the list, and hands what it gets to the loop.
-const flow = payUnpaid('cus_1');
-assert.equal(commandName(flow), 'cmdFindUnpaid');
-assert.equal(flow.next([{ id: 1 }, { id: 2 }]).effects.length, 2);
-
-// The body is tested on its own: the Retry holds only the charge as its effect, and its next leads to the receipt.
-const body = payInvoice({ id: 1 });
-assert.equal(commandName(body.effect), 'cmdChargeInvoice');
-assert.equal(commandName(body.next({ id: 'receipt_1' })), 'cmdSendReceipt');
-
-// An empty list runs nothing.
-assert.deepEqual(await runEffect(payAll([])), Success([]));
-```
-
-Each invoice is paid after the one before it has finished, and the first that fails stops the rest from starting, as in the `async` version. When the payments can overlap, a higher `limit` runs several at a time.
-
-The loop's body is a flow built for one item, so it can hold as many steps as the body of a `for` loop. Put a `Retry` inside it, on the step that needs one, since a `Retry` runs everything it wraps again (see [Retrying Transient Failures](#retrying-transient-failures)). Around the whole loop it would charge the invoices already paid. Around the whole body, a receipt that failed to send would charge the card again.
-
-The `Parallel`'s `next` receives what each body returned, in order, so a total or a summary of the loop goes there: `Parallel(invoices.map(payInvoice), (receipts) => Success(receipts.length), { limit: 1 })`. To keep going past a failure, as a `try`/`catch` inside the loop would, add `settled: true`: every invoice is tried, and `next` receives one `Success` or `Failure` per invoice. See [Running Effects in Parallel](#running-effects-in-parallel).
-
-In a generator flow, the same loop can be a `for` loop over the list, with the body's steps inside it:
-
-```js
-const payUnpaidGen = effectGen(function* (customerId) {
+const payUnpaid = effectGen(function* (customerId) {
     const invoices = yield* step(findUnpaidInvoices(customerId));
-    for (const invoice of invoices) yield* step(payInvoice(invoice));
+    for (const invoice of invoices) {
+        const receipt = yield* step(chargeInvoice(invoice));
+        yield* step(sendReceipt(receipt));
+    }
+    return invoices.length;
 });
 
-// Every charge is declined, so both forms give up on the first invoice once its retries run out, with the same Failure.
-const answers = {
-    cmdFindUnpaid: { result: [{ id: 1 }, { id: 2 }] },
-    cmdChargeInvoice: { error: new Error('declined') }
-};
-const answer = (asked) => answers[asked.name];
-const fromLoop = await replayEffect(payUnpaidGen('cus_1'), answer);
-const fromParallel = await replayEffect(payUnpaid('cus_1'), answer);
-assert.equal(fromLoop.result.error.retryExhausted, true);
-assert.deepEqual(fromLoop.result, fromParallel.result);
+// Hand each step its answer; nothing runs.
+const flow = payUnpaid('cus_1');
+assert.equal(commandName(flow), 'cmdFindUnpaid');
+const charging = flow.next([{ id: 1 }, { id: 2 }]);
+assert.equal(commandName(charging.effect), 'cmdChargeInvoice'); // the Retry holds the charge as its effect
+const sending = charging.next({ id: 'receipt_1' });
+assert.equal(commandName(sending), 'cmdSendReceipt');
+assert.equal(commandName(sending.next({ sent: true }).effect), 'cmdChargeInvoice'); // the second invoice
+
+// An empty list runs nothing.
+assert.deepEqual(payUnpaid('cus_1').next([]), Success(0));
 ```
 
-It stops at the first invoice that fails, as the `Parallel` with `limit: 1` does. Use the `Parallel` instead when payments can overlap, with a higher `limit`. Use it too when the loop has to keep going past a failure, with `settled: true`, since a `catch` in the body cannot recover.
+Each invoice is paid after the one before it has finished, and the first that fails stops the rest, as in the `async` version.
 
-Sometimes getting the list is a loop of its own. Paging through an API with a cursor is one: each request needs the cursor from the page before, so the requests cannot be listed in advance. Write that loop as an ordinary `async` function, call it from one Command, and map over the list it returns, as above:
+Put a `Retry` on the step that needs one, here the charge, since a `Retry` runs everything it wraps again (see [Retrying Transient Failures](#retrying-transient-failures)). Around the whole flow, it would charge the invoices already paid. Around the charge and the receipt together, a receipt that failed to send would charge the card again.
+
+A `Parallel` over the list does two things a `for` loop cannot. `limit: 3` runs three invoices at the same time. `settled: true` tries every invoice and returns one `Success` or `Failure` for each, which a `catch` in the loop cannot do, since it cannot recover. Build the loop's body as a flow for one item, and map the list onto it:
 
 ```js
-async function fetchAllOrders() {
+const payInvoice = (invoice) => effectPipe(chargeInvoice, sendReceipt)(invoice);
+
+// In a generator flow, yield the Parallel in place of the loop.
+const payEveryUnpaid = effectGen(function* (customerId) {
+    const invoices = yield* step(findUnpaidInvoices(customerId));
+    return yield* step(Parallel(invoices.map(payInvoice), { limit: 3, settled: true }));
+});
+
+// A pipeline writes every loop this way; limit: 1 runs one invoice at a time, as the for loop does.
+const payAll = (invoices) => Parallel(invoices.map(payInvoice), { limit: 1 });
+const payUnpaidInOrder = (customerId) => effectPipe(findUnpaidInvoices, payAll)(customerId);
+
+// Both hold one branch per invoice once the list arrives.
+const unpaid = [{ id: 1 }, { id: 2 }];
+assert.equal(payEveryUnpaid('cus_1').next(unpaid).effects.length, 2);
+assert.equal(payUnpaidInOrder('cus_1').next(unpaid).effects.length, 2);
+```
+
+A `for` loop and a `Parallel` record different paths, so a trace recorded before you switch one for the other ends its replay in a `TimeParadox`; record it again. See [Running Effects in Parallel](#running-effects-in-parallel).
+
+### Paging
+
+Sometimes getting the list is a loop of its own. Paging through an API with a cursor is one: each request needs the cursor from the page before. Fetch one page per pass:
+
+```js
+const fetchOrdersPage = (cursor) => {
+    const cmdListOrders = () => api.listOrders(cursor);
+    return Retry(Command(cmdListOrders), { retries: 3 });
+};
+
+const listAllOrders = effectGen(function* () {
     const orders = [];
     let cursor = null;
     do {
-        const page = await api.listOrders(cursor);
+        const page = yield* step(fetchOrdersPage(cursor));
         orders.push(...page.items);
         cursor = page.nextCursor;
     } while (cursor);
     return orders;
-}
+});
 
-const listAllOrders = () => {
-    const cmdListAllOrders = () => fetchAllOrders();
-    return Command(cmdListAllOrders);
-};
+const secondPage = listAllOrders().next({ items: [{ id: 1 }], nextCursor: 'c2' });
+assert.deepEqual(secondPage.next({ items: [{ id: 2 }], nextCursor: null }), Success([{ id: 1 }, { id: 2 }]));
 ```
 
-To the flow, the whole loop is one step. A flow test cannot see inside it, so, like any Command's function, it is left to an integration test. This is rule 1 applied to a loop: the Command's function is the one call, `fetchAllOrders()`, and the loop lives in a function of its own that an integration test covers.
-
-The loop belongs in the flow only when the flow has to decide something on each pass, such as stopping at the first order that matches, or saving each page as it arrives. Then the Command's `next` returns the Command for the next page instead of a `Success`, until there are no more pages. A generator flow can write the same thing as an ordinary `while` loop, fetching one page per pass with `yield* step(...)`.
+Each page is a step of its own: the trace records each page, a `Retry` repeats only the page that failed, and a test walks the pages as above. A pipeline writes this loop as a Command whose `next` returns the Command for the next page, until there are none.
 
 Exact rules: [loops](REFERENCE.md#loops).
 
@@ -909,7 +893,7 @@ assert.deepEqual(await runEffect(pay(25)), Success({ chargeId: 'ch_1', amount: 2
 | a Command's function threw | an I/O fault | retries it | the exhaustion, once the attempts are gone | the error thrown, or, once a `Retry` gives up, `{ retryExhausted, lastError, retries }` |
 | a `next` function or a pure step threw, or the flow is malformed | a bug | nothing; it is thrown, not returned | nothing | nothing; `runEffect` rejects |
 
-In short, **you can recover from an error your I/O produced, but you cannot catch a `Failure` a step returned.** Only the code that called `runEffect` acts on it. For the same reason, do not throw business errors from a Command's function: a throw there tells `Retry` that the I/O broke, and `Retry` will try again. A throw anywhere else in the flow is a bug, and is thrown as it is rather than returned as a `Failure`. `runEffect` rejects with it, or, from a step before the first Command, the call that builds the flow throws it. Nor does a Command's function return `Failure(...)`: whatever it returns is its result, so a returned `Failure` reaches `next` as a value and the flow keeps going. Return the data and let a step decide, as `requireCharge` does above.
+A throw anywhere else in the flow is a bug: `runEffect` rejects with it, or, from a step before the first Command, the call that builds the flow throws it. Nor does a Command's function return `Failure(...)`: whatever it returns is its result, so a returned `Failure` reaches `next` as a value and the flow keeps going. Return the data and let a step decide, as `requireCharge` does above.
 
 Exact rules: [a malformed flow](REFERENCE.md#a-malformed-flow).
 
@@ -1501,8 +1485,6 @@ await replayEffect(checkoutFlow(input), resolve);
 
 **vs. Effect-TS (and fp-ts):** A full ecosystem with fibers, streaming, schema validation, structured concurrency, and more, with a steep learning curve and its own vocabulary. Pure Effect takes only the idea of describing side effects as data, and does less: testable pipelines, context injection, retry, parallel execution, and replayable traces. If you need fibers or streaming, use Effect-TS.
 
-**vs. plain async/await with mocks:** A mock can pass every test while behaving differently from the real driver. Here, business logic never does I/O, so there is nothing to mock.
-
 **When to use something else:** If your code does little async I/O, or testing and debugging production are not problems for you, plain async/await is simpler.
 
 ## Limitations
@@ -1516,6 +1498,3 @@ await replayEffect(checkoutFlow(input), resolve);
 - **A trace records the input as the run starts, and a step before the first Command has already run by then.** That step runs as the flow is built, so one that changes its input, as `input.count++` does, leaves the trace holding the changed input. Return a new value rather than change the one a step receives.
 - **Replay reproduces what one flow saw, not timing.** See [timing](REFERENCE.md#timing).
 - **Configuration belongs to one copy of the library.** Hooks live in module state, so two copies in one process (a dual ESM and CJS setup, two versions in the dependency tree, or a worker thread) do not share them, and nothing warns you.
-- **A Command needs a name that survives minification.** `meta.name` does. `cmd.name` does not, unless the minifier keeps function names.
-- **A generator flow's body can run more than once,** and code in it that changes something outside it, such as a counter or a log line, does so again; see [What runs once, and what runs again](REFERENCE.md#what-runs-once-and-what-runs-again).
-- **A generator body's `finally` does not always run.** Put cleanup in a `try`/`finally` around `runEffect`; see [How a generator flow stops](REFERENCE.md#how-a-generator-flow-stops).

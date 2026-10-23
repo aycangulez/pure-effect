@@ -192,7 +192,7 @@ Catching and retrying are alternatives. A miss caught inside the `cmd` function 
 Order:
 
 - Branches run through `runBounded`: `Promise.all` without a `limit`, and a pull-by-index worker pool with one, so results and paths follow array order either way.
-- Under `limit: 1` the pool is a sequential loop that stops at the first failure, unless `settled`. That is how the README's `Writing Loops` translates a `for` loop, in two parts: a step that gets the list, then a `Parallel` that maps over it. A test therefore pins the order branches start in, as well as the order results return.
+- Under `limit: 1` the pool is a sequential loop that stops at the first failure, unless `settled`. That is how the README's `Writing Loops` writes a `for` loop in a pipeline: a step that gets the list, then a `Parallel` that maps over it. A test therefore pins the order branches start in, as well as the order results return.
 
 Failure:
 
@@ -793,16 +793,15 @@ Newcomers from `async`/`await` get the README's `Coming from async/await` sectio
 
 `effectGen` is the generator form this section's spike lacked. It advances its body live, so code in it runs once per run rather than once per step; it copies no answers, keeping them as a shared list; and it keeps the error union in TypeScript. It also keeps the two habits `flow(fn)` needed guards against loud: an `async function*` is refused, and a `catch` that recovers rejects the run.
 
-### No loop helper; a loop is taught as two parts
+### No loop helper; a loop is a `for` loop in a generator flow
 
 `Loop(start, pass)`, whose pass returned `Again(state)` to go round again or took a separate `while` condition, was proposed and dropped before it was built. It removed the self-call from a loop whose passes need each other's answers. But it read no more like the loop a newcomer from `async`/`await` would write than the recursion it replaced, and `Again` would have been a seventh node type for `chain` and the interpreter to carry.
 
-The README splits a loop the way its `async` version is usually written: a step that gets the list, then `Parallel(list.map(f), { limit: 1 })`.
+The README teaches a loop as a generator flow's `for` loop with `yield*`, the loop a reader coming from `async`/`await` already writes; each pass gets its own path in the trace. It once led with a pipeline's two parts, a step that gets the list and then `Parallel(list.map(f), { limit: 1 })`, and showed the `for` loop after; leading with the `for` loop made the section shorter as well as closer to that code.
 
-- When getting the list is itself a loop, as with cursor paging, that loop stays an ordinary `async` function called from one Command, which keeps the Command's function a single call. The README states the cost: one trace step holding the whole list, a `Retry` that starts again from the first page, and a loop no flow test can see.
-- Recursion through a Command's `next` gets one sentence, for a loop that has to decide something on each pass. The recursive paging example was dropped, since recursion is the hardest thing in a flow to follow.
-
-A generator flow loops with `for` and `yield*`, as `async` code does; each pass gets its own path in the trace.
+- The `Parallel` stays, for a pipeline and for what a `for` loop cannot do: running items at the same time, and keeping going past a failure, since a `catch` in a generator body cannot recover.
+- Cursor paging is a generator `do`/`while` loop, one page per step, so the trace records each page, a `Retry` repeats only the page that failed, and a flow test walks the pages. Before, that loop stayed an ordinary `async` function called from one Command, at the cost of one trace step holding the whole list, a `Retry` that started again from the first page, and a loop no flow test could see. A long paging loop holds little memory since a run an execution owns keeps no earlier answers ([Generator flows, judged by least surprise](#generator-flows-judged-by-least-surprise)).
+- Recursion through a Command's `next` gets one sentence, for paging in a pipeline. The recursive paging example was dropped, since recursion is the hardest thing in a flow to follow.
 
 ### A `TimeParadox` after a flow changes shape is the design
 
