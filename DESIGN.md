@@ -1107,7 +1107,7 @@ The entries had grown into prose that re-taught the guides, a quarter of the REA
 
 ### The README's orientation sections stay short
 
-The Core and the other orientation sections are a few plain sentences. In September 2026 a rewrite of the How It Works section added a stated mental model, a walk-through diagram and a three-bullet list. It removed some repetition and was more complete, and it was dropped as too dense. In an orientation section readability wins over completeness: repeating an idea stated elsewhere is fine there, and density is not. In October 2026 How It Works was removed, once the Quick Start became five steps: each of its three paragraphs was then said by a step, The Core or the section after it, so the whole section was repetition.
+The Core and the other orientation sections are a few plain sentences. In September 2026 a rewrite of the How It Works section added a stated mental model, a walk-through diagram and a three-bullet list. It removed some repetition and was more complete, and it was dropped as too dense. In an orientation section readability wins over completeness: repeating an idea stated elsewhere is fine there, and density is not. In October 2026 How It Works was removed, once the Quick Start became five steps: each of its three paragraphs was then said by a step, The Core or the section after it, so the whole section was repetition. Later that month a sixth step, Replay it, closed the Quick Start, so a reader who stops there sees replay working, the library's headline feature, rather than only a link to a section near the end of the README.
 
 So a gap gets a sentence or two, shown as exact wording before anything is rewritten, and moving something is proposed apart from changing it.
 

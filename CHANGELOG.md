@@ -2,7 +2,7 @@
 
 All notable changes to Pure Effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
-## [0.22.0] - 2026-10-23
+## [0.22.0] - 2026-10-24
 
 ### Added
 

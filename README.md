@@ -43,7 +43,7 @@ Everything else adds to these. `Ask` reads request values, `Retry` and `Parallel
 
 ## Quick Start
 
-Five steps take you from a plain `async` function to a tested flow. The example registers a user.
+Six steps take you from a plain `async` function to a tested flow you can replay. The example registers a user.
 
 **1. Describe each call as a Command.** A Command holds a call to make, and a `next` function that turns its answer into the next step. Building one makes no call.
 
@@ -128,7 +128,19 @@ async function registerUser(input) {
 }
 ```
 
-That is a whole flow. [Rules for Writing a Flow](#rules-for-writing-a-flow) lists the twelve rules that cover most of what goes wrong, and [Time-Travel Debugging](#time-travel-debugging) shows how to record a run in production and replay it on your machine. In TypeScript, [TypeScript: Typed Errors and Context](#typescript-typed-errors-and-context) covers typing a flow's errors and context, handling every error, and testing a flow.
+**6. Replay it.** `recordEffect` runs the flow and keeps what each Command returned. `replayEffect` runs the flow again with those answers, with no database or network:
+
+```js
+import { recordEffect, replayEffect } from 'pure-effect';
+
+const { result: live, trace } = await recordEffect(registerUserFlow(input));
+const { result: replayed } = await replayEffect(registerUserFlow(trace.initialInput), trace);
+assert.deepEqual(replayed, live);
+```
+
+Record runs in production, and a failure replays on your machine; [Time-Travel Debugging](#time-travel-debugging) shows how.
+
+That is a whole flow. [Rules for Writing a Flow](#rules-for-writing-a-flow) lists the twelve rules that cover most of what goes wrong. In TypeScript, [TypeScript: Typed Errors and Context](#typescript-typed-errors-and-context) covers typing a flow's errors and context, handling every error, and testing a flow.
 
 ## Coming from async/await
 
@@ -162,7 +174,7 @@ Cleanup that a `finally` would do goes outside the flow, in a `try`/`finally` ar
 
 One rule is behind both columns: each decision lives in a small step function that receives the answer it depends on and returns `Success` or `Failure`, so a test can call it directly. A pipeline joins those steps with `effectPipe`; a generator flow puts them in order with `yield*`. An `if` around a `yield*` works, but it can be tested only by walking the whole flow, so keep the body to putting steps in order. A `for` loop that runs a step for each item decides nothing, so it is fine.
 
-JavaScript cannot stop the code between two steps from doing I/O, so each decision lives in a function that receives one value and returns the next step, where a call that does I/O stands out. That is what lets a test call a decision directly with the value it depends on, and lets a replay run every decision again against the recorded answers. The cost is more small functions than `async` code would have.
+JavaScript cannot stop the code between two steps from doing I/O, so each decision lives in a function that receives one value and returns the next step, where a call that does I/O stands out. That is what lets a test call a decision directly with the value it depends on, and lets a replay run every decision again against the recorded answers. A flow has more small functions than its `async` version, and each is a decision a test can call directly, with the value it depends on and no mock.
 
 The Quick Start's `registerUserFlow` is this function, translated row by row: each `await` became a Command, the code after it became that Command's `next`, and each `throw` became a `Failure`.
 
@@ -328,7 +340,7 @@ Twelve rules cover most of what goes wrong. The same rules ship in the package a
 
 1. **Put every call that does I/O inside a Command, and keep its function to that one call:** `Command(cmdFindUser)`, with `const cmdFindUser = () => db.findUser(email)`, never `step(db.findUser(email))`. Tests never run the function, so anything else in it goes untested. The one addition rule 6 calls for, catching an error to return it as data, belongs there too; give it to an integration test. See [Testing Without Mocks](#testing-without-mocks).
 2. **Name every Command,** with a named function such as `const cmdFindUser = () => ...`, or with `meta.name`, as in `Command(cmd, { name: 'cmdFindUser' })`. Traces, replay and telemetry use the name, a replay stops at a Command that has none, and a minifier can strip a function's name. See [`Command`](REFERENCE.md#commandcmdfn-nextfn-meta).
-3. **Put each decision in a step function** that receives one value and returns `Success`, `Failure` or the next Command, so a test can call it directly. See [Coming from async/await](#coming-from-asyncawait).
+3. **Put each decision in a step function** that receives one value and returns `Success`, `Failure` or the next Command, so a test can call it directly. A flow has more functions than its `async` version; each one is a decision you can test without a mock, and that is what the extra functions buy. See [Coming from async/await](#coming-from-asyncawait).
 4. **Return an outcome the caller should see as `Failure(error)`; never throw it.** A `Failure` stops the flow, is never retried, and only the code that calls `runEffect` acts on it. See [Which Errors Are Data](#which-errors-are-data).
 5. **A `catch` in a generator flow cannot recover.** It can log and rethrow, and it sees a `FlowStopped` error saying where the flow stopped, not the original. To handle an error, catch it inside the Command's function and return it as data. See [How a generator flow stops](REFERENCE.md#how-a-generator-flow-stops).
 6. **Let a Command's function throw only when `Retry` should try again.** An error it catches and returns is data, and `Retry` never sees it. To retry some errors and not others, rethrow the first kind and return the second. A throw also skips any undo the Command's `next` would have run. See [Which Errors Are Data](#which-errors-are-data).
