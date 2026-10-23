@@ -684,6 +684,11 @@ assert.deepEqual(await runEffect(handleEvent({ eventId: 'evt_2' })), Failure('Mi
 
 When the rest of the flow is longer, the step returns it as a pipeline of its own, as `processOrder` does above. In a generator flow, `return` ends the flow anywhere, but keep the decision in a step all the same: `return yield* step(claimEvent(event))`.
 
+A claim like this has to be released if a later step fails. Otherwise the provider's retry is answered as `duplicate`, and the event is never processed. A flow has no `finally`, so the release goes in one of two places:
+
+- **In the flow, for a failure the flow handles as data.** Have the `next` that returns the `Failure` release the claim first, and give a `Retry` after the claim an `onExhausted` that does the same. See [Translating `try`/`catch`](#translating-trycatch).
+- **In the code that calls `runEffect`, for everything else,** such as a Command that throws. That code has the event, so it can release the claim when the run fails. Release only a claim this run made, for example one recorded with the delivery's own ID. Otherwise a duplicate delivery that fails would release the claim of one still running.
+
 ## Writing Loops
 
 A loop is written in two parts: a step that gets the list, and a `Parallel` over it, with `limit: 1` so the items run one after another, as in a `for` loop. The `async` version is usually split the same way. Paying a customer's unpaid invoices in order, and stopping at the first that fails:
@@ -1225,7 +1230,11 @@ When a Command's result changes shape, rename the Command. A trace matches it by
 
 ## Recording in Production
 
-`recordEffect` suits tests and scripts, where one call covers the whole run. To record an application without changing any call site, install the hooks once at startup. The two files imported below ship in the package's `examples` folder, `node_modules/pure-effect/examples`, and in the repository's [examples folder](https://github.com/aycangulez/pure-effect/blob/main/examples); copy them into your project. In a TypeScript project, copy each one's `.d.ts` beside it, which types the import, so the project needs no `allowJs`. The telemetry example needs `@opentelemetry/api` installed. Its `startTelemetrySdk` loads `@opentelemetry/sdk-node`, `@opentelemetry/exporter-trace-otlp-proto` and `@opentelemetry/sdk-trace-base` only when it is called, so a project that starts the SDK itself needs none of them. If you start OpenTelemetry that way, also register a context manager, such as `AsyncLocalStorageContextManager` from `@opentelemetry/context-async-hooks`. Without one, each Command's span is a separate root instead of a child of the run's span.
+`recordEffect` suits tests and scripts, where one call covers the whole run. To record an application without changing any call site, install the hooks once at startup. The two files imported below ship in the package's `examples` folder, `node_modules/pure-effect/examples`, and in the repository's [examples folder](https://github.com/aycangulez/pure-effect/blob/main/examples); copy them into your project. Copy only the ones you use.
+
+In a TypeScript project, copy each one's `.d.ts` beside it, which types the import, so the project needs no `allowJs`. Without `allowJs`, though, `tsc` does not copy a `.js` file into its output folder. If your compiled code runs from that folder, copy the example's `.js` there as part of the build, or the import fails at runtime with `ERR_MODULE_NOT_FOUND`.
+
+The telemetry example needs `@opentelemetry/api` installed, and its `.d.ts` does not compile without it. Its `startTelemetrySdk` loads `@opentelemetry/sdk-node`, `@opentelemetry/exporter-trace-otlp-proto` and `@opentelemetry/sdk-trace-base` only when it is called, so a project that starts the SDK itself needs none of them. If you start OpenTelemetry that way, also register a context manager, such as `AsyncLocalStorageContextManager` from `@opentelemetry/context-async-hooks`. Without one, each Command's span is a separate root instead of a child of the run's span.
 
 ```js
 import { randomUUID } from 'node:crypto';
@@ -1353,7 +1362,9 @@ assert.deepEqual(
 removeStepLog();
 ```
 
-A Command that `onBeforeCommand` vetoes never reaches `onStep`, so log a veto where you make it. In tests, call `configureEffect()` with no arguments in a `beforeEach`, so a test that fails before removing its hooks does not leave them installed for the next.
+A Command that `onBeforeCommand` vetoes never reaches `onStep`, so log a veto where you make it.
+
+In tests, call `configureEffect()` with no arguments in a `beforeEach`, so a test that fails before removing its hooks does not leave them installed for the next. A bare call removes every layer, your app's own hooks included. So when a test needs the app's hooks, such as a server's permission check or its recording, install them after the reset, in the same `beforeEach`, not once in a `before`. Nothing warns when they are missing: the run just goes ahead without them.
 
 **Per-call hooks.** `runEffect`'s third argument takes hooks for that call only.
 
