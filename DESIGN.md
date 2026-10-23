@@ -638,6 +638,7 @@ Under `settled`:
 It opens a span per run in `onRun`, a child span per Command in `onStep`, and one per `Parallel` around its branches' spans.
 
 - Spans carry names, timings and status, never values. Values belong in a trace, where `redact` strips them and a replay can use them. A span attribute can be redacted neither afterwards nor before a password in an input reaches the backend.
+- A step span carries its `path` as `effect.path`. A path is a position built from the flow's shape, not a value, so it fits the rule above. Without it, every attempt of a `Retry` and every branch built by one function was an identical span; a DX agent in October 2026 found a retry-heavy trace unreadable for that reason. The span name stays the Command's name, so names do not multiply.
 - `onStep` must `await op()` and return its result.
 - Nothing ahead of the run may throw, since serializing a cyclic input there once left flows unexecuted.
 

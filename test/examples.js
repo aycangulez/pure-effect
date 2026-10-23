@@ -789,7 +789,11 @@ describe('examples/opentelemetry-example.js', function () {
         assert.ok(!attributes.includes('user@test.com'), 'not even harmless-looking ones');
         assert.ok(!attributes.includes('done'), 'no Command output on spans');
         assert.deepEqual(Object.keys(spans[0].attributes), ['effect.flow'], 'the root span carries the flow name');
-        assert.deepEqual(Object.keys(spans[1].attributes), ['effect.type'], 'and a step span its type');
+        assert.deepEqual(
+            Object.keys(spans[1].attributes),
+            ['effect.type', 'effect.path'],
+            'and a step span its type and path'
+        );
     });
 
     it('should name the root span after the flow and open a child span per Command', async function () {
@@ -823,6 +827,30 @@ describe('examples/opentelemetry-example.js', function () {
         );
         assert.equal(spans[1].attributes['effect.type'], 'Parallel');
         assert.ok(spans.every((/** @type {any} */ s) => s.ended));
+    });
+
+    it("should put each step's path on its span, so Retry attempts and Parallel branches are told apart", async function () {
+        const { tracer, spans } = fakeTracer();
+        configureEffect(telemetryHooks({ tracer }));
+        let calls = 0;
+        const flaky = Command(function cmdFlaky() {
+            if (++calls === 1) throw new Error('timeout');
+            return 'ok';
+        });
+        const other = Command(function cmdOther() {
+            return 'other';
+        });
+        await runEffect(Parallel([Retry(flaky, { retries: 1, delay: 0 }), other]));
+        assert.deepEqual(
+            spans.map((/** @type {any} */ s) => [s.name, s.attributes['effect.path']]),
+            [
+                ['Effect Pipeline', undefined],
+                ['Parallel', '0p'],
+                ['cmdFlaky', '0p0/0r0/0'],
+                ['cmdOther', '0p1/0'],
+                ['cmdFlaky', '0p0/0r1/0']
+            ]
+        );
     });
 
     it("should mark a cancelled Parallel's span as ERROR, whether a branch failed or threw", async function () {

@@ -95,11 +95,16 @@ export function telemetryHooks(options = {}) {
      * replay suppresses I/O, so a hook that forgot to call it would silently stop every Command.
      * A Parallel's `op` returns its decision rather than throwing, even when a branch's own code threw,
      * so a cancelled one is marked from the decision.
+     *
+     * `effect.path` is the step's position in the flow, such as `3p2/0r1/0`, so a span tells one `Retry`
+     * attempt or `Parallel` branch from another, and matches the trace entry at the same path. A path
+     * comes from the flow's shape, never from its data.
      * @type {StepRunner}
      */
-    const onStep = (name, type, op) =>
+    const onStep = (name, type, op, path) =>
         tracer.startActiveSpan(name, async (span) => {
             span.setAttribute('effect.type', type);
+            span.setAttribute('effect.path', path);
             try {
                 const result = await op();
                 const decision = type === 'Parallel' ? /** @type {ParallelDecision} */ (result) : undefined;

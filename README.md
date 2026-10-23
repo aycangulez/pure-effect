@@ -1440,7 +1440,7 @@ Exact rules: [how errors come back](REFERENCE.md#how-errors-come-back).
 
 ### Replaying from your own storage
 
-`replayEffect` also accepts a resolver function instead of a trace, so you can replay from OpenTelemetry spans, a log pipeline, or a database table, not only from the JSON that `recorder` produces. Whatever you store needs each step's `path`, which `onStep` receives, and its result; the telemetry example records neither, since it keeps values off spans.
+`replayEffect` also accepts a resolver function instead of a trace, so you can replay from OpenTelemetry spans, a log pipeline, or a database table, not only from the JSON that `recorder` produces. Whatever you store needs each step's `path`, which `onStep` receives, and its result. The telemetry example puts the path on each span as `effect.path`, but not the result, since it keeps values off spans.
 
 ```js
 // A resolver answers one question: what did production get back for this step? Look the step up by its path, its
