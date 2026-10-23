@@ -216,6 +216,8 @@ A generator flow is written like `async` code, with `yield* step(...)` where `as
 Both forms build the same flow, so pick the one that reads better for the flow at hand; a codebase can mix them, and a step function works in either. A pipeline reads as a list of named steps, each showing the one value it receives. A generator reads like `async` code, and an earlier result stays in scope as a variable. Here the welcome email needs both the saved user and the workspace created for them:
 
 ```js
+import { commandName } from 'pure-effect';
+
 const onboardUser = effectGen(function* (input) {
     const user = yield* step(registerUserFlowGen(input));
 
@@ -228,8 +230,16 @@ const onboardUser = effectGen(function* (input) {
     return { user, workspace };
 });
 
-const onboarded = await runEffect(onboardUser(input));
-assert.equal(onboarded.value.workspace.ownerId, onboarded.value.user.id);
+// Hand each Command the answer you choose, as Testing Without Mocks shows; nothing runs.
+const user = { id: 1, ...input };
+const workspace = { id: 'ws_1', name: 'Personal' };
+const creating = onboardUser(input).next(null).next(user); // no user found, then the saved user
+assert.equal(commandName(creating), 'cmdCreateWorkspace');
+const welcoming = creating.next(workspace);
+assert.equal(commandName(welcoming), 'cmdSendWelcome');
+
+// The user saved two steps back is still in scope at the end.
+assert.deepEqual(welcoming.next({ sent: true }), Success({ user, workspace }));
 ```
 
 A simple rule: if a step needs a result from further back than the step before it, use a generator. You can mix the two, so the rest of the flow can stay a pipeline. As a pipeline, a named step passes the user and the workspace on together; see [Composing Larger Flows](#composing-larger-flows). In either form, keep decisions in step functions, as `registerUserFlowGen` does, so each can be tested on its own.
@@ -702,15 +712,19 @@ const claimEvent = (event) => {
 
 const handleEvent = (event) => effectPipe(requireOrderId, claimEvent)(event);
 
-assert.deepEqual(
-    await runEffect(handleEvent({ eventId: 'evt_1', orderId: 'order_1' })),
-    Success({ status: 'processed' })
-);
-assert.deepEqual(
-    await runEffect(handleEvent({ eventId: 'evt_seen', orderId: 'order_1' })),
-    Success({ status: 'duplicate' })
-);
-assert.deepEqual(await runEffect(handleEvent({ eventId: 'evt_2' })), Failure('Missing order ID.'));
+// Validation runs as the flow is built, so a missing order ID needs no I/O at all.
+assert.deepEqual(handleEvent({ eventId: 'evt_2' }), Failure('Missing order ID.'));
+
+const claim = handleEvent({ eventId: 'evt_1', orderId: 'order_1' });
+assert.equal(commandName(claim), 'cmdClaimEvent');
+
+// Seen before: the flow ends here with a result, not an error.
+assert.deepEqual(claim.next(false), Success({ status: 'duplicate' }));
+
+// First time: the rest of the flow runs.
+const marking = claim.next(true);
+assert.equal(commandName(marking), 'cmdMarkOrderPaid');
+assert.deepEqual(marking.next({ paid: true }), Success({ status: 'processed' }));
 ```
 
 When the rest of the flow is longer, the step returns it as a pipeline of its own, as `processOrder` does above. In a generator flow, `return` ends the flow anywhere, but keep the decision in a step all the same: `return yield* step(claimEvent(event))`.

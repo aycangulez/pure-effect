@@ -154,8 +154,8 @@ describe('README examples', function () {
             save: async () => ({ orderId: 'order_1' }),
             markPaid: async (/** @type {string} */ orderId) => ({ orderId, paid: true })
         },
-        // The ending-early example: an event log that has already seen one event.
-        eventLog: { claim: async (/** @type {string} */ eventId) => eventId !== 'evt_seen' },
+        // The ending-early example's event log, which its walk never calls.
+        eventLog: { claim: async () => true },
         // The try/catch translation's refund: a reservation that fails after the charge went through.
         warehouse: {
             reserve: async () => {
