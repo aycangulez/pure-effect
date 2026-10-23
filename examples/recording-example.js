@@ -19,23 +19,23 @@ import { configureEffect, recorder, Failure } from 'pure-effect';
 
 /**
  * @typedef {Object} RecordingOptions
- * @property {(trace: TraceLog) => Promise<void> | void} [sink] - Receives each kept trace, to write to S3 or a
+ * @property {((trace: TraceLog) => Promise<void> | void) | undefined} [sink] - Receives each kept trace, to write to S3 or a
  *           database. Hand slow writes to a queue rather than awaiting them inside a request.
  * @property {RecorderOptions['redact']} [redact] - Scrubs every value before it enters the
  *           trace: results, serialized errors, and the stored `initialInput` and `context`, told apart by `kind`.
  *           It receives a copy, so changing it in place never reaches the run. A value it throws on is left out of
  *           the trace, which marks where, as is one the recorder cannot copy.
- * @property {number} [maxEntries] - Caps trace length, 500 by default; the overflow is reported as `dropped`.
- * @property {boolean} [stack] - Records stack traces for thrown errors.
+ * @property {number | undefined} [maxEntries] - Caps trace length, 500 by default; the overflow is reported as `dropped`.
+ * @property {boolean | undefined} [stack] - Records stack traces for thrown errors.
  * @property {string | undefined} [version] - Commit or build id, attached to each trace, so `timeTravel` can warn
  *           when it replays a trace against another build.
- * @property {(result: SuccessState<any> | FailureState<any>, entries: TraceEntry[]) => boolean} [keep] - Decides which
+ * @property {((result: SuccessState<any> | FailureState<any>, entries: TraceEntry[]) => boolean) | undefined} [keep] - Decides which
  *           runs reach the sink, from the outcome and the trace's entries: by default a run that ended in a Failure
  *           or in which a Command threw, as a retried or dead-lettered one did. Return `true` to keep everything, or
  *           sample. A run whose own code threw is offered as a Failure carrying the thrown error.
- * @property {(error: unknown, flowName?: string) => void} [onSinkError] - Receives an error thrown by `keep` or
+ * @property {((error: unknown, flowName?: string) => void) | undefined} [onSinkError] - Receives an error thrown by `keep` or
  *           `sink`. Defaults to `console.error`.
- * @property {(message: string, flowName?: string) => void} [onWarning] - Receives a warning, once per flow, about a
+ * @property {((message: string, flowName?: string) => void) | undefined} [onWarning] - Receives a warning, once per flow, about a
  *           kept trace that will not replay as recorded: it has no input, `maxEntries` cut it short, some of its values
  *           could not be recorded, or some of its steps are named 'anonymous'. Defaults to `console.warn`.
  */

@@ -9,12 +9,12 @@ This file holds the rules. `DESIGN.md` holds the reasons: how each part works, w
 ```bash
 npm test                                          # run all tests
 npx mocha --grep "pattern"                        # run a single test by name; npx mocha test/replay.js runs one file
-npm run format                                    # Prettier over index.js, index.d.ts, examples/*.js, scripts/*.js, test/*.js, test/types.test-d.ts, README.md, REFERENCE.md, CLAUDE.md, DESIGN.md, CHANGELOG.md, CONTRIBUTING.md, RULES.md
+npm run format                                    # Prettier over index.js, index.d.ts, examples/*.js and *.d.ts, scripts/*.js, test/*.js, test/types.test-d.ts, README.md, REFERENCE.md, CLAUDE.md, DESIGN.md, CHANGELOG.md, CONTRIBUTING.md, RULES.md
 npx tsd                                           # type-level gate over test/types.test-d.ts
 npx tsc -p jsconfig.json                          # strict tsc over index.js, test/*.js, test/types.test-d.ts, examples/*.js, and scripts/*.js, reading index.d.ts as a consumer; the same config VS Code uses
 npm run test:fuzz                                 # test/fuzz.js over twenty times as many seeds as npm test runs; CI runs it
 npm run test:ts-minimum                           # compiles index.d.ts and test/types.test-d.ts with TypeScript 5.1, the oldest the declarations support
-npm run generate                                  # rewrites effectPipe's overloads in index.d.ts, and RULES.md from README.md, from the scripts in scripts/
+npm run generate                                  # rewrites effectPipe's overloads, RULES.md and examples/*.d.ts, from the scripts in scripts/
 npx esbuild index.js --minify --format=esm | gzip -9 | wc -c    # the size the README claims
 npx stryker run                                   # mutation testing: mutates index.js, runs the tests in test/ against each mutant; report in reports/mutation/
 npx stryker run --mutate "index.js:120-180"       # the same, limited to the lines a change touched
@@ -115,7 +115,7 @@ Pure Effect is a zero-dependency effect system for JavaScript implementing the "
 
 ### Reference integrations
 
-- `examples/opentelemetry-example.js` and `examples/recording-example.js` are reference code: they ship under `examples/`, but `exports` offers only `index.js`. Edit them only with `npm test`. Each exports a function that returns a configuration and one that installs it, and nothing happens on import. Both import the library as `'pure-effect'`, so a copy runs as it is. Observing a run never decides it.
+- `examples/opentelemetry-example.js` and `examples/recording-example.js` are reference code: they ship under `examples/`, but `exports` offers only `index.js`. Edit them only with `npm test`. Each exports a function that returns a configuration and one that installs it, and nothing happens on import. Both import the library as `'pure-effect'`, so a copy runs as it is. Each ships a `.d.ts` that `npm run generate` writes from its JSDoc, never edited by hand. Observing a run never decides it.
 - Telemetry spans carry names, timings and status, never values, and nothing ahead of a run may throw. Recording keeps one recorder per run in an `AsyncLocalStorage` scope; an error from `keep` or the sink goes to `onSinkError`, a field the recorder cannot copy is marked rather than reported, since `toTrace` never throws, and each warning fires once per flow.
 
 ## Proposing changes

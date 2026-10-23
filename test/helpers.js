@@ -148,17 +148,19 @@ export const exampleTypeErrors = (file) => typeErrorsOf(ts.createProgram([join('
  * The type errors a strict TypeScript project gets from `files`, each a file at the repository root, so it can import
  * the library or an example as a project that copied it would. One program checks them all.
  * @param {Record<string, string>} files - Each file's source, by its name
+ * @param {import('typescript').CompilerOptions} [options] - Options that differ from the strict project's
  * @returns {string[]}
  */
-export const consumerFilesTypeErrors = (files) => {
-    const host = ts.createCompilerHost(strictProject);
+export const consumerFilesTypeErrors = (files, options = {}) => {
+    const project = { ...strictProject, ...options };
+    const host = ts.createCompilerHost(project);
     const { getSourceFile, fileExists } = host;
     host.getSourceFile = (name, ...rest) =>
         name in files
             ? ts.createSourceFile(name, files[name], ts.ScriptTarget.ES2022)
             : getSourceFile.call(host, name, ...rest);
     host.fileExists = (name) => name in files || fileExists.call(host, name);
-    return typeErrorsOf(ts.createProgram(Object.keys(files), strictProject, host));
+    return typeErrorsOf(ts.createProgram(Object.keys(files), project, host));
 };
 
 /**

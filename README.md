@@ -217,7 +217,7 @@ const onboarded = await runEffect(onboardUser(input));
 assert.equal(onboarded.value.workspace.ownerId, onboarded.value.user.id);
 ```
 
-As a pipeline, a named step passes the user and the workspace on together; see [Composing Larger Flows](#composing-larger-flows). In either form, keep decisions in step functions, as `registerUserFlowGen` does, so each can be tested on its own.
+A simple rule: if a step needs a result from further back than the step before it, use a generator. You can mix the two, so the rest of the flow can stay a pipeline. As a pipeline, a named step passes the user and the workspace on together; see [Composing Larger Flows](#composing-larger-flows). In either form, keep decisions in step functions, as `registerUserFlowGen` does, so each can be tested on its own.
 
 The body can run more than once: for each `Retry` attempt and each run, as an `async` function does when called again, and when a test walks a second branch. So keep it to its own variables, and get `Date.now()` or a random ID from a Command, so a replay gets the recorded one. [REFERENCE.md](REFERENCE.md#what-runs-once-and-what-runs-again) covers when it runs again, how a `catch` or `finally` in it behaves when a step stops the flow, and the mistakes `effectGen` catches.
 
@@ -288,6 +288,8 @@ const inTurn = (step) => answers[step.name]?.shift();
 const { result } = await replayEffect(saveUserWithRetry(input), inTurn);
 assert.deepEqual(result, Success({ id: 1, ...input }));
 ```
+
+Each `shift()` takes an answer off its list, so a table is used up by the test that reads it: build a fresh one in each test. A replay from a resolver also has no `unreached` in its result, since that list compares a replay with a recording.
 
 The function is also asked about each `Parallel`, under the name `'Parallel'`; answering `undefined` lets its branches run as written. A step also carries its `path`, its position in the flow, which [Reading a trace](#reading-a-trace) explains; answer by path to tell apart two Commands with the same name.
 
@@ -457,7 +459,8 @@ Every branch can read the `Ask` context.
 **Options for batches.** The second argument can be either `next` or an options object:
 
 ```js
-// At most 5 branches in flight, for a gateway that rate limits.
+// At most 5 branches run at once, for a gateway that rate limits. A limit applies to its own Parallel only:
+// 3 batches at a time, each running 5 items at a time, is up to 15 calls at once.
 Parallel(subscriptions.map(billOne), { limit: 5 });
 
 // Every branch runs to completion, and `next` receives the outcomes rather than the values.
@@ -515,6 +518,8 @@ const fetchProfileUncancellable = (userId) => {
     return Command(cmdFetchProfile);
 };
 ```
+
+In TypeScript, write the parameter as optional: `(signal?: AbortSignal) =>`. Outside a `Parallel`, the function is called with no signal, so a required `signal: AbortSignal` does not compile.
 
 Exact rules: [`Parallel`](REFERENCE.md#paralleleffects-next-options).
 
@@ -630,7 +635,9 @@ const markOrderPaid = (event) => {
     return Command(cmdMarkOrderPaid, () => Success({ status: 'processed' }));
 };
 
-// Claiming the event decides: a duplicate ends the flow here, with a result rather than an error.
+// Claiming the event decides: a duplicate ends the flow here, with a result rather than an error. The claim must check
+// and record the event ID in one call, such as an insert that fails on a duplicate key; with a separate check and
+// write, two deliveries arriving together would both see the event as new.
 const claimEvent = (event) => {
     const cmdClaimEvent = () => eventLog.claim(event.eventId);
     return Command(cmdClaimEvent, (firstTime) => (firstTime ? markOrderPaid(event) : Success({ status: 'duplicate' })));
@@ -752,7 +759,7 @@ const listAllOrders = () => {
 
 To the flow, the whole loop is one step. A flow test cannot see inside it, so, like any Command's function, it is left to an integration test. This is rule 1 applied to a loop: the Command's function is the one call, `fetchAllOrders()`, and the loop lives in a function of its own that an integration test covers.
 
-The loop belongs in the flow only when the flow has to decide something on each pass, such as stopping at the first order that matches, or saving each page as it arrives. Then the Command's `next` returns the Command for the next page instead of a `Success`, until there are no more pages.
+The loop belongs in the flow only when the flow has to decide something on each pass, such as stopping at the first order that matches, or saving each page as it arrives. Then the Command's `next` returns the Command for the next page instead of a `Success`, until there are no more pages. A generator flow can write the same thing as an ordinary `while` loop, fetching one page per pass with `yield* step(...)`.
 
 Exact rules: [loops](REFERENCE.md#loops).
 
@@ -905,6 +912,8 @@ if (result.type === 'Failure') {
 ```
 
 The annotations are optional. Without them, the union holds whatever each step can pass to `Failure`, each error kept exactly as written, whether a string or an object, so `Failure('invalid_email')` needs no `as const`, and errors of different shapes join into one union with no type argument. A step that cannot fail, such as a Command without a `next`, adds nothing.
+
+If you do annotate a step, give the error type too. `Effect<User>` leaves the error as `unknown`, and `unknown` swallows the rest of the union, so the whole flow's error becomes `unknown`. TypeScript also treats an annotated step as able to return any kind of Effect, so code that calls it directly checks `result.type === 'Failure'` before reading `result.error`; an `else` after a check for `'Success'` is not enough.
 
 **A result's error also holds `Error`, for what a Command's function threw.** A Command whose function throws, or that an `onBeforeCommand` hook vetoes, ends the run with a `Failure` holding what was thrown, so `result.error` is typed as your steps' union plus `Error`, and so is each outcome a settled `Parallel` hands `next`. Check for it first with `result.error instanceof Error` and treat it as a server error; what remains is the union your steps declare, and TypeScript refuses to read a field of it until the check is there. One check covers the whole flow: catch inside a Command's function only what the flow can handle, and let the rest throw, which is also what lets `Retry` act on it.
 
@@ -1182,7 +1191,7 @@ When a Command's result changes shape, rename the Command. A trace matches it by
 
 ## Recording in Production
 
-`recordEffect` suits tests and scripts, where one call covers the whole run. To record an application without changing any call site, install the hooks once at startup. The two files imported below ship in the package's `examples` folder, `node_modules/pure-effect/examples`, and in the repository's [examples folder](https://github.com/aycangulez/pure-effect/blob/main/examples); copy them into your project. They are JavaScript checked with `// @ts-check` and ship no declarations, so a TypeScript project imports its copies with `allowJs` set in `tsconfig.json`. The telemetry example needs `@opentelemetry/api` installed. Its `startTelemetrySdk` also loads `@opentelemetry/sdk-node`, `@opentelemetry/exporter-trace-otlp-proto` and `@opentelemetry/sdk-trace-base`, so leave that function out of your copy if you start the SDK yourself.
+`recordEffect` suits tests and scripts, where one call covers the whole run. To record an application without changing any call site, install the hooks once at startup. The two files imported below ship in the package's `examples` folder, `node_modules/pure-effect/examples`, and in the repository's [examples folder](https://github.com/aycangulez/pure-effect/blob/main/examples); copy them into your project. In a TypeScript project, copy each one's `.d.ts` beside it, which types the import, so the project needs no `allowJs`. The telemetry example needs `@opentelemetry/api` installed. Its `startTelemetrySdk` loads `@opentelemetry/sdk-node`, `@opentelemetry/exporter-trace-otlp-proto` and `@opentelemetry/sdk-trace-base` only when it is called, so a project that starts the SDK itself needs none of them. If you start OpenTelemetry that way, also register a context manager, such as `AsyncLocalStorageContextManager` from `@opentelemetry/context-async-hooks`. Without one, each Command's span is a separate root instead of a child of the run's span.
 
 ```js
 import { randomUUID } from 'node:crypto';
@@ -1193,6 +1202,7 @@ import { telemetryHooks } from './opentelemetry-example.js';
 configureEffect(
     telemetryHooks(),
     recordingHooks({
+        // trace.flowName is the name passed as runEffect(flow, context, { flowName }), so pass one for every run.
         sink: (trace) => putObject(`traces/${trace.flowName}/${randomUUID()}.json`, JSON.stringify(trace)),
         // Attached to each trace, so timeTravel(flow, trace, { version }) warns when it replays one against another build.
         version: process.env.BUILD_ID,
@@ -1243,6 +1253,8 @@ Exact rules: [what `redact` gets](REFERENCE.md#what-redact-gets).
 ## Hooks
 
 Hooks see every run, and recording, replay and the telemetry example are built on them. There are three: `onRun` wraps a whole run, `onStep` wraps each Command and each `Parallel`, and `onBeforeCommand` runs before each Command and can veto it by throwing. A hook that only watches must `await` what it wraps and return its result; [`configureEffect`](REFERENCE.md#configureeffectconfigs) lists each hook's arguments.
+
+Use a veto as a guardrail, not as part of the flow's logic. A veto stops the whole run. The trace has no entry for the vetoed Command, so a replay of that run fails there. Put a decision the flow should handle in a step instead. Check a permission with `Ask` before the first Command writes anything, so a refusal leaves nothing half done. To turn off a supplier, read the switch in a Command and let its `next` fall back or return a `Failure`. The trace then records the switch, and a replay makes the same decision; [Errors no branch returned](REFERENCE.md#errors-no-branch-returned) shows one.
 
 `configureEffect` adds a layer of hooks for the whole process and returns a function that removes it. Removing a layer removes only that layer, even when others were installed after it, so a library can add and remove its own hooks without touching the application's:
 

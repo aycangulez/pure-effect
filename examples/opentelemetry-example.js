@@ -32,8 +32,8 @@ import { configureEffect } from 'pure-effect';
 
 /**
  * @typedef {Object} TelemetryOptions
- * @property {string} [tracerName] - Defaults to `'pure-effect'`.
- * @property {Tracer} [tracer] - Supply a tracer directly instead of resolving one by name. Useful in tests.
+ * @property {string | undefined} [tracerName] - Defaults to `'pure-effect'`.
+ * @property {Tracer | undefined} [tracer] - Supply a tracer directly instead of resolving one by name. Useful in tests.
  */
 
 /**
@@ -140,10 +140,12 @@ export function enableTelemetry(options) {
  * stay usable wherever `@opentelemetry/api` runs, without pulling the Node SDK in behind them.
  *
  * @param {Object} [options]
- * @param {string} [options.serviceName]
- * @param {string} [options.url] - OTLP HTTP endpoint.
- * @param {boolean} [options.handleSigterm] - Flush and exit on SIGTERM. Off by default, since
+ * @param {string | undefined} [options.serviceName]
+ * @param {string | undefined} [options.url] - OTLP HTTP endpoint.
+ * @param {boolean | undefined} [options.handleSigterm] - Flush and exit on SIGTERM. Off by default, since
  *          installing a process handler is the application's decision, not a library's.
+ * @returns {Promise<{ shutdown(): Promise<void> }>} The SDK, typed by what a caller uses, so a project that never
+ *          starts it needs no SDK types.
  */
 export async function startTelemetrySdk(options = {}) {
     const { serviceName = 'pure-effect', url = 'http://localhost:4318/v1/traces', handleSigterm = false } = options;

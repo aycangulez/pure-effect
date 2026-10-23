@@ -629,6 +629,7 @@ Under `settled`:
 
 - They ship in the package under `examples/`, through the `files` list, so an application can copy them from `node_modules`. But `exports` offers only `index.js`, so neither can be imported as part of the library.
 - Both have suites, so edit them only with `npm test`.
+- Each ships a declaration file beside it, which `scripts/example-declarations.js` writes from the example's JSDoc, and a test fails when one differs from what it writes. They shipped as JavaScript alone until 0.22.0, so a TypeScript project that copied one needed `allowJs`, which also type-checked the copy under its own settings: the telemetry example's SDK imports then failed a project without the SDK installed. A TypeScript reader raised it in every round of the October 2026 DX experiments. Generating the declarations keeps them in step with the code. `startTelemetrySdk`'s JSDoc declares its result as what a caller uses, `{ shutdown() }`, since the SDK's own type would put the SDK back in every declaration that imports it, and each optional field is declared `T | undefined`, as `index.d.ts`'s are.
 - Each exports a function that returns a configuration (`telemetryHooks`, `recordingHooks`), which is the form that composes, and one that installs it (`enableTelemetry`, `enableRecording`). Nothing happens on import.
 - Both import the library as `'pure-effect'`, which resolves to this repository through `package.json`'s `exports`, so a copy runs as it is in a project that installs the library. They imported `'../index.js'`, and every copy an evaluator made failed with `Cannot find module` until its import was edited. A test in each suite imports the file from such a project.
 
@@ -1000,6 +1001,8 @@ Nothing about the library lives in an agent's private memory. An agent once kept
 ### Mutation testing
 
 Mutation testing stays out of CI. Its survivors need reading rather than counting, so it sets no score to fail on, and a run is much slower than the rest of the gate. Run it after changing `index.js` or its tests, since a test that passes whatever the code does is invisible to every other check.
+
+`stryker.config.json` disables type checks only in `index.js`, the one file it mutates. By default Stryker adds `// @ts-nocheck` to every file it copies into its sandbox, the examples' declaration files included, so the test that compares them with the generator's output failed the initial run and no mutant ran.
 
 Its survivors are not a to-do list:
 

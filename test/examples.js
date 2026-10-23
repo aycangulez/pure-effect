@@ -16,7 +16,49 @@ import {
 } from '../index.js';
 import { enableTelemetry, telemetryHooks } from '../examples/opentelemetry-example.js';
 import { enableRecording, recordingHooks } from '../examples/recording-example.js';
-import { importCopiedExample, exampleTypeErrors, consumerTypeErrors } from './helpers.js';
+import { importCopiedExample, exampleTypeErrors, consumerTypeErrors, consumerFilesTypeErrors } from './helpers.js';
+import { exampleDeclarations } from '../scripts/example-declarations.js';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+describe("The examples' declaration files", function () {
+    // The examples shipped as JavaScript alone, so a TypeScript project that copied one needed allowJs, which also
+    // type-checked the copy under its own settings: the telemetry example's SDK imports failed a project without the
+    // SDK installed. In every round of the October 2026 DX experiments a TypeScript reader raised it.
+    it('should hold exactly the declarations the generator writes', async function () {
+        this.timeout(20000);
+        for (const [name, generated] of await exampleDeclarations()) {
+            assert.ok(
+                readFileSync(join('examples', name), 'utf8') === generated,
+                `examples/${name} differs from what scripts/example-declarations.js writes; run npm run generate`
+            );
+        }
+    });
+
+    it('should type both examples for a project without allowJs, naming no package beyond the API', function () {
+        this.timeout(20000);
+        const source = [
+            "import { configureEffect } from 'pure-effect';",
+            "import { recordingHooks, enableRecording } from './examples/recording-example.js';",
+            "import { telemetryHooks, enableTelemetry, startTelemetrySdk } from './examples/opentelemetry-example.js';",
+            'declare const fromConfig: { cap?: number; build?: string };',
+            'configureEffect(',
+            '    telemetryHooks({ tracerName: undefined }),',
+            '    recordingHooks({ sink: (trace) => void trace.flowName, maxEntries: fromConfig.cap, version: fromConfig.build })',
+            ');',
+            'const removers: (() => void)[] = [enableRecording(), enableTelemetry()];',
+            'void removers;',
+            'void startTelemetrySdk({ serviceName: undefined }).then((sdk) => sdk.shutdown());',
+            '// @ts-expect-error maxEntries is a number',
+            "recordingHooks({ maxEntries: 'many' });"
+        ].join('\n');
+        assert.deepEqual(consumerFilesTypeErrors({ 'consumer.ts': source }, { allowJs: false, checkJs: false }), []);
+        for (const name of ['recording-example.d.ts', 'opentelemetry-example.d.ts']) {
+            const text = readFileSync(join('examples', name), 'utf8');
+            assert.ok(!/sdk-node|exporter-trace|sdk-trace-base/.test(text), `${name} names an SDK package`);
+        }
+    });
+});
 
 describe('examples/recording-example.js', function () {
     beforeEach(() => configureEffect());

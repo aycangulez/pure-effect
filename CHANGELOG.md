@@ -2,11 +2,12 @@
 
 All notable changes to Pure Effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
-## [0.22.0] - 2026-10-22
+## [0.22.0] - 2026-10-23
 
 ### Added
 
 - `REFERENCE.md` ships the API reference and the exact rules, moved from the README, which now teaches each feature and links to it.
+- Each example ships a `.d.ts` beside it, so a TypeScript project copies it with its declarations and needs no `allowJs`.
 
 ### Changed
 
