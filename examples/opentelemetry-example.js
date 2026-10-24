@@ -32,8 +32,8 @@ import { configureEffect } from 'pure-effect';
 
 /**
  * @typedef {Object} TelemetryOptions
- * @property {string} [tracerName] - Defaults to `'pure-effect'`.
- * @property {Tracer} [tracer] - Supply a tracer directly instead of resolving one by name. Useful in tests.
+ * @property {string | undefined} [tracerName] - Defaults to `'pure-effect'`.
+ * @property {Tracer | undefined} [tracer] - Supply a tracer directly instead of resolving one by name. Useful in tests.
  */
 
 /**
@@ -66,11 +66,11 @@ export function telemetryHooks(options = {}) {
      * ends in a `finally`, so a thrown Command cannot leak one.
      * @type {RunWrapper}
      */
-    const onRun = (effect, pipeline, flowName) =>
+    const onRun = (op, flowName) =>
         tracer.startActiveSpan(flowName || 'Effect Pipeline', async (rootSpan) => {
             rootSpan.setAttribute('effect.flow', flowName || '');
             try {
-                const result = await pipeline();
+                const result = await op();
                 if (result.type === 'Failure') {
                     // Left out rather than set to undefined, which a project with exactOptionalPropertyTypes refuses.
                     const message = statusMessage(result.error);
@@ -95,11 +95,16 @@ export function telemetryHooks(options = {}) {
      * replay suppresses I/O, so a hook that forgot to call it would silently stop every Command.
      * A Parallel's `op` returns its decision rather than throwing, even when a branch's own code threw,
      * so a cancelled one is marked from the decision.
+     *
+     * `effect.path` is the step's position in the flow, such as `3p2/0r1/0`, so a span tells one `Retry`
+     * attempt or `Parallel` branch from another, and matches the trace entry at the same path. A path
+     * comes from the flow's shape, never from its data.
      * @type {StepRunner}
      */
-    const onStep = (name, type, op) =>
+    const onStep = (name, type, op, path) =>
         tracer.startActiveSpan(name, async (span) => {
             span.setAttribute('effect.type', type);
+            span.setAttribute('effect.path', path);
             try {
                 const result = await op();
                 const decision = type === 'Parallel' ? /** @type {ParallelDecision} */ (result) : undefined;
@@ -140,10 +145,12 @@ export function enableTelemetry(options) {
  * stay usable wherever `@opentelemetry/api` runs, without pulling the Node SDK in behind them.
  *
  * @param {Object} [options]
- * @param {string} [options.serviceName]
- * @param {string} [options.url] - OTLP HTTP endpoint.
- * @param {boolean} [options.handleSigterm] - Flush and exit on SIGTERM. Off by default, since
+ * @param {string | undefined} [options.serviceName]
+ * @param {string | undefined} [options.url] - OTLP HTTP endpoint.
+ * @param {boolean | undefined} [options.handleSigterm] - Flush and exit on SIGTERM. Off by default, since
  *          installing a process handler is the application's decision, not a library's.
+ * @returns {Promise<{ shutdown(): Promise<void> }>} The SDK, typed by what a caller uses, so a project that never
+ *          starts it needs no SDK types.
  */
 export async function startTelemetrySdk(options = {}) {
     const { serviceName = 'pure-effect', url = 'http://localhost:4318/v1/traces', handleSigterm = false } = options;

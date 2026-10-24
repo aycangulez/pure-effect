@@ -67,7 +67,9 @@ A Command's identity is `commandName(eff)`: a non-empty string `meta.name`, else
 - It is exported for tests. Before, tests read `cmd.name`, which is empty for an inline arrow named through `meta.name`, so such a step could be checked only by copying the rule into the test.
 - It throws an `EffectTypeError` for anything but a Command. A walk that reached a `Failure` otherwise reported a `TypeError` about reading `name` off `undefined`.
 - `meta.name` exists because `cmd.name` alone made recording depend on syntax. An inline arrow recorded as `'anonymous'`, and a minifier that mangles names renamed every step, both silently. `cmd.name` stays supported, and it is what the examples use.
+- A replay refuses a Command with no name of its own, neither `meta.name` nor a function name (`ownName`), with a `ReplayError` that names its path. A replay tells steps apart by name, so two unnamed Commands that traded places replayed as a `Success`, each handed the other's recorded result. `timeTravel` and the recording example only warned, and all four TypeScript readers in the sixth round of the October 2026 DX experiments still named it, one calling it a silent-corruption hazard; the README's own first rule showed an inline arrow. A refusal when the Command is built was weighed and dropped: it breaks live runs, refuses a shape the primitives otherwise accept, and misses a minifier, whose mangled names are not `'anonymous'`. Replay is the one place anonymity does harm, so it is refused there, which is also where a resolver-driven test runs, and a live run is unaffected. An explicit `meta.name: 'anonymous'` counts as a name, so a trace recorded while the Command was unnamed still replays. `replayEffect` hands the check to the interpreter as `unnamed`, as it hands `noContext`, and `runCommand` raises it before `onBeforeCommand`.
 - `meta` is not checked. It belongs to the user, whose hooks read whatever keys they put on it, so a `meta.name` that is not a non-empty string is ignored, and the Command falls back to `cmd.name`, rather than refused. A DX experiment in October 2026 flagged the silent fallback, and the maintainer kept it; the README states it.
+- `meta` can come second when a Command has no `next`: `Command(cmd, { name })`. `next` is a function, so an object in its place can only be `meta`. It went third only, after an `undefined`, and from September 2026 an object second was refused with a message naming that form, since a Command then ran and its run rejected with `effect.next is not a function`. Seven agents across three DX rounds in October 2026 still called `Command(cmd, undefined, { name })` awkward, most of them naming `Parallel` branches built by one function. Accepting it changes no working code, since the form threw. The types take `CommandMeta` in `next`'s place rather than adding a third overload, so a mistake in `next` still reports two overloads. A Command given `meta` both second and third throws.
 
 ## Composition and the flow's input
 
@@ -84,12 +86,13 @@ A Command's identity is `commandName(eff)`: a non-empty string `meta.name`, else
 
 ### The flow's input reaches `onRun`, not the outcome
 
-A `Failure` holds only its error, untrimmed, since a test and a developer both need all of it. No node and no outcome carries the input a flow was called with. `effectPipe` and `effectGen` record it in a private `WeakMap`, `flowInputs`, keyed on the root they return. `interpret` hands it to `onRun` as the fourth argument, which is where a hook-based recorder reads it, and `recordEffect` reads it there for its trace.
+A `Failure` holds only its error, untrimmed, since a test and a developer both need all of it. No node and no outcome carries the input a flow was called with. `effectPipe` and `effectGen` record it in a private `WeakMap`, `flowInputs`, keyed on the root they return. `interpret` hands it to `onRun` as its third argument, which is where a hook-based recorder reads it, and `recordEffect` reads it there for its trace.
 
 - The key is a copy of the root. The last step can return an object other flows share, such as a `Failure` kept in a constant, and keying on that would hand one run's input to another run's recorder.
 - A nested pipeline's root is a new object, built by the outer `effectPipe`, so `onRun` gets the input of the flow that was called rather than a sub-pipeline's.
 - Only `effectPipe` and `effectGen` record an input. A flow whose root is a bare `Command`, `Ask`, `Retry` or `Parallel` has none, so neither a hook-based recorder nor `recordEffect` records one. The README says to wrap such a flow in a one-step pipeline, since nothing can recover an input that only a closure holds.
-- Anything that wraps `onRun` passes `initialInput` on, as `chainHooks` does, or a recorder inside it stores no input.
+- Anything that wraps `onRun` passes `initialInput` and `context` on, as `chainHooks` does, or a recorder inside it stores neither.
+- A flow takes one input. `effectGen` refuses a generator function that declares more than one parameter, since only the first value is recorded and every run after the first builds the flow again from it, so a second parameter could only be `undefined`. In the second DX round, a webhook worker written as `function* (batch, { limit })` ran with the default `limit` and no error, and the agent found the cause only by bisecting with instrumented fakes. The check is on the definition, not the call: `list.map(flow)` passes an index and the list as well, and the loop recipe maps a list onto a flow, so refusing extra arguments at the call would break it. `effectPipe`'s steps are not checked the same way, since a step is often a helper shared with callers that pass an optional second argument; the README states the one-input rule instead. TypeScript already refuses a body with two parameters.
 
 Every `Failure` used to carry the input; [A `Failure` carries only its error](#a-failure-carries-only-its-error) gives the case for moving it.
 
@@ -189,7 +192,7 @@ Catching and retrying are alternatives. A miss caught inside the `cmd` function 
 Order:
 
 - Branches run through `runBounded`: `Promise.all` without a `limit`, and a pull-by-index worker pool with one, so results and paths follow array order either way.
-- Under `limit: 1` the pool is a sequential loop that stops at the first failure, unless `settled`. That is how the README's `Writing Loops` translates a `for` loop, in two parts: a step that gets the list, then a `Parallel` that maps over it. A test therefore pins the order branches start in, as well as the order results return.
+- Under `limit: 1` the pool is a sequential loop that stops at the first failure, unless `settled`. That is how the README's `Writing Loops` writes a `for` loop in a pipeline: a step that gets the list, then a `Parallel` that maps over it. A test therefore pins the order branches start in, as well as the order results return.
 
 Failure:
 
@@ -221,8 +224,16 @@ Undoing work: a fail-fast `Parallel` drops the values of the branches that succe
 ### The three hooks
 
 - `onStep(name, type, op, path)` wraps each Command's execution and each `Parallel`'s branches. It decides whether the Command runs at all, which is how replay suppresses I/O. So a hook that only watches must `await op()` and return its result; one that returns `undefined` after `op` returned a value makes the run reject.
-- `onRun(effect, op, flowName, initialInput)` wraps a whole run, once. `flowName` is `context.flowName`, or `''`, and `initialInput` is what the flow was called with when `effectPipe` built it. A hook that calls another passes both on. What it returns must be a `Success` or `Failure`, or the run rejects with a `TypeError`: `runEffect` once resolved with whatever the hook returned, so in a DX experiment a hook that dropped `op`'s result handed the caller `5`, and `result.type` read `undefined` with nothing reported. A hook may still return an outcome of its own without calling `op`, as a maintenance switch does. One that returned while the run was still going is waited for first, as `onStep`'s is, so the run does not go on after `runEffect` has rejected.
+- `onRun(op, flowName, initialInput, context)` wraps a whole run, once. `flowName` is the run's `callConfig.flowName`, or `''`, `initialInput` is what the flow was called with when `effectPipe` built it, and `context` is what `Ask` reads, `{}` for a run given none. A hook that calls another passes all three on. What it returns must be a `Success` or `Failure`, or the run rejects with a `TypeError`: `runEffect` once resolved with whatever the hook returned, so in a DX experiment a hook that dropped `op`'s result handed the caller `5`, and `result.type` read `undefined` with nothing reported. A hook may still return an outcome of its own without calling `op`, as a maintenance switch does. One that returned while the run was still going is waited for first, as `onStep`'s is, so the run does not go on after `runEffect` has rejected.
 - `onBeforeCommand(command, context)` runs before each Command, and throwing from it vetoes the Command as an abort.
+
+### `onRun` gets the context, and not the flow
+
+The maintainer's choice, made in October 2026, for 0.22.0. `onRun` was `onRun(effect, op, flowName, initialInput)`. It had no context, so the recording example copied the context in `onBeforeCommand`, the first hook that had it. A run that stopped before its first Command, such as one a permission check refused, was recorded with no context, and its replay stopped asking for one. The README advises checking permissions with `Ask` before any write, so following that advice produced exactly those runs. In two DX rounds, agents read the documented caveat and still met it only when a replay failed.
+
+`effect`, the flow's root, had no remaining use. The recording example once read the input off the root, as `effect.initialInput`, and nothing else did; once the input became its own argument, neither example nor the README read `effect`. So the context took its place rather than becoming a fifth argument. A single `run` object holding the name, input and context was weighed and dropped, since it bought little over four named positions.
+
+It breaks every `onRun` hook, since each later argument moves left. `onRun` hooks are few, mostly integrations like the two examples, and 0.22.0 already moved `flowName` out of the context, so the change lands in the release that already asks users to touch them.
 
 ### Layers
 
@@ -431,6 +442,7 @@ A throw from `onResolved` stops the replay, and `replayEffect` rejects with the 
 - It falls back to `String(v)` for a value `JSON.stringify` cannot print, such as a `BigInt` or a cycle.
 - It skips its unreached warning after a `TimeParadox` or `ReplayError`, since the error already names where the flow diverged.
 - It names the unreached steps rather than counting them, since the step a fix stopped issuing is usually the one under suspicion.
+- It warns that a trace holds no initial input only when the flow it rebuilds from `undefined` is not one `effectPipe` or `effectGen` built. A trace cannot tell an input of `undefined` from none, since JSON drops both, so it warned for every flow that takes no input, including the nightly job the README builds that way, and DX experiments found the false alarm in two rounds in October 2026. A root either builds is in `flowInputs`, whatever its input, so its recorder would have kept an input other than `undefined`, and one it could not copy is refused as unrecorded before the warning. `timeTravel` builds the flow before giving its warnings, to see who built it, and holds a throw from building until after them.
 - It warns when recorded steps are named `'anonymous'`, since a replay cannot tell two of them apart.
 - It warns when a trace holds no `initialInput`, since it rebuilds the flow from it, and a hook-based recorder is handed one only for a flow `effectPipe` built.
 
@@ -476,7 +488,7 @@ Deliberate type errors in `test/types.test-d.ts` are `// @ts-expect-error` direc
 - `runEffect` and `recordEffect` require the context when the flow's context type is not `unknown`, since the runtime would hand `Ask` an empty object. So does `replayEffect` given a `Resolver`, which holds no context; a trace carries its own.
 - The context's type comes from the flow alone; see [A run's context is never inferred from](#a-runs-context-is-never-inferred-from).
 - An error union survives without return annotations. Every function a flow is built from is typed from its whole return, so its `Failure`s join into a union, and a step that cannot return one contributes `never` (see below). `Failure` takes a `const` type parameter, so a string passed to it keeps its literal type with no `as const`.
-- The declared union leaves out what a Command's function throws, which `runEffect` returns as a `Failure` all the same. So the code handling a result needs one fallback, as the settled decision on thrown errors says.
+- A step's declared union leaves out what a Command's function throws, which `runEffect` returns as a `Failure` all the same, so a result adds `Error` to it and the code handling the result checks for that first, as [A result's error includes `Error`](#a-results-error-includes-error) says.
 
 ### `effectPipe`'s overloads
 
@@ -506,21 +518,26 @@ Every state's `next` is a method signature rather than a function-typed property
 
 #### `Parallel`'s non-settled overloads accept only `settled?: false`
 
-A `settled` known only as a `boolean` matched the overload that types `next` as values, while the runtime handed it outcomes. An options variable used only for its `limit` is typed `{ limit: number }`. They take `settled: undefined` too, which the runtime reads as not settled, and a `settled` typed `boolean | undefined` still matches neither kind of overload.
+A `settled` known only as a `boolean` matched the overload that types `next` as values, while the runtime handed it outcomes. An options variable used only for its `limit` is typed `{ limit: number }`. They take `settled: undefined` too, which the runtime reads as not settled, and a `settled` typed `boolean | undefined` still matches neither kind of overload. The error says `Type 'boolean' is not assignable to type 'false'`, since `N` has a default that any `next` fits (see Defaults below), and the last overload takes either a `next` or the options.
 
-#### `Command`'s first overload
+#### `Parallel`'s last overload takes either a `next` or the options
 
-`Command` has a first overload for the default `next`. Without it, a `Command(fn)` inside an annotated step inferred its value as `unknown`, and `Retry(Command(fn))` failed to compile in the shape the README recommends.
+When a call matches no overload, TypeScript 7 reports only the last one, and TypeScript 5 does the same once more than three take the call's number of arguments. The last overload took a `next`, so in the October 2026 DX experiments a two-argument call with an options mistake, such as `Parallel(branches, { settled: flag })` with `flag` a `boolean`, was reported as `'settled' does not exist in type '(values: [number]) => Effect<...>'`. The fix in 0.22.0 for a three-argument call did not reach it. The last overload's second parameter is now a type parameter constrained to either a `next` that takes the values or the non-settled options, so the error names what is wrong with the argument actually passed. It takes no third argument: it took the options there too until a later DX round, and a three-argument call under `settled: true` whose `next` returned a plain value was then reported against its `next`, typed for the values, as `Types of parameters 'outs' and 'values' are incompatible` rather than `Type 'number' is not assignable to type 'AnyEffect'`. A three-argument call is reported against the overloads above it, as it was before, and passing the options twice is still refused. It accepts only calls the overloads above it accept, so no call is typed by it, and its return type is loose for that reason. A test in `test/parallel.js` pins the messages, since `tsd` sees only whether a call fails.
 
-It takes only `R`, since without a `next` a Command cannot fail and reads no context, so an error or context parameter would have nothing to infer.
+#### `Command` without a `next`
+
+`Command`'s exact overload defaults `T` to `R`, so a `Command(fn)` with no `next`, whose `N` takes its default, passes its function's result through as its value, can fail with nothing, and reads no context. Typed any other way, a `Command(fn)` inside an annotated step inferred its value as `unknown`, and `Retry(Command(fn))` failed to compile in the shape the README recommends.
+
+The case had its own first overload until the October 2026 DX experiments. That overload declared `next?: undefined`, so every mistake in a `next` was reported against it as well, as `not assignable to parameter of type 'undefined'`, a third report above the one that named the mistake.
 
 #### `Command`'s last overload
 
 `Command` ends with an overload that keeps the defaults of 0.15: `R` for the value and `unknown` for the error.
 
-- Given some type arguments, TypeScript infers none of the rest, so they take their defaults. The `never` defaults refused `Command<User | null>(fetchJson, (u) => (u ? Success(u) : Failure('not_found')))`, the usual way to type a JSON response, which had compiled.
+- Given some type arguments, TypeScript infers none of the rest, so they take their defaults. The exact overload's error defaults to `never`, which refused `Command<User | null>(fetchJson, (u) => (u ? Success(u) : Failure('not_found')))`, the usual way to type a JSON response, which had compiled. A `next` that keeps the value and cannot fail fits the exact overload's defaults, so it contributes `never` to the union rather than `unknown`.
 - A call with no type arguments matches an exact overload first and keeps its exact types, which is why the fallback comes last.
 - `Ask` and `Retry` have no such overload, deliberately. Partial type arguments are rare there, and the extra overload turned the two-line error for their commonest mistake, a callback returning a plain value, into a report on every overload. So there, a step that can fail needs every type argument or none.
+- Nor does `Ask` have one that catches `Ask<AppContext>((ctx) => ...)`, which reads the context type as the value and leaves `ctx` typed `unknown`; a DX experiment in October 2026 lost time to it. A last overload whose function must return a hint was tried: the commonest mistake then carried the hint too, on TypeScript 7 and 5.9, and `'ctx' is of type 'unknown'` stayed, since the first overload types the function's parameter. The hover and the README's typed-context section say what the first type argument is instead.
 - `Parallel` has none either, since its type parameter is now the branches, and `effectPipe` never accepted partial type arguments.
 - The README recommends writing the Command function's result type instead, which keeps every other type inferred.
 
@@ -551,7 +568,8 @@ The constraint:
 Defaults:
 
 - `N` comes last and defaults to `Effect<T, E, Ctx>`, so explicit type arguments, such as the README's `Ask<Product, 'not_found', AppContext>`, type a call exactly as before, and no overload was added.
-- `effectPipe`'s `R1` to `Rn` and `Parallel`'s `N` default to `never`, which reads as no value, no error and an `unknown` context. A step cast to `any` leaves nothing to infer, and the constraint alone made its context `never`, so `runEffect` demanded one.
+- `effectPipe`'s `R1` to `Rn` default to `never`, which reads as no value, no error and an `unknown` context. A step cast to `any` leaves nothing to infer, and the constraint alone made its context `never`, so `runEffect` demanded one.
+- `Parallel`'s `N` defaults to `Effect<any, never, unknown>`, which keeps the error `never` and the context `unknown` for the same reason. It defaulted to `never` until the October 2026 DX experiments. When no overload matches, TypeScript reports each candidate with `N` at its default, since it infers nothing from a `next` whose parameter it has not yet typed, so every candidate reported `next`'s result as not assignable to `never`, and a `settled` typed `boolean`, the real mistake, went unmentioned. With a default any `next` fits, the error names the option.
 
 What it buys, and what it costs:
 
@@ -572,21 +590,20 @@ It takes a `CommandState`, not an `Effect`, since the runtime throws for anythin
 - It wraps the bare `Ctx`, as in `ReplayOptions<CheckedContext<Ctx>>`, never a whole options type. `T extends any` resolves at once when `T` is an object type such as `ReplayOptions<Ctx>`, so wrapping the options let the context be inferred through them as before.
 - A `Resolver` passed with no context, for a flow that reads one, reports that a `Resolver` is not a trace, since the trace overload is the only one whose argument count fits. The overloads cannot steer that message, so `replayEffect`'s doc comment says a `Resolver` needs the context passed.
 
-#### `RunContext` adds `flowName`
+#### A run's name is not part of its context
 
-`RunContext<Ctx>` is the context `runEffect`, `recordEffect`, `replayEffect` and `timeTravel` take: the flow's context and an optional `flowName`, which names a run in traces and spans.
+`flowName` names a run for `onRun`, and so in traces and spans. It is `runEffect`'s `callConfig.flowName` and `recordEffect`'s `flowName` option, and `replayEffect` hands `onRun` the trace's own `flowName`, so a replay under `hooks: true` names its run as production did. `configureEffect` refuses it, since a name belongs to one run.
 
-- A literal carrying `flowName` passes the excess property check that refused it for a typed context. The checkout experiment added `flowName?` to its context type to get past it, and the README's own `recordEffect` example did not compile against a typed flow.
-- It stays `unknown` for a flow that reads none, since `unknown & { flowName?: string }` is that object type alone and would refuse every other key.
-- It adds `flowName` only to an object, since `runEffect(Success(1), undefined, config)` infers the context from that `undefined`, and `undefined & { flowName?: string }` is `never`.
+It was `context.flowName` from the telemetry release until 0.22.0. So `Ask` and `onBeforeCommand` saw it, every trace stored it twice, a flow that read no context needed one to be named, and a user's own `flowName` field named the run. Its type needed `RunContext<Ctx>`, which added `flowName` to a typed context so a literal carrying it passed the excess property check, kept `unknown` for a flow that reads none, and added nothing to `undefined`. In three rounds of DX experiments in October 2026 a newcomer passed it as `recordEffect`'s option first. Supporting both places was weighed and dropped: it kept every cost above, added a precedence rule, and would have broken a second time when the context form went. A `flowName` left in a context is ordinary data now, which a typed context refuses as an unknown key and an untyped one carries silently, so the changelog marks the move as breaking.
 
 #### Hook and recording types
 
 - `CommandInterceptor` is a union of an async and a plain function type, since in JavaScript a JSDoc `@type` on an async function must declare a `Promise` return.
-- `StepRunner`'s `path` and `onRun`'s `flowName` and `initialInput` are declared present, since the runtime always passes them. So a wrapper that calls another hook without passing one on does not compile.
+- `StepRunner`'s `path` and `onRun`'s `flowName`, `initialInput` and `context` are declared present, since the runtime always passes them. So a wrapper that calls another hook without passing one on does not compile.
 - `redact`'s value is `any`, since every redact spreads or reads it.
 - A step's `type`, in `StepRunner` and `ReplayStep`, is `'Command' | 'Parallel'`, the only two the runtime passes, so a hook can switch on it; a hook that declares it `string` still fits. `TraceEntry`'s `unrecorded` stays `string`, though the recorder writes only `'redact'` or `'copy'`, since a trace imported from a JSON file widens it to `string` and has to stay a `TraceLog`, and a replay reports a cause it does not know as not recorded.
-- Every optional option and hook field, and a context's `flowName`, is declared `T | undefined`, since the runtime treats `undefined` as left out (`checkOptions`, and the rule that only `undefined` leaves a hook out). Under `exactOptionalPropertyTypes` a field declared `T` refuses a value typed `T | undefined`, which is how a value read from configuration is typed, so `Retry(cmd, { retries: config.retries })` did not compile, and neither did a project that copied the recording example, which passes `redact` and `stack` on as it gets them. Only `version` took `undefined`, and it was checked by hand. `tsd` now runs with the flag (`package.json`), so each field is pinned, while `test:ts-minimum` and `tsc -p jsconfig.json` compile the same type tests without it. A test compiles each example under the flag as well, since users copy the examples into their own projects; the telemetry example set a span status `message` to `undefined`, which OpenTelemetry's `SpanStatus` refuses there.
+- Every optional option and hook field, `flowName` included, is declared `T | undefined`, since the runtime treats `undefined` as left out (`checkOptions`, and the rule that only `undefined` leaves a hook out). Under `exactOptionalPropertyTypes` a field declared `T` refuses a value typed `T | undefined`, which is how a value read from configuration is typed, so `Retry(cmd, { retries: config.retries })` did not compile, and neither did a project that copied the recording example, which passes `redact` and `stack` on as it gets them. Only `version` took `undefined`, and it was checked by hand. `tsd` now runs with the flag (`package.json`), so each field is pinned, while `test:ts-minimum` and `tsc -p jsconfig.json` compile the same type tests without it. A test compiles each example under the flag as well, since users copy the examples into their own projects; the telemetry example set a span status `message` to `undefined`, which OpenTelemetry's `SpanStatus` refuses there.
+- `Retry`'s `onExhausted` broke that rule until October 2026. One overload required it to be a function and the other did not declare it, so `onExhausted: undefined`, or a fallback chosen at runtime, matched neither, though the runtime treats it as left out. A DX agent split one `Retry` into two to get past it. The overload without a fallback now takes `onExhausted?: ((error) => N) | undefined` and keeps `RetryExhaustedError` among its errors, since the fallback may be absent, rather than a third overload that would lengthen the error for a mistaken option. `N` comes after `Ctx` there, so type arguments given as `<T, E, Ctx>` keep their meaning.
 - Left as they were: `onExhausted`, whose presence changes the error type, as `settled`'s changes what `next` receives; and the trace's data types and `CommandMeta`, which are data rather than options.
 - `recordEffect`'s trace types its input `unknown`, since a flow's type holds no input, as a trace read back from storage does. It was typed from the input argument until 0.20.0, which was wrong whenever `redact` changed the input's shape or the trace marked it `unrecorded`. A test replaying from memory rebuilds the flow from the input it already holds.
 
@@ -614,7 +631,7 @@ Under `settled`:
 
 `RetryState`'s and `ParallelState`'s `options` are `Readonly`, since the constructors keep a frozen copy of what they checked. Declared changeable, they let TypeScript accept `node.options.retries = 0`, an assignment that throws when it runs, in strict mode. Two `@ts-expect-error` lines pin it.
 
-- `Step<X>` carries `X` under a `unique symbol` declared only in `index.d.ts`, and `index.d.ts` ends with `export {}`, so only declarations marked `export` are public. Without that line a declaration file exports every top-level declaration: the symbol showed up as a value the runtime lacks, which the `Declaration parity` test caught, and the `Gen*` helpers and `CheckedContext` were importable, which made them API by accident. An optional `__effect` property stood in for the symbol until then, and showed in editor completion. Its iterator is typed as yielding the `Step` itself, which never happens at runtime either; together they are how `effectGen` reads each step's Effect type out of the body's yield type. The generator's `next` type is `unknown`, since each `yield*` takes its result type from its own `Step`, which one `next` type could not express. `GenContext` drops a step whose context is `unknown` before intersecting, since `unknown` in a union would make the whole context `unknown` and erase every requirement, which is what the spike's first version did. `yield step(x)` without the star compiles, since a `Step` satisfies the yield type; the runtime refuses it. A returned step or Promise compiles. A check that refused them, by intersecting the body with a conditional type on its return, also refused every generic helper, such as `<T>(effect: Effect<T>) => effectGen(function* () { return yield* step(effect) })`, since TypeScript cannot resolve a conditional on a type parameter; the runtime refuses both with an `EffectTypeError`. TypeScript drops a member of a union that is a subtype of another, and a generator's yield type is such a union, so of two steps whose types differ only in the context they read, one disappeared, and with it, often, the wider requirement: a flow compiled without context it needed. `Step` therefore also carries its context as a function parameter, which TypeScript compares the opposite way, so it can drop only the step that reads less. `ContextNeeds` boxes each step's context as `{ context: C }` before intersecting, since intersecting the members of a union context one by one turned `A | B` into `A & B`, which can be `never`. An `any` return counts as a plain value (`IsAny`), since it would otherwise match both branches of every conditional and turn the error union into `any`; a `Failure` returned beside it is still absorbed, since `any` absorbs the union of returns.
+- `Step<X>` carries `X` under a `unique symbol` declared only in `index.d.ts`, and `index.d.ts` ends with `export {}`, so only declarations marked `export` are public. Without that line a declaration file exports every top-level declaration: the symbol showed up as a value the runtime lacks, which the `Declaration parity` test caught, and the `Gen*` helpers and `CheckedContext` were importable, which made them API by accident. An optional `__effect` property stood in for the symbol until then, and showed in editor completion. Its iterator is typed as yielding the `Step` itself, which never happens at runtime either; together they are how `effectGen` reads each step's Effect type out of the body's yield type. The generator's `next` type is `unknown`, since each `yield*` takes its result type from its own `Step`, which one `next` type could not express. `effectGen` checks what a body yields with a conditional type, `Y extends Step<any, any> ? Y : YieldStarStep`, rather than a constraint on `Y`. A bare `yield effect` broke the constraint with a seven-line error about `IteratorResult` and `exactOptionalPropertyTypes` that never mentioned `step`; it still runs to seven lines, but its last says the yielded value lacks a property named `write yield* step(effect)`, which TypeScript 5.1 shortens to naming `YieldStarStep`. Both TypeScript readers in the October 2026 DX experiments hit it. Unlike the check on a body's return described above, it keeps generic helpers compiling, since a step of a type parameter is still a `Step`, so TypeScript resolves the conditional at once. `effectGen`'s error union is written out in its return type rather than named by an alias, since TypeScript showed an alias unexpanded, as `GenError<Step<...>>`, in hovers and errors for some flows, and the October 2026 DX experiments could not read the union from it. `GenContext` drops a step whose context is `unknown` before intersecting, since `unknown` in a union would make the whole context `unknown` and erase every requirement, which is what the spike's first version did. `yield step(x)` without the star compiles, since a `Step` satisfies the yield type; the runtime refuses it. A returned step or Promise compiles. A check that refused them, by intersecting the body with a conditional type on its return, also refused every generic helper, such as `<T>(effect: Effect<T>) => effectGen(function* () { return yield* step(effect) })`, since TypeScript cannot resolve a conditional on a type parameter; the runtime refuses both with an `EffectTypeError`. TypeScript drops a member of a union that is a subtype of another, and a generator's yield type is such a union, so of two steps whose types differ only in the context they read, one disappeared, and with it, often, the wider requirement: a flow compiled without context it needed. `Step` therefore also carries its context as a function parameter, which TypeScript compares the opposite way, so it can drop only the step that reads less. `ContextNeeds` boxes each step's context as `{ context: C }` before intersecting, since intersecting the members of a union context one by one turned `A | B` into `A & B`, which can be `never`. An `any` return counts as a plain value (`IsAny`), since it would otherwise match both branches of every conditional and turn the error union into `any`; a `Failure` returned beside it is still absorbed, since `any` absorbs the union of returns.
 
 ## Reference integrations
 
@@ -622,6 +639,7 @@ Under `settled`:
 
 - They ship in the package under `examples/`, through the `files` list, so an application can copy them from `node_modules`. But `exports` offers only `index.js`, so neither can be imported as part of the library.
 - Both have suites, so edit them only with `npm test`.
+- Each ships a declaration file beside it, which `scripts/example-declarations.js` writes from the example's JSDoc, and a test fails when one differs from what it writes. They shipped as JavaScript alone until 0.22.0, so a TypeScript project that copied one needed `allowJs`, which also type-checked the copy under its own settings: the telemetry example's SDK imports then failed a project without the SDK installed. A TypeScript reader raised it in every round of the October 2026 DX experiments. Generating the declarations keeps them in step with the code. `startTelemetrySdk`'s JSDoc declares its result as what a caller uses, `{ shutdown() }`, since the SDK's own type would put the SDK back in every declaration that imports it, and each optional field is declared `T | undefined`, as `index.d.ts`'s are.
 - Each exports a function that returns a configuration (`telemetryHooks`, `recordingHooks`), which is the form that composes, and one that installs it (`enableTelemetry`, `enableRecording`). Nothing happens on import.
 - Both import the library as `'pure-effect'`, which resolves to this repository through `package.json`'s `exports`, so a copy runs as it is in a project that installs the library. They imported `'../index.js'`, and every copy an evaluator made failed with `Cannot find module` until its import was edited. A test in each suite imports the file from such a project.
 
@@ -630,13 +648,14 @@ Under `settled`:
 It opens a span per run in `onRun`, a child span per Command in `onStep`, and one per `Parallel` around its branches' spans.
 
 - Spans carry names, timings and status, never values. Values belong in a trace, where `redact` strips them and a replay can use them. A span attribute can be redacted neither afterwards nor before a password in an input reaches the backend.
+- A step span carries its `path` as `effect.path`. A path is a position built from the flow's shape, not a value, so it fits the rule above. Without it, every attempt of a `Retry` and every branch built by one function was an identical span; a DX agent in October 2026 found a retry-heavy trace unreadable for that reason. The span name stays the Command's name, so names do not multiply.
 - `onStep` must `await op()` and return its result.
 - Nothing ahead of the run may throw, since serializing a cyclic input there once left flows unexecuted.
 
 ### Recording
 
-- It keeps one recorder per run in an `AsyncLocalStorage` scope. `onRun` packages the input it is handed before the run, the first `onBeforeCommand` copies the context, and `onStep` passes `path` on.
-- An error from `keep` or the sink goes to `onSinkError`, by default `console.error`, rather than replacing the run's outcome. The wiring copies the input in `onRun` ahead of the run and the context in `onBeforeCommand`, where a throw would stop the run or veto the Command, so it relies on `toTrace` never throwing. A field it cannot copy is marked `unrecorded` on the trace and warned about, rather than left out and reported to `onSinkError` with nothing on the trace to say so.
+- It keeps one recorder per run in an `AsyncLocalStorage` scope. `onRun` packages the input and the context it is handed before the run, and `onStep` passes `path` on.
+- An error from `keep` or the sink goes to `onSinkError`, by default `console.error`, rather than replacing the run's outcome. The wiring copies the input and the context in `onRun` ahead of the run, where a throw would stop the run before it started, so it relies on `toTrace` never throwing. A field it cannot copy is marked `unrecorded` on the trace and warned about, rather than left out and reported to `onSinkError` with nothing on the trace to say so.
 - `keep` is handed the run's outcome and its trace's entries, and by default keeps a run that ended in a `Failure` or in which a Command threw. It kept only Failures until October 2026, and DX experiments lost, round after round, the run they most wanted to replay: a delivery that went to its dead-letter fallback, a charge that went through on a retry, a batch whose items failed, all ending in a `Success`. A thrown step is already marked `threw: true`, so the wider default costs one pass over the entries and catches the first two. A settled batch's failures are returned, not thrown, so only a `keep` that reads the result can see them, which the README shows. Keeping every run was weighed and left, since it puts every production run in storage.
 - A run that rejects because its own code threw is offered to `keep` as a `Failure`, and sent to the sink before the rejection is rethrown, since those are the runs most worth replaying. `recordEffect` rejects without its trace, since in a test or a script the error is already in front of the caller.
 
@@ -730,6 +749,17 @@ A signal read that way makes the function throw, which is an I/O fault. So a `Re
 
 Cleanup for a run, a transaction included, is a try/finally around `runEffect` in the shell. A generator flow's `finally` runs code that needs no steps; a `yield*` there while the flow stops is refused.
 
+### No undo node
+
+A node that runs an undo when a later part of the flow stops was spiked in October 2026, after a DX experiment's booking flow left two holds in place when a later Command threw. A throw from a Command's function never reaches its `next`, so an undo written there does not run, as an `async` function that releases a hold only after checking the charge's answer does not run its release when the charge throws.
+
+Two forms were weighed:
+
+- Nested, `Undo(step, revert, rest)`: the revert covers the part of the flow it wraps, as `Retry` covers its attempts. The spike took about 25 lines and 212 bytes, replayed its undo with no I/O, in a cancelled branch too, and typed the value, error union and context on TypeScript 5.1. It read unnaturally: two holds were two levels of nesting, and every step that needed a hold sat inside a callback.
+- Flat, `Undo(step, revert)`: the revert covers what runs after it. It read like `async` code, but its reach had no good end. Reaching to the end of the run, a failure past the point of no return, such as a failed event publish after a committed write, undoes the write. Reaching to the end of the flow it is written in needs that end to be visible to the interpreter, and `effectPipe` merges a nested pipeline into the flow around it.
+
+It was dropped because every form either hid how far the undo reaches or read unnaturally, and each brought back the reaction to a failure from elsewhere that [No catch](#no-catch) rejects, though without recovering from it. The behaviour it would have fixed follows from `next` receiving only a result, so it is not a documented sharp edge: an undo after a later step's throw is caught inside that Command's function, as the README's `Which Errors Are Data` shows. The spike also ran the revert in a cancelled branch, and let a failing revert replace the original failure; a revival would have to decide both again.
+
 ### Nested pipelines for dependent values are a TypeScript cost only
 
 In JavaScript a step can close over anything in scope. Threading the value is what keeps a typed pipeline checked.
@@ -763,16 +793,15 @@ Newcomers from `async`/`await` get the README's `Coming from async/await` sectio
 
 `effectGen` is the generator form this section's spike lacked. It advances its body live, so code in it runs once per run rather than once per step; it copies no answers, keeping them as a shared list; and it keeps the error union in TypeScript. It also keeps the two habits `flow(fn)` needed guards against loud: an `async function*` is refused, and a `catch` that recovers rejects the run.
 
-### No loop helper; a loop is taught as two parts
+### No loop helper; a loop is a `for` loop in a generator flow
 
 `Loop(start, pass)`, whose pass returned `Again(state)` to go round again or took a separate `while` condition, was proposed and dropped before it was built. It removed the self-call from a loop whose passes need each other's answers. But it read no more like the loop a newcomer from `async`/`await` would write than the recursion it replaced, and `Again` would have been a seventh node type for `chain` and the interpreter to carry.
 
-The README splits a loop the way its `async` version is usually written: a step that gets the list, then `Parallel(list.map(f), { limit: 1 })`.
+The README teaches a loop as a generator flow's `for` loop with `yield*`, the loop a reader coming from `async`/`await` already writes; each pass gets its own path in the trace. It once led with a pipeline's two parts, a step that gets the list and then `Parallel(list.map(f), { limit: 1 })`, and showed the `for` loop after; leading with the `for` loop made the section shorter as well as closer to that code.
 
-- When getting the list is itself a loop, as with cursor paging, that loop stays an ordinary `async` function called from one Command, which keeps the Command's function a single call. The README states the cost: one trace step holding the whole list, a `Retry` that starts again from the first page, and a loop no flow test can see.
-- Recursion through a Command's `next` gets one sentence, for a loop that has to decide something on each pass. The recursive paging example was dropped, since recursion is the hardest thing in a flow to follow.
-
-A generator flow loops with `for` and `yield*`, as `async` code does; each pass gets its own path in the trace.
+- The `Parallel` stays, for a pipeline and for what a `for` loop cannot do: running items at the same time, and keeping going past a failure, since a `catch` in a generator body cannot recover.
+- Cursor paging is a generator `do`/`while` loop, one page per step, so the trace records each page, a `Retry` repeats only the page that failed, and a flow test walks the pages. Before, that loop stayed an ordinary `async` function called from one Command, at the cost of one trace step holding the whole list, a `Retry` that started again from the first page, and a loop no flow test could see. A long paging loop holds little memory since a run an execution owns keeps no earlier answers ([Generator flows, judged by least surprise](#generator-flows-judged-by-least-surprise)).
+- Recursion through a Command's `next` gets one sentence, for paging in a pipeline. The recursive paging example was dropped, since recursion is the hardest thing in a flow to follow.
 
 ### A `TimeParadox` after a flow changes shape is the design
 
@@ -836,7 +865,7 @@ Saving lines is not enough: `pair`, `Loop`, `flow(fn)`, `tap` and `observe` each
 
 `commandName` passed, since a test checking which Command a step is had to restate the identity rule, and a copy drifts from the one traces use.
 
-`assertCommand`, the README's TypeScript walking helper, stays a snippet readers copy. Shipped, it would have to throw its own error rather than use `node:assert`, since the library is not Node-only, and it would make the library part of how tests are written.
+`assertStep` and `assertCommand`, the README's TypeScript walking helpers, stay a snippet readers copy. Shipped, it would have to throw its own error rather than use `node:assert`, since the library is not Node-only, and it would make the library part of how tests are written.
 
 ### The conveniences stay
 
@@ -867,22 +896,25 @@ It once held two algorithms, running live and reproducing a recorded cancellatio
 
 Splitting the modes into `decideByTiming` and `reproduceCancellation` was tried and folded back: following one `Parallel` went through seven functions, with the same four arguments handed down unchanged.
 
-### Thrown errors stay out of the declared error union
+### A result's error includes `Error`
 
-A `Failure` can also carry what a Command's function threw, what an `onBeforeCommand` veto threw, or, in a replay, a `ReplayError` or `TimeParadox`. The types name none of them.
+A `Failure` can also carry what a Command's function threw, what an `onBeforeCommand` veto threw, or, in a replay, a `ReplayError` or `TimeParadox`. `runEffect`, `recordEffect` and `replayEffect` type a result's error as the union the flow's steps declare plus `Error`, and a settled `Parallel` types each outcome's error the same way. A step's own `Effect<T, E, Ctx>` keeps only `E`, so the union a pipeline or a generator flow collects is unchanged until it reaches a result.
 
-Declaring results as `FailureState<E | Error>` was weighed and dropped:
+The types named none of the thrown values until 0.22.0. `FailureState<E | Error>` had been weighed and dropped, on the grounds that whatever reaches the caller undeclared needs one fallback where the result is handled, and that widening every result would make every handler spell out a case it treats generically anyway. The README told readers to write that fallback, as `const thrown: unknown = result.error; if (thrown instanceof Error)`, before a `switch` ending in `never`. But nothing required it: the `switch` compiled without it, a flow that declared no failures typed its error `never`, and a settled batch of plain Commands typed its `Failure` branch `never` while that branch could hold only thrown errors. All four TypeScript readers in the fifth round of the October 2026 DX experiments named it as a type that lies by omission, one as the worst thing about the library.
 
-- An application handles the `Failure`s its steps return.
-- A Command's function catches what the flow can handle and returns it as data, and the rest is left to throw so `Retry` can act on it.
-- Whatever reaches the caller undeclared needs one fallback where the result is handled, not one per Command.
-- Widening every result type would make every handler spell out a case it treats generically anyway.
+Adding `Error` to the result types makes the compiler require the fallback the earlier decision called for: a handler cannot read a domain error's field until `instanceof Error` has narrowed the `Error` away, which also replaces the copy into `unknown`. Handlers spell out the case once, which the README already told them to. A spike measured it before it was adopted: the README's handler and the four experiments' shells compiled with the check in place on TypeScript 5.1, 5.9 and 7; a domain error shaped like `{ name, message }` survives the narrowing; an `Error` subclass narrows with its own `instanceof`; the code of the four experiments broke in four lines, two of them a handler whose signature now names the `Error` its body already answered with a 500; and a replay's error casts to `ReplayFault` directly, which TypeScript refused for a flow whose errors are objects.
 
-`ReplayFault` types a replay's error for a test that casts to it, and leaves the result types alone. It was added after a TypeScript DX experiment in October 2026 could only read a `TimeParadox` as `unknown`. It is a union on `name`, each member declaring only the fields the runtime sets on it: a `TimeParadox` names the two sides in `expected` and `actual` and never sets `command`, and a `ReplayError` sets `command` or `field` and compares nothing. One shape with every field optional said `command` was the Command the flow asked for, which a `TimeParadox` never carries, as the next experiment found.
+The alternatives were weighed then as well:
 
-The README says to write that fallback and to treat it as a server error, and its checkout handler answers a thrown error with a 500 rather than a 400.
+- `FailureState<E | unknown>` is `FailureState<unknown>`, and loses the union.
+- Wrapping a thrown value, as in `{ thrown: error }`, would change what the `Failure` holds at runtime, and put provenance in a value user code holds.
+- An `isThrown(result)` helper could only test `instanceof Error`, as user code does, since the runtime keeps no provenance, so it fails the bar for a shipped helper.
 
-It holds for a settled `Parallel`'s outcomes too, though in a batch of plain Commands the `Failure` branch holds only thrown errors, so its error is typed `never`. Typing settled outcomes' errors `unknown` was weighed in October 2026 and dropped, to keep one rule for every result.
+What it costs: a thrown value that is not an `Error` is typed `Error`, a returned `Failure(new MyError())` lands on the `Error` side unless its own `instanceof` comes first, and under a `Retry`, where a throw becomes `RetryExhaustedError`, the `Error` a handler must check for can come only from a veto.
+
+`ReplayFault` types a replay's error for a test that casts to it. It was added after a TypeScript DX experiment in October 2026 could only read a `TimeParadox` as `unknown`. It is a union on `name`, each member declaring only the fields the runtime sets on it: a `TimeParadox` names the two sides in `expected` and `actual` and never sets `command`, and a `ReplayError` sets `command` or `field` and compares nothing. One shape with every field optional said `command` was the Command the flow asked for, which a `TimeParadox` never carries, as the next experiment found.
+
+The README's checkout handler answers a thrown error with a 500 rather than a 400.
 
 ### A `Failure` carries only its error
 
@@ -942,14 +974,13 @@ How it runs them:
 
 - Every `js` block is extracted and executed as one program, with the Quick Start's definitions in scope, and everything outside the library stubbed, so every `assert` the README prints is live.
 - Each block sees what the blocks above it in its section defined. Its scope sits inside the previous one's rather than sharing it, since two independent examples in one section both declare `result`.
-- Node's `node:test` mocks are the exception to stubbing. `Coming from async/await` sets a mocked test of the `async` version beside the flow's test of the same branch, because the code alone is the comparison `async`/`await` wins, and the tests are where the small functions pay off. The mocked test should pass against that function as it would for a reader.
 - It checks that blocks are found at all, since a regex that stopped matching would turn every check into a pass over nothing. It also checks that each block parses, and that every name imported from `'pure-effect'` is exported.
 
 What that means for writing them:
 
 - A fenced `js` block must be real JavaScript. A value shape goes in a `text` block, and a placeholder is written out rather than `...`.
 - A block that reaches for something new outside the library needs a stub in that suite.
-- A `ts` block is not run. The `assertCommand` helper in `Testing Without Mocks` was compiled and run by hand against a TypeScript version of the Quick Start, so check it the same way when the types it touches change.
+- A `ts` block must be real TypeScript. The `README TypeScript examples` suite compiles each one as a file of its own in a strict project with `exactOptionalPropertyTypes`, as a reader's copy would, with every library export in scope and a stub, under the block's heading, for what it reaches for outside the library. The blocks held `{ ... }` where a function's body went until the October 2026 DX experiments, in which TypeScript readers rated the docs lowest of anything, and named examples that did not build among the reasons. They compile rather than run: one file each keeps their names apart, and their behaviour is the `js` examples'.
 
 What a test can see: a tree walk checks which Command comes next, and a step's `next` is where the piped value can be seen. So `assert.deepEqual(ensureEmailAvailable(input).next(null), Success(input))` is what catches a guard that resolves to `Success(true)`, which a walk misses. The one thing that cannot be asserted on is the body of a Command's function, since reading the values it closes over means calling it, so keep those bodies to a single call.
 
@@ -980,6 +1011,8 @@ Nothing about the library lives in an agent's private memory. An agent once kept
 ### Mutation testing
 
 Mutation testing stays out of CI. Its survivors need reading rather than counting, so it sets no score to fail on, and a run is much slower than the rest of the gate. Run it after changing `index.js` or its tests, since a test that passes whatever the code does is invisible to every other check.
+
+`stryker.config.json` disables type checks only in `index.js`, the one file it mutates. By default Stryker adds `// @ts-nocheck` to every file it copies into its sandbox, the examples' declaration files included, so the test that compares them with the generator's output failed the initial run and no mutant ran.
 
 Its survivors are not a to-do list:
 
@@ -1025,6 +1058,8 @@ The maintainer's choice, made in October 2026. A message names the change in one
 
 Someone upgrading reads each section from the top and may stop before its end, so the entry most likely to need a change in their code, or to change what their runs do, comes first. A breaking change leads, then what affects the most users. The order entries were written in says nothing to that reader, and the October 2026 `Unreleased` section had put a check on misspelt hooks above the change to every `Failure`'s shape.
 
+Among breaking changes, one that fails silently comes first. A break the compiler or a runtime error reports announces itself the first time the reader builds or runs their code, so missing its entry costs them little. A silent one only shows as wrong behaviour, so its entry is the only warning they get. In 0.22.0, moving `flowName` out of the context left a JavaScript run unnamed with no error, so it comes before `Error` joining the result's error type, which reaches more users but fails to compile. The new `onRun` order is reported too: an old hook's `op()` call throws a `TypeError`, since `op` now holds the run's name. Within each group, the change more users meet comes first. A published section stays as it was released, since readers and tools may already link to its entries.
+
 ### Changelog entries are short and plain
 
 The maintainer's choice, made in October 2026. Entries had grown into paragraphs that retold each fix, and the longest in 0.20.0 ran to six sentences. Someone upgrading scans for what changed and what they must do, so an entry is a plain sentence and at most one more; why the code changed belongs in this file. Every entry had opened with a bold sentence, and bold on every line marks nothing, so only a label such as `Breaking:` is bold, beside the Added, Changed and Fixed headings. Earlier sections were left as published, and the rule holds from 0.20.1 on.
@@ -1033,7 +1068,7 @@ The maintainer's choice, made in October 2026. Entries had grown into paragraphs
 
 Write each paragraph and list item as one line, and let the editor wrap it, since hard breaks turn a one-word edit into a reflowed paragraph. `proseWrap: never` unwraps anything that arrives wrapped, but write it unwrapped in the first place. Code blocks and table rows are untouched.
 
-### No jargon in the README
+### No jargon in the README or `REFERENCE.md`
 
 A reader meets the library there, and should not need vocabulary from functional programming, from the interpreter's internals, or from `CLAUDE.md` and this file.
 
@@ -1051,13 +1086,19 @@ The names the library exports are not jargon (`Command`, `Retry`, `Parallel`, `R
 - No catch, not no catch combinator.
 - Runs at the same time, not concurrently, wherever nothing turns on the distinction.
 
-`grep -rniE "thunk|combinator|monad|kleisli|effect tree|fan-in|fan-out|short-circuit|cooperative|imperative shell|arity|stamp" README.md` should print nothing.
+`grep -rniE "thunk|combinator|monad|kleisli|effect tree|fan-in|fan-out|short-circuit|cooperative|imperative shell|arity|stamp" README.md REFERENCE.md` should print nothing.
 
 Abort is kept out because JavaScript gives it a meaning of its own: `AbortSignal` cancels, and in a study where agents built projects from the published package alone, all four that ran with no instructions flagged the README's "a `Failure` means abort" as clashing with it. `CLAUDE.md` and this file keep it for the kind of failure, where it is defined. The same study found "walk" used for two things and defined for neither, so a term the README coins is defined where it first appears, and means one thing.
 
 A precise term may stay if the plain words follow it in the same breath, as `idempotent (safe to run more than once)` does in the Retry section. A term that needs a gloss every time it appears is one the README should not use. The precise words are fine everywhere else: `CLAUDE.md`, this file, JSDoc, code comments and test names.
 
-### The README's API Reference is a reference
+### The README teaches, and `REFERENCE.md` holds the rules
+
+`README.md` teaches each feature: how it works, what to do, one example, and a closing link to its rules. `REFERENCE.md` holds the API and every exact rule, edge case and "what happens when", by feature. A rule's full statement lives there once. Three kinds of short restatement stay, each with its own job and each linking to the full statement: the twelve Rules for Writing a Flow (and so `RULES.md`), a Limitations entry, and a guide's advice on what to do, such as "wrap only the Command that fails". What leaves a guide is the precise detail behind the advice: exactly which functions get the signal, how a fallback is typed, how each kind of entry is recorded. Both files ship, and `REFERENCE.md` keeps the API entries' headings, so their anchors survived the move.
+
+The split reversed the rule below, in October 2026. The maintainer, trying to understand how a feature worked, kept meeting reference-level detail in the middle of its explanation, such as three paragraphs on exactly which Command functions receive the `AbortSignal` straight after cancellation is explained. Both DX rounds that month named the README's size as their top complaint, eight runs of eight, at 129,329 bytes. A survey found about 18 KB of reference prose outside the API Reference, about 7 KB of it inside guide sections, and four rules stated three times each, in a guide, the API Reference and Limitations: the signal rule, naming Commands, a trace keeping data rather than objects, and `Retry` repeating what it wraps. With nothing saying which statement was the authoritative one, a reader could not tell where to look.
+
+The rule it replaced, as it stood until then:
 
 Each entry gives the signature, what it returns, and one line per option, parameter or rule. Where a guide section already teaches something, the entry links to it rather than teaching it again. Explanations live in the guide sections, and reasons in this file.
 
@@ -1065,9 +1106,15 @@ The entries had grown into prose that re-taught the guides, a quarter of the REA
 
 ### The README's orientation sections stay short
 
-The Core and the other orientation sections are a few plain sentences. In September 2026 a rewrite of the How It Works section added a stated mental model, a walk-through diagram and a three-bullet list. It removed some repetition and was more complete, and it was dropped as too dense. In an orientation section readability wins over completeness: repeating an idea stated elsewhere is fine there, and density is not. In October 2026 How It Works was removed, once the Quick Start became five steps: each of its three paragraphs was then said by a step, The Core or the section after it, so the whole section was repetition.
+The Core and the other orientation sections are a few plain sentences. In September 2026 a rewrite of the How It Works section added a stated mental model, a walk-through diagram and a three-bullet list. It removed some repetition and was more complete, and it was dropped as too dense. In an orientation section readability wins over completeness: repeating an idea stated elsewhere is fine there, and density is not. In October 2026 How It Works was removed, once the Quick Start became five steps: each of its three paragraphs was then said by a step, The Core or the section after it, so the whole section was repetition. Later that month a sixth step, Replay it, closed the Quick Start, so a reader who stops there sees replay working, the library's headline feature, rather than only a link to a section near the end of the README.
 
 So a gap gets a sentence or two, shown as exact wording before anything is rewritten, and moving something is proposed apart from changing it.
+
+### Docs are written for a reader who skims
+
+The maintainer's choice, made in October 2026. In a DX round where four agents built projects from the published package, all four named the README's length, and they read it by jumping to the section they needed. What they missed had been stated once, in a section about something else: reading an operator's switch in a Command rather than vetoing it, under errors no branch returned in `REFERENCE.md`, and the recording example taking the context at the first Command, stated only in its comment. Rules repeated where they apply, such as wrapping only the Command in `Retry`, were followed.
+
+So a section works on its own. It says where its code comes from, and it reminds the reader of each hazard that applies to it, in a sentence or a code comment that links to the full statement in `REFERENCE.md`, which still lives there once. Cutting length is not the goal; a reminder at the point of use is worth its sentence. Prose is written in short sentences, one idea each, since dense sentences were what the maintainer kept asking to have rewritten.
 
 ### No em dashes
 

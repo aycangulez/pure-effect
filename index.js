@@ -96,8 +96,8 @@ const Failure = (error) => ({ type: 'Failure', error });
  * @param {(signal?: AbortSignal) => Promise<any>|any} cmd - The function that does the I/O. Inside a `Parallel`, a
  *        function that declares a parameter receives an `AbortSignal` that fires when a sibling branch fails. A
  *        parameter with a default value does not count, so `nanoid(size = 21)` keeps its default.
- * @param {(result: any) => Effect} [next] - Receives the result of `cmd`. Defaults to `Success(result)`; `null`
- *        counts as omitted.
+ * @param {((result: any) => Effect) | CommandMeta} [next] - Receives the result of `cmd`. Defaults to
+ *        `Success(result)`; `null` counts as omitted. An object in its place is `meta`, for a Command with no `next`.
  * @param {CommandMeta} [meta] - Passed to `onBeforeCommand`. A non-empty string `meta.name` is the Command's identity;
  *        any other `name` is ignored.
  * @returns {CommandState}
@@ -112,15 +112,23 @@ const Command = (cmd, next, meta) => {
             cmd
         );
     }
-    if (next != null && typeof next !== 'function') {
+    // `next` is a function, so an object second can only be `meta`, as in `Command(fn, { name })`.
+    const metaSecond = isOptionsObject(next);
+    if (metaSecond && meta != null) {
         throw malformed(
-            isOptionsObject(next)
-                ? "Command's second argument is next, and meta goes third: Command(fn, undefined, { name: 'chargeCard' })."
-                : `Command's next must be a function, got ${describeArgument(next)}.`,
-            next
+            "Command takes meta second or third, not both: Command(fn, { name: 'chargeCard' }) or Command(fn, next, { name: 'chargeCard' }).",
+            meta
         );
     }
-    return { type: 'Command', cmd, next: next ?? ((/** @type {any} */ result) => Success(result)), meta };
+    if (next != null && !metaSecond && typeof next !== 'function') {
+        throw malformed(`Command's next must be a function, got ${describeArgument(next)}.`, next);
+    }
+    // Cast: a `typeof` check narrows `CommandMeta`, an object type, to `Function` rather than leaving it out.
+    const nextFn =
+        typeof next === 'function'
+            ? /** @type {(result: any) => Effect} */ (next)
+            : (/** @type {any} */ result) => Success(result);
+    return { type: 'Command', cmd, next: nextFn, meta: metaSecond ? /** @type {CommandMeta} */ (next) : meta };
 };
 
 /**
@@ -134,9 +142,19 @@ const commandName = (eff) => {
     if (eff?.type !== 'Command') {
         throw malformed(`commandName expects a Command, got ${describeArgument(eff)}.`, eff);
     }
+    return ownName(eff) ?? 'anonymous';
+};
+
+/**
+ * The name a Command was given, as `meta.name` or its function's name, or `undefined` for one `commandName` calls
+ * `'anonymous'`, which a replay refuses (`runCommand`).
+ * @param {CommandState} eff
+ * @returns {string | undefined}
+ */
+const ownName = (eff) => {
     const meta = eff.meta;
     const named = isObject(meta) ? meta.name : undefined;
-    return typeof named === 'string' && named !== '' ? named : eff.cmd.name || 'anonymous';
+    return typeof named === 'string' && named !== '' ? named : eff.cmd.name || undefined;
 };
 
 /**
@@ -284,6 +302,12 @@ const isBoolean = (value) => typeof value === 'boolean';
  * @returns {boolean}
  */
 const isFunction = (value) => typeof value === 'function';
+
+/**
+ * @param {any} value
+ * @returns {boolean}
+ */
+const isString = (value) => typeof value === 'string';
 
 /**
  * An object that can hold options or meta: not an array, and not an Effect passed in the wrong place.
@@ -1073,6 +1097,15 @@ const effectGen = (body) => {
             body
         );
     }
+    // Checked on the definition rather than the call, so `list.map(flow)`, which also passes an index, still works.
+    if (body.length > 1) {
+        throw malformed(
+            `effectGen's generator function declares ${body.length} parameters, but a flow takes one input: the ` +
+                'first value is recorded and the flow is built again from it alone. Pass several values as one ' +
+                'object, as in function* ({ batch, limit }) { ... }.',
+            body
+        );
+    }
     /** @param {any} input */
     const build = (input) => {
         const flow = { body, input };
@@ -1099,11 +1132,12 @@ const effectGen = (body) => {
 const defaultStepRunner = async (name, type, op) => await op();
 
 /**
- * Wraps one run. `initialInput` is what the flow was called with, when `effectPipe` built it.
- * @typedef {(effect: Effect, op: function, flowName?: string, initialInput?: any) => Promise<any>} RunWrapper
+ * Wraps one run. `initialInput` is what the flow was called with, when `effectPipe` built it, and `context` is what
+ * `Ask` reads.
+ * @typedef {(op: function, flowName?: string, initialInput?: any, context?: any) => Promise<any>} RunWrapper
  */
 /** @type RunWrapper */
-const defaultRunWrapper = async (effect, op, flowName, initialInput) => await op();
+const defaultRunWrapper = async (op) => await op();
 
 /** @typedef {(command: CommandState, context?: any) => Promise<any>} CommandInterceptor */
 /** @type CommandInterceptor */
@@ -1144,15 +1178,17 @@ const checkConfiguration = (config, source, prefix, known) => {
 /**
  * @typedef {Object} EffectConfiguration
  * @property {StepRunner} [onStep] - Wraps each Command's execution, and each Parallel's branches.
- * @property {RunWrapper} [onRun] - Wraps a whole run once, and is handed the flow's input when `effectPipe` built it.
+ * @property {RunWrapper} [onRun] - Wraps a whole run once, and is handed the run's context and the flow's input when
+ *           `effectPipe` built it.
  * @property {CommandInterceptor} [onBeforeCommand] - Runs before each Command; a throw vetoes it.
  */
 
 /**
  * A per-call configuration. With `inherit: true` (the default) its hooks merge over the installed wiring, global
- * outermost; with `inherit: false` that wiring is ignored.
+ * outermost; with `inherit: false` that wiring is ignored. `flowName` names the run for `onRun`, and so in traces and
+ * spans.
  *
- * @typedef {EffectConfiguration & { inherit?: boolean }} CallConfiguration
+ * @typedef {EffectConfiguration & { inherit?: boolean, flowName?: string }} CallConfiguration
  */
 
 /** @type {EffectConfiguration[]} */
@@ -1236,8 +1272,8 @@ const chainHooks = (...configs) => {
     }
     if (runs.length) {
         merged.onRun = runs.reduceRight(
-            (inner, outer) => (effect, op, flowName, initialInput) =>
-                outer(effect, () => inner(effect, op, flowName, initialInput), flowName, initialInput)
+            (inner, outer) => (op, flowName, initialInput, context) =>
+                outer(() => inner(op, flowName, initialInput, context), flowName, initialInput, context)
         );
     }
     if (interceptors.length) {
@@ -1412,12 +1448,14 @@ const delayFor = (requested, signal) =>
 
 /**
  * What every part of the interpreter needs from one run: the context `Ask` reads, whether retries wait, and the two
- * hooks a step calls, resolved from the installed wiring and the call's own configuration. `noContext` is set only by
- * `replayEffect`, for a replay that has no context, and builds the fault an `Ask` raises there.
+ * hooks a step calls, resolved from the installed wiring and the call's own configuration. `noContext` and `unnamed` are
+ * set only by `replayEffect`: they build the fault an `Ask` raises in a replay with no context, and the one a Command
+ * with no name raises in any replay.
  * @typedef {{
  *   context: any,
  *   fastRetry: boolean,
  *   noContext: (() => Error) | undefined,
+ *   unnamed: ((path: string) => Error) | undefined,
  *   onStep: StepRunner,
  *   onBeforeCommand: CommandInterceptor
  * }} Runtime
@@ -1425,28 +1463,39 @@ const delayFor = (requested, signal) =>
 
 /**
  * The interpreter, which `runEffect` and `replayEffect` share, so a replay cannot drift from a run. Only a replay
- * sets `fastRetry`, which waits no time between retry attempts, and `noContext`.
+ * sets `fastRetry`, which waits no time between retry attempts, `noContext` and `unnamed`.
  *
  * @param {Effect} effect
  * @param {any} [context]
  * @param {CallConfiguration} [callConfig]
  * @param {boolean} [fastRetry]
  * @param {() => Error} [noContext]
+ * @param {(path: string) => Error} [unnamed]
  * @returns {Promise<SuccessState | FailureState>}
  */
-const interpret = async (effect, context = {}, callConfig = {}, fastRetry = false, noContext = undefined) => {
+const interpret = async (
+    effect,
+    context = {},
+    callConfig = {},
+    fastRetry = false,
+    noContext = undefined,
+    unnamed = undefined
+) => {
     if (!isOptionsObject(callConfig)) {
         throw new TypeError(`runEffect's callConfig must be an object, got ${describeConfiguration(callConfig)}.`);
     }
-    checkConfiguration(callConfig, "runEffect's callConfig", 'callConfig.', [...hookNames, 'inherit']);
+    checkConfiguration(callConfig, "runEffect's callConfig", 'callConfig.', [...hookNames, 'inherit', 'flowName']);
     // An Ask would read its fields off a number or a string as undefined.
     if (!isContext(context)) {
         throw new TypeError(`runEffect's context must be an object, got ${describeArgument(context)}.`);
     }
-    const { inherit = true, ...local } = callConfig;
+    const { inherit = true, flowName = '', ...local } = callConfig;
     // Not coerced, so `'false'` cannot inherit everything.
     if (typeof inherit !== 'boolean') {
         throw new TypeError(`callConfig.inherit must be true or false, got ${describeArgument(inherit)}.`);
+    }
+    if (!isString(flowName)) {
+        throw new TypeError(`callConfig.flowName must be a string, got ${describeArgument(flowName)}.`);
     }
     const base = inherit ? globalConfig : {};
     const resolved = Object.keys(local).length ? chainHooks(base, local) : base;
@@ -1455,13 +1504,14 @@ const interpret = async (effect, context = {}, callConfig = {}, fastRetry = fals
         context,
         fastRetry,
         noContext,
+        unnamed,
         onStep: resolved.onStep || defaultStepRunner,
         onBeforeCommand: resolved.onBeforeCommand || defaultCommandInterceptor
     };
     const onRun = resolved.onRun || defaultRunWrapper;
     // An I/O fault becomes a plain Failure here, where every outcome leaves.
     const calls = trackCalls(async () => asOutcome(await execute(runtime, effect)));
-    const returned = await onRun(effect, calls.op, context?.flowName || '', flowInputs.get(effect));
+    const returned = await onRun(calls.op, flowName, flowInputs.get(effect), context);
     if (isOutcome(returned)) return returned;
     // As with onStep, a hook that returned while the run went on is judged once the run has finished.
     const unwaited = calls.running;
@@ -1877,6 +1927,8 @@ const runCommand = async (runtime, command, signal, cmdPath) => {
             cmd
         );
     }
+    // A replay tells steps apart by name, so two unnamed Commands that traded places would each get the other's answer.
+    if (runtime.unnamed && ownName(command) === undefined) throw runtime.unnamed(cmdPath);
     const cmdName = commandName(command);
     // Only inside a Parallel, and only to a function that declares a parameter. A parameter with a default
     // value does not count toward `length`, so `nanoid(size = 21)` keeps its default; a plain first parameter
@@ -1922,9 +1974,9 @@ const runCommand = async (runtime, command, signal, cmdPath) => {
  * fires once per call, around every Retry attempt.
  *
  * @param {Effect} effect - The Effect tree returned by a pipeline
- * @param {any} [context] - Optional context object. Passed to Ask continuations and the Command Interceptor.
+ * @param {any} [context] - Optional context object. Passed to Ask continuations, `onRun` and the Command Interceptor.
  * @param {CallConfiguration} [callConfig] - Per-call configuration, added to the wiring `configureEffect`
- *        installed unless `inherit: false`, which ignores that wiring for this run.
+ *        installed unless `inherit: false`, which ignores that wiring for this run, and the run's `flowName`.
  * @returns {Promise<SuccessState | FailureState>}
  */
 const runEffect = (effect, context, callConfig) => interpret(effect, context, callConfig);
@@ -2330,21 +2382,26 @@ const packTrace = (settings, meta, entries, dropped) => {
  * application, give each run its own recorder, as examples/recording-example.js does.
  *
  * @param {Effect} effect - The flow, called with its input
- * @param {RecorderOptions & { context?: any, version?: string }} [options] - Recorder options, plus the
- *        `context` given to `runEffect` (stored so `Ask` can be replayed) and a build id
+ * @param {RecorderOptions & { context?: any, flowName?: string, version?: string }} [options] - Recorder options,
+ *        plus the `context` given to `runEffect` (stored so `Ask` can be replayed), the run's name and a build id
  * @returns {Promise<{ result: SuccessState | FailureState, trace: TraceLog }>}
  */
 const recordEffect = async (effect, options = {}) => {
     // Before the options, so a call written the old way, with the flow function and its input, is named as that.
     asEffect(effect, 'The flow');
-    checkOptions(options, 'recordEffect', { context: contextOptionRule, version: null, ...recorderOptionRules });
-    const { context, version, ...recorderOptions } = options ?? {};
+    checkOptions(options, 'recordEffect', {
+        context: contextOptionRule,
+        flowName: [isString, 'a string'],
+        version: null,
+        ...recorderOptionRules
+    });
+    const { context, flowName, version, ...recorderOptions } = options ?? {};
     const rec = recorder(recorderOptions);
     // Before the run, so a Command that writes to the input or the context cannot rewrite what the trace received.
     const initialInput = flowInputs.get(effect);
-    const head = rec.toTrace({ initialInput, flowName: context?.flowName, context, version });
+    const head = rec.toTrace({ initialInput, flowName, context, version });
     // Merged over the global wiring, so recording inside an instrumented application keeps its spans.
-    const result = await runEffect(effect, context, { onStep: rec.onStep });
+    const result = await runEffect(effect, context, { onStep: rec.onStep, flowName });
     const { dropped, trace } = rec.toTrace();
     // A context nobody passed holds nothing to redact, so it is recorded as the empty one the run got, unredacted.
     return { result, trace: { ...head, ...(context === undefined && { context: {} }), dropped, trace } };
@@ -2881,11 +2938,30 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
                       { field: 'context' }
                   )
             : undefined;
+    /** @param {string} path */
+    const unnamed = (path) =>
+        replayError(
+            `A replay reached a Command with no name at path '${path}'. A replay tells steps apart by name, so two ` +
+                "unnamed Commands that traded places would each be handed the other's recorded result. Name its " +
+                'function, as in const cmdLoadUser = () => db.loadUser(id), or set meta.name; to replay a trace ' +
+                "recorded while it was unnamed, set meta.name to 'anonymous'.",
+            { path, command: 'anonymous' }
+        );
 
     // A replay fault becomes a Failure here, outside the flow, where nothing can absorb it.
     let result;
     try {
-        result = await interpret(effect, context, { onStep: hook.onStep, inherit: hooks }, fastRetry, noContext);
+        // The recorded name, so an onRun hook a replay runs under `hooks` names the run as production did.
+        const recordedName = traceLog?.flowName;
+        const flowName = isString(recordedName) ? recordedName : undefined;
+        result = await interpret(
+            effect,
+            context,
+            { onStep: hook.onStep, inherit: hooks, flowName },
+            fastRetry,
+            noContext,
+            unnamed
+        );
     } catch (e) {
         if (hook.failure) throw hook.failure.error;
         if (!hasMark(e, replayFault)) throw e;
@@ -3043,7 +3119,20 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
         throw unrecordedError('initialInput', inputCause, 'The flow is rebuilt from it, so', { field: 'initialInput' });
     }
 
-    for (const warning of traceWarnings(traceLog, trace, version)) log(warning);
+    // Built before the warnings, since a root `effectPipe` or `effectGen` built from undefined shows the recorded input
+    // was undefined; a throw is held so the warnings still come first.
+    /** @type {Effect | undefined} */
+    let root;
+    /** @type {{ error: unknown } | undefined} */
+    let buildFault;
+    let inputKept = false;
+    try {
+        root = flowFn(initialInput);
+        inputKept = flowInputs.has(root);
+    } catch (error) {
+        buildFault = { error };
+    }
+    for (const warning of traceWarnings(traceLog, trace, version, inputKept)) log(warning);
     const decisions = trace.filter(isDecisionEntry);
     const steps = counted(trace.length - decisions.length, 'recorded step');
     const andDecisions = decisions.length ? ` and ${counted(decisions.length, 'Parallel decision')}` : '';
@@ -3054,8 +3143,9 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
     const timing = stepTimings(trace);
     let replay;
     try {
+        if (buildFault) throw buildFault.error;
         // `replayEffect` defaults the context to the trace's.
-        replay = await replayEffect(flowFn(initialInput), traceLog, {
+        replay = await replayEffect(/** @type {Effect} */ (root), traceLog, {
             context,
             onResolved: (step, outcome) => {
                 // A step the trace does not hold is refused or run live by `replayEffect`, not narrated here.
@@ -3189,22 +3279,23 @@ const narrationTree = (narrated, decisionAt) => {
 
 /**
  * The warnings `timeTravel` gives before it replays: a trace recorded at another build, one that holds no initial
- * input, and steps a replay cannot tell apart.
+ * input for a flow whose trace could not have held one, and steps a replay cannot tell apart.
  * @param {TraceLog} traceLog
  * @param {TraceEntry[]} trace - Its entries, checked
  * @param {string | undefined} version - The build replaying it
+ * @param {boolean} inputKept - Whether `effectPipe` or `effectGen` built the flow's root, so a trace keeps its input
  * @returns {string[]}
  */
-const traceWarnings = (traceLog, trace, version) => {
+const traceWarnings = (traceLog, trace, version, inputKept) => {
     const warnings = [];
     if (version && traceLog.version && version !== traceLog.version) {
         warnings.push(`Warning: trace was recorded at ${traceLog.version}, replaying against ${version}.`);
     }
-    if (traceLog.initialInput === undefined) {
+    if (traceLog.initialInput === undefined && !inputKept) {
         warnings.push(
             'Warning: the trace holds no initial input, so the flow is rebuilt from undefined. A trace holds the ' +
-                'input only of a flow effectPipe or effectGen built, and cannot tell an input of undefined from ' +
-                'none. If the flow takes an input, build its outermost flow with effectPipe or effectGen.'
+                'input only of a flow effectPipe or effectGen built, and this one was built some other way. If the ' +
+                'flow takes an input, build its outermost flow with effectPipe or effectGen.'
         );
     }
     const anonymous = trace.filter((e) => e.command === 'anonymous').length;

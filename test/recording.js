@@ -687,7 +687,8 @@ describe('Recording', function () {
             )(input);
 
         const { trace } = await recordEffect(flow({ email: 'user@test.com', password: 'hunter2' }), {
-            context: { flowName: 'register', authToken: 'bearer-abc123' },
+            context: { authToken: 'bearer-abc123' },
+            flowName: 'register',
             redact: (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
                 seen.push([kind, name]);
                 if (kind === 'initialInput') return { ...value, password: '[redacted]' };

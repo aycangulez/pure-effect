@@ -16,7 +16,49 @@ import {
 } from '../index.js';
 import { enableTelemetry, telemetryHooks } from '../examples/opentelemetry-example.js';
 import { enableRecording, recordingHooks } from '../examples/recording-example.js';
-import { importCopiedExample, exampleTypeErrors, consumerTypeErrors } from './helpers.js';
+import { importCopiedExample, exampleTypeErrors, consumerTypeErrors, consumerFilesTypeErrors } from './helpers.js';
+import { exampleDeclarations } from '../scripts/example-declarations.js';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+describe("The examples' declaration files", function () {
+    // The examples shipped as JavaScript alone, so a TypeScript project that copied one needed allowJs, which also
+    // type-checked the copy under its own settings: the telemetry example's SDK imports failed a project without the
+    // SDK installed. In every round of the October 2026 DX experiments a TypeScript reader raised it.
+    it('should hold exactly the declarations the generator writes', async function () {
+        this.timeout(20000);
+        for (const [name, generated] of await exampleDeclarations()) {
+            assert.ok(
+                readFileSync(join('examples', name), 'utf8') === generated,
+                `examples/${name} differs from what scripts/example-declarations.js writes; run npm run generate`
+            );
+        }
+    });
+
+    it('should type both examples for a project without allowJs, naming no package beyond the API', function () {
+        this.timeout(20000);
+        const source = [
+            "import { configureEffect } from 'pure-effect';",
+            "import { recordingHooks, enableRecording } from './examples/recording-example.js';",
+            "import { telemetryHooks, enableTelemetry, startTelemetrySdk } from './examples/opentelemetry-example.js';",
+            'declare const fromConfig: { cap?: number; build?: string };',
+            'configureEffect(',
+            '    telemetryHooks({ tracerName: undefined }),',
+            '    recordingHooks({ sink: (trace) => void trace.flowName, maxEntries: fromConfig.cap, version: fromConfig.build })',
+            ');',
+            'const removers: (() => void)[] = [enableRecording(), enableTelemetry()];',
+            'void removers;',
+            'void startTelemetrySdk({ serviceName: undefined }).then((sdk) => sdk.shutdown());',
+            '// @ts-expect-error maxEntries is a number',
+            "recordingHooks({ maxEntries: 'many' });"
+        ].join('\n');
+        assert.deepEqual(consumerFilesTypeErrors({ 'consumer.ts': source }, { allowJs: false, checkJs: false }), []);
+        for (const name of ['recording-example.d.ts', 'opentelemetry-example.d.ts']) {
+            const text = readFileSync(join('examples', name), 'utf8');
+            assert.ok(!/sdk-node|exporter-trace|sdk-trace-base/.test(text), `${name} names an SDK package`);
+        }
+    });
+});
 
 describe('examples/recording-example.js', function () {
     beforeEach(() => configureEffect());
@@ -71,7 +113,7 @@ describe('examples/recording-example.js', function () {
         /** @type {any[]} */
         const written = [];
         enableRecording({ sink: async (/** @type {any} */ trace) => void written.push(trace) });
-        const result = await runEffect(failing({ id: 1 }), { flowName: 'writer', tenant: 'acme' });
+        const result = await runEffect(failing({ id: 1 }), { tenant: 'acme' }, { flowName: 'writer' });
         assert.equal(result.type, 'Failure');
         assert.equal(written.length, 1);
         assert.deepEqual(
@@ -79,7 +121,7 @@ describe('examples/recording-example.js', function () {
             ['cmdRead', 'cmdWrite']
         );
         assert.equal(written[0].flowName, 'writer');
-        assert.deepEqual(written[0].context, { flowName: 'writer', tenant: 'acme' }, 'context captured for Ask replay');
+        assert.deepEqual(written[0].context, { tenant: 'acme' }, 'context captured for Ask replay');
         assert.deepEqual(written[0].initialInput, { id: 1 });
     });
 
@@ -89,7 +131,7 @@ describe('examples/recording-example.js', function () {
         /** @type {any[]} */
         const written = [];
         enableRecording({ version: 'build-41', sink: (t) => void written.push(t) });
-        await runEffect(failing({ id: 1 }), { flowName: 'writer' });
+        await runEffect(failing({ id: 1 }), undefined, { flowName: 'writer' });
         assert.equal(written[0].version, 'build-41');
         /** @type {string[]} */
         const lines = [];
@@ -113,11 +155,33 @@ describe('examples/recording-example.js', function () {
                         return i;
                     })
             )(input);
-        const result = await runEffect(register({ email: 'bad' }), { flowName: 'register' });
+        const result = await runEffect(register({ email: 'bad' }), undefined, { flowName: 'register' });
         assert.deepEqual(result, Failure('Invalid email.'));
         assert.deepEqual(written[0].initialInput, { email: 'bad' });
         assert.deepEqual(warnings, [], 'the flow carries its input, so there is nothing to warn about');
         const { result: replayed } = await replayEffect(register(written[0].initialInput), written[0]);
+        assert.deepEqual(replayed, result);
+    });
+
+    it('should store the context of a run refused before its first Command, so it replays', async function () {
+        // The context was copied at the first Command, so a run a permission check refused, reading the context with
+        // Ask before any write as the README advises, kept no context, and its replay stopped asking for one.
+        /** @type {any[]} */
+        const written = [];
+        enableRecording({ sink: (t) => void written.push(t) });
+        const provision = (/** @type {any} */ input) =>
+            effectPipe(
+                (/** @type {any} */ i) =>
+                    Ask((/** @type {any} */ ctx) => (ctx.role === 'admin' ? Success(i) : Failure('Forbidden.'))),
+                (/** @type {any} */ i) =>
+                    Command(function cmdCreateTenant() {
+                        return i;
+                    })
+            )(input);
+        const result = await runEffect(provision({ name: 'acme' }), { role: 'intern' }, { flowName: 'provision' });
+        assert.deepEqual(result, Failure('Forbidden.'));
+        assert.deepEqual(written[0].context, { role: 'intern' });
+        const { result: replayed } = await replayEffect(provision(written[0].initialInput), written[0]);
         assert.deepEqual(replayed, result);
     });
 
@@ -228,8 +292,7 @@ describe('examples/recording-example.js', function () {
     });
 
     it('should not let an in-place redact change the run it records', async function () {
-        // The wiring redacts the input as the run starts and the context at the first Command, both before any
-        // Command reads them, so a redact that deleted fields in place saved a user with no password and called
+        // The wiring redacts the input and the context as the run starts, before any Command reads them, so a redact that deleted fields in place saved a user with no password and called
         // the API with no token, but only while recording was installed.
         /** @type {any[]} */
         const written = [];
@@ -263,8 +326,7 @@ describe('examples/recording-example.js', function () {
     });
 
     it('should leave out an input or context redact throws on, and name both on the trace', async function () {
-        // The context is packaged at the first Command, apart from the input, so its failure has to reach the trace
-        // the run started with.
+        // Both are packaged as the run starts, and each one redact throws on is named on the trace.
         /** @type {any[]} */
         const written = [];
         /** @type {[string, string | undefined][]} */
@@ -278,7 +340,7 @@ describe('examples/recording-example.js', function () {
             },
             onWarning: (message, flowName) => void warnings.push([message, flowName])
         });
-        const result = await runEffect(failing({ id: 5 }), { flowName: 'writer', tenant: 'acme' });
+        const result = await runEffect(failing({ id: 5 }), { tenant: 'acme' }, { flowName: 'writer' });
         assert.equal(result.type, 'Failure', 'the run keeps its own outcome');
         assert.equal(written[0].initialInput, undefined);
         assert.equal(written[0].context, undefined);
@@ -301,7 +363,7 @@ describe('examples/recording-example.js', function () {
             onSinkError: (/** @type {any} */ error, /** @type {any} */ flowName) =>
                 void reported.push([error.message, flowName])
         });
-        const result = await runEffect(failing({ id: 1 }), { flowName: 'checkout' });
+        const result = await runEffect(failing({ id: 1 }), undefined, { flowName: 'checkout' });
         assert.equal(/** @type {any} */ (result).error.message, 'write failed', 'the run keeps its own outcome');
         assert.deepEqual(reported, [['Converting circular structure to JSON', 'checkout']]);
         remove();
@@ -313,7 +375,7 @@ describe('examples/recording-example.js', function () {
                 throw new Error('reporter failed');
             }
         });
-        const again = await runEffect(failing({ id: 1 }), { flowName: 'checkout' });
+        const again = await runEffect(failing({ id: 1 }), undefined, { flowName: 'checkout' });
         assert.equal(/** @type {any} */ (again).error.message, 'write failed');
     });
 
@@ -328,7 +390,7 @@ describe('examples/recording-example.js', function () {
                     throw new Error('keep failed');
                 }
             });
-            const result = await runEffect(failing({ id: 1 }), { flowName: 'checkout' });
+            const result = await runEffect(failing({ id: 1 }), undefined, { flowName: 'checkout' });
             assert.equal(result.type, 'Failure');
             assert.equal(logged.length, 1);
             assert.match(String(logged[0][0]), /Recording failed for 'checkout'/);
@@ -438,9 +500,9 @@ describe('examples/recording-example.js', function () {
             Command(function cmdRead() {
                 return 1;
             });
-        await runEffect(read(), { flowName: 'bare' });
-        await runEffect(read(), { flowName: 'bare' });
-        await runEffect(effectPipe(read)({ id: 1 }), { flowName: 'piped' });
+        await runEffect(read(), undefined, { flowName: 'bare' });
+        await runEffect(read(), undefined, { flowName: 'bare' });
+        await runEffect(effectPipe(read)({ id: 1 }), undefined, { flowName: 'piped' });
         assert.equal(warnings.length, 1);
         assert.equal(warnings[0][1], 'bare');
         assert.match(warnings[0][0], /If the flow takes an input, build its outermost flow with effectPipe/);
@@ -469,9 +531,9 @@ describe('examples/recording-example.js', function () {
             () => read(3)
         );
         const short = effectPipe(() => read(1));
-        await runEffect(long({ id: 1 }), { flowName: 'long' });
-        await runEffect(long({ id: 2 }), { flowName: 'long' });
-        await runEffect(short({ id: 3 }), { flowName: 'short' });
+        await runEffect(long({ id: 1 }), undefined, { flowName: 'long' });
+        await runEffect(long({ id: 2 }), undefined, { flowName: 'long' });
+        await runEffect(short({ id: 3 }), undefined, { flowName: 'short' });
         assert.deepEqual(
             written.map((t) => t.dropped),
             [1, 1, 0],
@@ -506,8 +568,8 @@ describe('examples/recording-example.js', function () {
                     return 2;
                 })
         );
-        await runEffect(flow({ id: 1 }), { flowName: 'writer' });
-        await runEffect(flow({ id: 2 }), { flowName: 'writer' });
+        await runEffect(flow({ id: 1 }), undefined, { flowName: 'writer' });
+        await runEffect(flow({ id: 2 }), undefined, { flowName: 'writer' });
         assert.equal(warnings.length, 1);
         assert.equal(warnings[0][1], 'writer');
         assert.match(warnings[0][0], /2 of the values a kept trace holds could not be recorded/);
@@ -532,9 +594,9 @@ describe('examples/recording-example.js', function () {
                 return 1;
             })
         );
-        await runEffect(inline({ id: 1 }), { flowName: 'inline' });
-        await runEffect(inline({ id: 2 }), { flowName: 'inline' });
-        await runEffect(named({ id: 3 }), { flowName: 'named' });
+        await runEffect(inline({ id: 1 }), undefined, { flowName: 'inline' });
+        await runEffect(inline({ id: 2 }), undefined, { flowName: 'inline' });
+        await runEffect(named({ id: 3 }), undefined, { flowName: 'named' });
         assert.equal(warnings.length, 1);
         assert.equal(warnings[0][1], 'inline');
         assert.match(warnings[0][0], /2 of its steps are named 'anonymous'/);
@@ -563,8 +625,8 @@ describe('examples/recording-example.js', function () {
                     )
             )(input);
         await Promise.all([
-            runEffect(slowFail('A')({ id: 'A' }), { flowName: 'A' }),
-            runEffect(slowFail('B')({ id: 'B' }), { flowName: 'B' })
+            runEffect(slowFail('A')({ id: 'A' }), undefined, { flowName: 'A' }),
+            runEffect(slowFail('B')({ id: 'B' }), undefined, { flowName: 'B' })
         ]);
         assert.equal(written.length, 2);
         for (const trace of written) {
@@ -591,7 +653,7 @@ describe('examples/recording-example.js', function () {
             },
             recordingHooks({ sink: async (/** @type {any} */ t) => void written.push(t) })
         );
-        const result = await runEffect(failing({ id: 3 }), { flowName: 'both' });
+        const result = await runEffect(failing({ id: 3 }), undefined, { flowName: 'both' });
         assert.equal(result.type, 'Failure');
         assert.deepEqual(spans, ['cmdRead', 'cmdWrite'], 'telemetry still saw every step');
         assert.equal(written.length, 1, 'and the trace was still written');
@@ -630,7 +692,7 @@ describe('examples/recording-example.js', function () {
                     })
                 ])
             )(input);
-        const result = await runEffect(flow(1), { flowName: 'fanout' });
+        const result = await runEffect(flow(1), undefined, { flowName: 'fanout' });
         assert.deepEqual(result, Success([2, 3]));
         assert.equal(written.length, 1);
         assert.deepEqual(
@@ -740,20 +802,24 @@ describe('examples/opentelemetry-example.js', function () {
         const secret = { email: 'user@test.com', password: 'plaintext' };
         const { tracer, spans } = fakeTracer();
         configureEffect(telemetryHooks({ tracer }));
-        await runEffect(workFlow(secret), { flowName: 'register' });
+        await runEffect(workFlow(secret), undefined, { flowName: 'register' });
 
         const attributes = JSON.stringify(spans.map((/** @type {any} */ sp) => sp.attributes));
         assert.ok(!attributes.includes('plaintext'), 'no input values on spans');
         assert.ok(!attributes.includes('user@test.com'), 'not even harmless-looking ones');
         assert.ok(!attributes.includes('done'), 'no Command output on spans');
         assert.deepEqual(Object.keys(spans[0].attributes), ['effect.flow'], 'the root span carries the flow name');
-        assert.deepEqual(Object.keys(spans[1].attributes), ['effect.type'], 'and a step span its type');
+        assert.deepEqual(
+            Object.keys(spans[1].attributes),
+            ['effect.type', 'effect.path'],
+            'and a step span its type and path'
+        );
     });
 
     it('should name the root span after the flow and open a child span per Command', async function () {
         const { tracer, spans } = fakeTracer();
         configureEffect(telemetryHooks({ tracer }));
-        await runEffect(workFlow({ id: 1 }), { flowName: 'checkout' });
+        await runEffect(workFlow({ id: 1 }), undefined, { flowName: 'checkout' });
         assert.deepEqual(
             spans.map((/** @type {any} */ s) => s.name),
             ['checkout', 'cmdWork']
@@ -770,7 +836,9 @@ describe('examples/opentelemetry-example.js', function () {
                 (/** @type {any} */ v) => Success(v),
                 { name }
             );
-        const result = await runEffect(Parallel([load('cmdUser'), load('cmdCart')]), { flowName: 'checkout' });
+        const result = await runEffect(Parallel([load('cmdUser'), load('cmdCart')]), undefined, {
+            flowName: 'checkout'
+        });
         assert.deepEqual(result, Success(['cmdUser', 'cmdCart']));
         assert.deepEqual(
             spans.map((/** @type {any} */ s) => s.name),
@@ -779,6 +847,30 @@ describe('examples/opentelemetry-example.js', function () {
         );
         assert.equal(spans[1].attributes['effect.type'], 'Parallel');
         assert.ok(spans.every((/** @type {any} */ s) => s.ended));
+    });
+
+    it("should put each step's path on its span, so Retry attempts and Parallel branches are told apart", async function () {
+        const { tracer, spans } = fakeTracer();
+        configureEffect(telemetryHooks({ tracer }));
+        let calls = 0;
+        const flaky = Command(function cmdFlaky() {
+            if (++calls === 1) throw new Error('timeout');
+            return 'ok';
+        });
+        const other = Command(function cmdOther() {
+            return 'other';
+        });
+        await runEffect(Parallel([Retry(flaky, { retries: 1, delay: 0 }), other]));
+        assert.deepEqual(
+            spans.map((/** @type {any} */ s) => [s.name, s.attributes['effect.path']]),
+            [
+                ['Effect Pipeline', undefined],
+                ['Parallel', '0p'],
+                ['cmdFlaky', '0p0/0r0/0'],
+                ['cmdOther', '0p1/0'],
+                ['cmdFlaky', '0p0/0r1/0']
+            ]
+        );
     });
 
     it("should mark a cancelled Parallel's span as ERROR, whether a branch failed or threw", async function () {
@@ -824,7 +916,7 @@ describe('examples/opentelemetry-example.js', function () {
 
     it('should still work through enableTelemetry with no SDK started', async function () {
         enableTelemetry();
-        const result = await runEffect(workFlow({ id: 1 }), { flowName: 'noop-tracer' });
+        const result = await runEffect(workFlow({ id: 1 }), undefined, { flowName: 'noop-tracer' });
         assert.equal(result.type, 'Success');
     });
 
@@ -836,7 +928,7 @@ describe('examples/opentelemetry-example.js', function () {
             telemetryHooks({ tracer }),
             recordingHooks({ keep: () => true, sink: async (/** @type {any} */ t) => void written.push(t) })
         );
-        const result = await runEffect(workFlow({ id: 1 }), { flowName: 'both' });
+        const result = await runEffect(workFlow({ id: 1 }), undefined, { flowName: 'both' });
         assert.equal(result.type, 'Success');
         assert.deepEqual(
             spans.map((/** @type {any} */ s) => s.name),

@@ -13,7 +13,7 @@ import {
     recordEffect,
     replayEffect
 } from '../index.js';
-import { errorOf } from './helpers.js';
+import { consumerTypeErrors, errorOf } from './helpers.js';
 
 /** @import { CommandInterceptor } from "../index.js" */
 
@@ -290,6 +290,34 @@ describe('Parallel cancellation', function () {
 describe('Parallel limit and settled', function () {
     beforeEach(function () {
         configureEffect();
+    });
+
+    it('should name the option, not next, in the type error for an options mistake', function () {
+        // A compiler that reports only the last overload a call fails reported a two-argument call's options as
+        // a next that does not fit, since the last overload took next; the last one now takes either.
+        this.timeout(20000);
+        const errors = consumerTypeErrors(
+            "import { Parallel, Success } from 'pure-effect';\n" +
+                'declare const flag: boolean;\n' +
+                'Parallel([Success(42)], { settled: flag });\n' +
+                "Parallel([Success(42)], { limit: '2' });\n" +
+                'Parallel([Success(42)], ([n]) => n + 1);\n' +
+                'Parallel([Success(42)], (outs) => outs.length, { settled: true });\n'
+        );
+        assert.equal(errors.length, 4);
+        assert.match(
+            errors[0],
+            /The last overload gave the following error\.\s+Type 'boolean' is not assignable to type 'false'/
+        );
+        assert.match(
+            errors[1],
+            /The last overload gave the following error\.\s+Type 'string' is not assignable to type 'number'/
+        );
+        assert.match(errors[2], /Type 'number' is not assignable to type 'AnyEffect'/);
+        // The last overload took a third argument too, so a settled next that returned a plain value was reported as
+        // one typed for the values; with two arguments only, three are reported against the overloads above it.
+        assert.match(errors[3], /Type 'number' is not assignable to type 'AnyEffect'/);
+        assert.doesNotMatch(errors[3], /are incompatible/);
     });
 
     /** A Command that records when it starts and finishes, so in-flight counts can be asserted. */

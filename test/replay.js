@@ -9,6 +9,8 @@ import {
     Retry,
     Parallel,
     effectPipe,
+    effectGen,
+    step,
     runEffect,
     configureEffect,
     recorder,
@@ -22,6 +24,46 @@ import { registerUserFlow, valueOf, errorOf, makeFlow } from './helpers.js';
 
 describe('Replay', function () {
     beforeEach(() => configureEffect());
+
+    it('should refuse to replay a Command with no name, unless it is named anonymous on purpose', async function () {
+        // An unnamed Command ran live and recorded as 'anonymous', so a replay could not notice two of them trading
+        // places; it now stops at the first, with the path and the fix, by a trace or a Resolver alike.
+        let calls = 0;
+        const unnamed = () =>
+            Command(
+                () => ++calls,
+                (/** @type {number} */ n) => Success(n)
+            );
+        const live = await recordEffect(unnamed());
+        assert.deepEqual(live.result, Success(1), 'a live run is unaffected');
+        assert.equal(live.trace.trace[0]?.command, 'anonymous');
+
+        const fromTrace = await replayEffect(unnamed(), live.trace);
+        const fromResolver = await replayEffect(unnamed(), () => ({ result: 5 }));
+        for (const { result } of [fromTrace, fromResolver]) {
+            const error = errorOf(result);
+            assert.equal(error.name, 'ReplayError');
+            assert.equal(error.path, '0');
+            assert.equal(error.command, 'anonymous');
+            assert.match(error.message, /^A replay reached a Command with no name at path '0'\./);
+            assert.match(
+                error.message,
+                /Name its function, as in const cmdLoadUser = \(\) => db\.loadUser\(id\), or set meta\.name/
+            );
+            assert.match(error.message, /set meta\.name to 'anonymous'\.$/);
+        }
+        assert.equal(calls, 1, 'a replay executes nothing');
+
+        // Named 'anonymous' on purpose, the same Command replays the trace recorded while it was unnamed.
+        const optedOut = () =>
+            Command(
+                () => ++calls,
+                (/** @type {number} */ n) => Success(n),
+                { name: 'anonymous' }
+            );
+        assert.deepEqual((await replayEffect(optedOut(), live.trace)).result, Success(1));
+        assert.equal(calls, 1);
+    });
 
     it('should warn in timeTravel when recorded steps are anonymous', async function () {
         // Inline arrow Commands are all 'anonymous', and a replay tells steps apart by name, so a refactor that swapped
@@ -146,7 +188,7 @@ describe('Replay', function () {
                     return { sent: true };
                 })
         );
-        const { trace } = await recordEffect(flow('cart_1'), { context: { flowName: 'checkout' } });
+        const { trace } = await recordEffect(flow('cart_1'), { flowName: 'checkout' });
         // Without timings, so the lines are the same on every run.
         const untimed = { ...trace, trace: trace.trace.map(({ durationMs, ...entry }) => entry) };
         /** @type {string[]} */
@@ -399,7 +441,7 @@ describe('Replay', function () {
                 )
             );
 
-        const { trace } = await recordEffect(flow('sku-1'), { context: { tenant: 'acme', flowName: 'lookup' } });
+        const { trace } = await recordEffect(flow('sku-1'), { context: { tenant: 'acme' }, flowName: 'lookup' });
         assert.equal(/** @type {any} */ (trace.context).tenant, 'acme');
 
         const { result: replayed } = await replayEffect(flow('sku-1'), trace, { context: trace.context });
@@ -1397,7 +1439,7 @@ describe('Replay', function () {
         await assert.rejects(recordEffect(flow({ id: 'x' }), /** @type {any} */ ({ ctx: {} })), {
             name: 'TypeError',
             message:
-                /recordEffect has no option named 'ctx'; its options are context, version, redact, maxEntries and stack\./
+                /recordEffect has no option named 'ctx'; its options are context, flowName, version, redact, maxEntries and stack\./
         });
         assert.deepEqual(calls, { read: 0, write: 0 }, 'refused before the flow runs');
 
@@ -1748,9 +1790,6 @@ describe('Replay', function () {
         const lines = [];
         const log = (/** @type {string} */ line) => void lines.push(line);
         await timeTravel(bare, (await recordEffect(bare())).trace, { log });
-        assert.ok(lines.some((l) => /^Warning: the trace holds no initial input/.test(l)));
-        // A flow that takes no input gets this warning too, since a trace cannot tell undefined from none, so the
-        // advice is for a flow that does take one.
         assert.ok(
             lines.some((l) =>
                 l.endsWith('If the flow takes an input, build its outermost flow with effectPipe or effectGen.')
@@ -1762,6 +1801,49 @@ describe('Replay', function () {
         const { flow } = makeFlow();
         await timeTravel(flow, (await recordEffect(flow({ id: 'in' }))).trace, { log });
         assert.ok(!lines.some((l) => /no initial input/.test(l)));
+
+        // A trace that holds its input needs no warning, whoever built the flow that replays it.
+        lines.length = 0;
+        const piped = effectPipe((/** @type {number} */ n) => bare());
+        await timeTravel(bare, (await recordEffect(piped(5))).trace, { log });
+        assert.ok(!lines.some((l) => /no initial input/.test(l)), lines.join('\n'));
+    });
+
+    it('should not warn in timeTravel about a missing input for a flow effectPipe or effectGen built from undefined', async function () {
+        // The warning fired for a flow that takes no input, such as a nightly job, which the README builds this
+        // way; a root either builds from undefined shows the recorded input was undefined.
+        const cmdCount = () => 3;
+        const flows = [
+            effectPipe((/** @type {void} */ _input) => Command(cmdCount)),
+            effectGen(function* () {
+                return yield* step(Command(cmdCount));
+            })
+        ];
+        for (const flow of flows) {
+            /** @type {string[]} */
+            const lines = [];
+            const { result } = await timeTravel(flow, (await recordEffect(flow(undefined))).trace, {
+                log: (/** @type {string} */ line) => void lines.push(line)
+            });
+            assert.deepEqual(result, Success(3));
+            assert.ok(!lines.some((l) => /no initial input/.test(l)), lines.join('\n'));
+        }
+    });
+
+    it('should warn in timeTravel before a flow that cannot be built from undefined throws', async function () {
+        // The flow is built before the warnings are given, to see who built it, so its throw is held until after them.
+        const needsInput = (/** @type {any} */ input) => Success(input.id);
+        /** @type {string[]} */
+        const lines = [];
+        const trace = { trace: [], initialInput: undefined };
+        await assert.rejects(
+            timeTravel(needsInput, trace, { log: (/** @type {string} */ line) => void lines.push(line) }),
+            TypeError
+        );
+        assert.ok(
+            lines.some((l) => /^Warning: the trace holds no initial input/.test(l)),
+            lines.join('\n')
+        );
     });
 
     it('should reject a trace timeTravel cannot read with a ReplayError, as replayEffect does', async function () {
@@ -1783,7 +1865,7 @@ describe('Replay', function () {
     });
 
     it('should record and replay a run whose context is null, as runEffect runs one', async function () {
-        // recordEffect read the context's flowName and threw a bare TypeError on null, which runEffect accepts; and a
+        // recordEffect read the context's flowName, which then named the run, and threw a bare TypeError on null, which runEffect accepts; and a
         // replay defaulted a recorded null to {}, so Ask got a context production never had.
         const flow = () =>
             Ask((/** @type {any} */ ctx) =>
@@ -1798,6 +1880,40 @@ describe('Replay', function () {
         assert.deepEqual(result, Success(null));
         assert.equal(trace.context, null);
         assert.deepEqual((await replayEffect(flow(), trace)).result, Success(null));
+    });
+
+    it("should keep the run's name out of its context, and name a replay run under hooks as production did", async function () {
+        // The name was read off the context, so every trace stored it twice and Ask saw it; a replay under hooks
+        // named its run from the recorded context.
+        const flow = () =>
+            Ask((/** @type {any} */ ctx) =>
+                Command(
+                    function cmdLoad() {
+                        return 1;
+                    },
+                    () => Success(ctx)
+                )
+            );
+        const { result, trace } = await recordEffect(flow(), { context: { tenant: 'acme' }, flowName: 'nightly' });
+        assert.deepEqual(result, Success({ tenant: 'acme' }));
+        assert.equal(trace.flowName, 'nightly');
+        assert.deepEqual(trace.context, { tenant: 'acme' });
+
+        /** @type {string[]} */
+        const named = [];
+        configureEffect({
+            onRun: async (op, flowName) => {
+                named.push(flowName);
+                return await op();
+            }
+        });
+        await replayEffect(flow(), trace, { hooks: true });
+        await replayEffect(flow(), { ...trace, flowName: undefined }, { hooks: true });
+        assert.deepEqual(named, ['nightly', '']);
+        await assert.rejects(
+            recordEffect(flow(), /** @type {any} */ ({ flowName: 3 })),
+            /^TypeError: recordEffect 'flowName' must be a string, received the number 3\.$/
+        );
     });
 
     it('should give Ask the recorded context in timeTravel, or the one it is handed', async function () {

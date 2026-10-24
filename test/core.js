@@ -743,11 +743,21 @@ describe('Constructor arguments', function () {
         );
     });
 
-    it('should refuse meta in the place of next before the Command can run', function () {
-        // The Command used to run, charging the card, and the run then rejected with `effect.next is not a function`.
+    it('should take meta in the place of next, for a Command with no next', async function () {
+        // It was refused with a message saying meta goes third, as `Command(fn, undefined, { name })`, after DX agents
+        // kept writing `Command(fn, { name })`: next is a function, so an object second can only be meta.
+        const charge = Command(() => 'ch_1', { name: 'chargeCard' });
+        assert.equal(commandName(charge), 'chargeCard');
+        assert.deepEqual(charge.meta, { name: 'chargeCard' });
+        assert.deepEqual(await runEffect(charge), Success('ch_1'));
+    });
+
+    it('should refuse meta both second and third before the Command can run', function () {
         let charged = 0;
-        const message = messageFrom(() => Command(() => charged++, /** @type {any} */ ({ name: 'chargeCard' })));
-        assert.match(message, /Command\(fn, undefined, \{ name: 'chargeCard' \}\)/);
+        const message = messageFrom(() =>
+            Command(() => charged++, { name: 'chargeCard' }, /** @type {any} */ ({ name: 'refund' }))
+        );
+        assert.match(message, /Command takes meta second or third, not both/);
         assert.equal(charged, 0);
     });
 
@@ -1063,7 +1073,7 @@ describe('The flow input', function () {
             tree,
             {},
             {
-                onRun: async (effect, op, flowName, initialInput) => ((seen = initialInput), await op())
+                onRun: async (op, flowName, initialInput) => ((seen = initialInput), await op())
             }
         );
         return seen;
@@ -1125,7 +1135,7 @@ describe('The flow input', function () {
         /** @param {string} name */
         const layer = (name) => ({
             /** @type {import('../index.js').RunWrapper} */
-            onRun: async (effect, op, flowName, initialInput) => (seen.push([name, initialInput]), await op())
+            onRun: async (op, flowName, initialInput) => (seen.push([name, initialInput]), await op())
         });
         configureEffect(layer('first'), layer('second'));
         configureEffect(layer('third'));
@@ -1144,10 +1154,59 @@ describe('The flow input', function () {
         /** @type {any} */
         let seen;
         configureEffect({
-            onRun: async (effect, op, flowName, initialInput) => ((seen = initialInput), await op())
+            onRun: async (op, flowName, initialInput) => ((seen = initialInput), await op())
         });
         await replayEffect(flow(trace.initialInput), trace, { hooks: true });
         assert.deepEqual(seen, input);
+    });
+
+    /** What a hook-based recorder stores as the trace's context: what `onRun` is handed. */
+    const contextSeenByOnRun = async (/** @type {any} */ tree, /** @type {any} */ context) => {
+        /** @type {any} */
+        let seen = 'not called';
+        await runEffect(tree, context, {
+            onRun: async (op, flowName, initialInput, given) => ((seen = given), await op())
+        });
+        return seen;
+    };
+
+    it("should hand onRun the run's context, and an empty object for a run given none", async function () {
+        const flow = effectPipe((/** @type {any} */ i) => lookup(i.customerId));
+        assert.deepEqual(await contextSeenByOnRun(flow(input), { tenant: 'acme' }), { tenant: 'acme' });
+        assert.deepEqual(await contextSeenByOnRun(flow(input), undefined), {});
+    });
+
+    it('should hand onRun the context of a flow that stops before its first Command', async function () {
+        // A permission check that reads the context and refuses is such a run, and its trace needs the context to replay.
+        const flow = effectPipe(() => Ask((/** @type {any} */ ctx) => Failure(`Forbidden for ${ctx.role}.`)), lookup);
+        assert.deepEqual(await contextSeenByOnRun(flow(input), { role: 'intern' }), { role: 'intern' });
+    });
+
+    it('should hand the context to every onRun layer', async function () {
+        /** @type {any[]} */
+        const seen = [];
+        /** @param {string} name */
+        const layer = (name) => ({
+            /** @type {import('../index.js').RunWrapper} */
+            onRun: async (op, flowName, initialInput, context) => (seen.push([name, context]), await op())
+        });
+        configureEffect(layer('first'), layer('second'));
+        await runEffect(lookup('cu1'), { tenant: 'acme' }, layer('call'));
+        assert.deepEqual(seen, [
+            ['first', { tenant: 'acme' }],
+            ['second', { tenant: 'acme' }],
+            ['call', { tenant: 'acme' }]
+        ]);
+    });
+
+    it("should hand onRun the trace's context under a replay that runs the hooks", async function () {
+        const flow = effectPipe((/** @type {any} */ i) => lookup(i.customerId));
+        const { trace } = await recordEffect(flow(input), { context: { tenant: 'acme' } });
+        /** @type {any} */
+        let seen;
+        configureEffect({ onRun: async (op, flowName, initialInput, context) => ((seen = context), await op()) });
+        await replayEffect(flow(trace.initialInput), trace, { hooks: true });
+        assert.deepEqual(seen, { tenant: 'acme' });
     });
 
     it('should leave the input off every node of a flow', function () {

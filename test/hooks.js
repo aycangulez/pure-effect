@@ -99,14 +99,12 @@ describe('configureEffect merging', function () {
     it('should nest onRun wrappers and preserve flowName and the result', async function () {
         /** @type {any[]} */
         const seen = [];
-        const wrap =
-            (/** @type {string} */ label) =>
-            async (/** @type {any} */ effect, /** @type {any} */ op, /** @type {any} */ flowName) => {
-                seen.push([label, flowName]);
-                return await op();
-            };
+        const wrap = (/** @type {string} */ label) => async (/** @type {any} */ op, /** @type {any} */ flowName) => {
+            seen.push([label, flowName]);
+            return await op();
+        };
         configureEffect({ onRun: wrap('a') }, { onRun: wrap('b') });
-        const result = await runEffect(work('ok'), { flowName: 'checkout' });
+        const result = await runEffect(work('ok'), undefined, { flowName: 'checkout' });
         assert.equal(valueOf(result), 'ok');
         assert.deepEqual(seen, [
             ['a', 'checkout'],
@@ -114,18 +112,32 @@ describe('configureEffect merging', function () {
         ]);
     });
 
-    it('should pass onRun an empty flowName when the context names none', async function () {
+    it('should pass onRun an empty flowName when the run names none, whatever the context holds', async function () {
+        // The name moved out of the context, so a context's own flowName field is data the flow reads, not the name.
         /** @type {any[]} */
         const seen = [];
         configureEffect({
-            onRun: async (/** @type {any} */ effect, /** @type {any} */ op, /** @type {any} */ flowName) => {
+            onRun: async (/** @type {any} */ op, /** @type {any} */ flowName) => {
                 seen.push(flowName);
                 return await op();
             }
         });
         await runEffect(work('ok'));
         await runEffect(work('ok'), {});
-        assert.deepEqual(seen, ['', '']);
+        await runEffect(work('ok'), { flowName: 'data' });
+        assert.deepEqual(seen, ['', '', '']);
+    });
+
+    it('should refuse a flowName that is not a string, and one given to configureEffect', function () {
+        assert.throws(() => configureEffect(/** @type {any} */ ({ flowName: 'checkout' })), TypeError);
+        return Promise.all(
+            [1, null, ['checkout']].map((name) =>
+                assert.rejects(
+                    runEffect(work('ok'), undefined, /** @type {any} */ ({ flowName: name })),
+                    /^TypeError: callConfig\.flowName must be a string/
+                )
+            )
+        );
     });
 
     it('should run every onBeforeCommand interceptor in order', async function () {
@@ -324,7 +336,7 @@ describe('Per-call inherit', function () {
     /** @param {string[]} log */
     const globalWiring = (log) => ({
         onStep: tagStep(log, 'global'),
-        onRun: async (/** @type {any} */ e, /** @type {any} */ op) => (log.push('run'), await op()),
+        onRun: async (/** @type {any} */ op) => (log.push('run'), await op()),
         onBeforeCommand: async () => {
             log.push('global-intercept');
         }
@@ -718,7 +730,7 @@ describe('Where a throw comes from', function () {
         configureEffect({
             // The types refuse this hook, as they should; plain JavaScript does not.
             onRun: /** @type {any} */ (
-                async (/** @type {any} */ effect, /** @type {() => Promise<unknown>} */ op) => {
+                async (/** @type {() => Promise<unknown>} */ op) => {
                     op();
                 }
             )

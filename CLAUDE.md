@@ -9,12 +9,12 @@ This file holds the rules. `DESIGN.md` holds the reasons: how each part works, w
 ```bash
 npm test                                          # run all tests
 npx mocha --grep "pattern"                        # run a single test by name; npx mocha test/replay.js runs one file
-npm run format                                    # Prettier over index.js, index.d.ts, examples/*.js, scripts/*.js, test/*.js, test/types.test-d.ts, README.md, CLAUDE.md, DESIGN.md, CHANGELOG.md, CONTRIBUTING.md, RULES.md
+npm run format                                    # Prettier over index.js, index.d.ts, examples/*.js and *.d.ts, scripts/*.js, test/*.js, test/types.test-d.ts, README.md, REFERENCE.md, CLAUDE.md, DESIGN.md, CHANGELOG.md, CONTRIBUTING.md, RULES.md
 npx tsd                                           # type-level gate over test/types.test-d.ts
 npx tsc -p jsconfig.json                          # strict tsc over index.js, test/*.js, test/types.test-d.ts, examples/*.js, and scripts/*.js, reading index.d.ts as a consumer; the same config VS Code uses
 npm run test:fuzz                                 # test/fuzz.js over twenty times as many seeds as npm test runs; CI runs it
 npm run test:ts-minimum                           # compiles index.d.ts and test/types.test-d.ts with TypeScript 5.1, the oldest the declarations support
-npm run generate                                  # rewrites effectPipe's overloads in index.d.ts, and RULES.md from README.md, from the scripts in scripts/
+npm run generate                                  # rewrites effectPipe's overloads, RULES.md and examples/*.d.ts, from the scripts in scripts/
 npx esbuild index.js --minify --format=esm | gzip -9 | wc -c    # the size the README claims
 npx stryker run                                   # mutation testing: mutates index.js, runs the tests in test/ against each mutant; report in reports/mutation/
 npx stryker run --mutate "index.js:120-180"       # the same, limited to the lines a change touched
@@ -38,12 +38,13 @@ Mutation testing stays out of CI. Run it after changing `index.js` or its tests.
 - A changelog entry and a commit message leave out documentation-only changes. A docs change that ships with a behaviour change goes unmentioned in both; one that ships alone gets no changelog entry, and its commit message says why the docs changed. A new file the package ships is the exception: it gets a changelog entry even when it is documentation, as `RULES.md` did.
 - A commit message is one short line, with no body.
 - Prose calls the library Pure Effect. `pure-effect` is its package name, written as code where code needs it: an import, `npm install`, `package.json`, a URL.
-- Changelog entries are ordered by importance within each section, most important first: a breaking change before the rest, then what affects the most users or changes what their runs do.
+- Changelog entries are ordered by importance within each section, most important first: a breaking change before the rest, then what affects the most users or changes what their runs do. Among breaking changes, one nothing reports comes before one a type or runtime error catches; within each, the one more users meet. Published sections stay as released.
 - A changelog entry is short and plain: a sentence saying what changed, and at most one more short sentence on what a user must do. No bold, except a label such as `Breaking:`; the Added, Changed and Fixed headings carry the structure. The story of a fix goes in `DESIGN.md`. This holds from 0.20.1 on; earlier sections stay as published.
 - Markdown prose has no hard line breaks. Write each paragraph and list item as one line; code blocks and table rows are untouched.
-- No jargon in the README. The names the library exports are not jargon (`Command`, `Retry`, `Parallel`, `Resolver`, `TimeParadox`, `onStep`, `backoff` and the rest); everything else gets the plain word. A flow, not an Effect tree. Part of a flow, not a node or a subtree. The Command's function, or `cmd`, not a thunk. Joining, not fan-in. Stops, not short-circuits. A stop, not an abort, for a returned `Failure`. A request, not cooperative. Attached, not stamped. Does the same thing again, not deterministic. No catch, not no catch combinator. Runs at the same time, not concurrently, wherever nothing turns on the distinction. `grep -rniE "thunk|combinator|monad|kleisli|effect tree|fan-in|fan-out|short-circuit|cooperative|imperative shell|arity|stamp" README.md` should print nothing. A precise term may stay if the plain words follow it in the same breath, as `idempotent (safe to run more than once)` does. A term the README coins, such as walking a flow, is defined where it first appears. The precise words are fine everywhere else.
+- No jargon in the README or `REFERENCE.md`. The names the library exports are not jargon (`Command`, `Retry`, `Parallel`, `Resolver`, `TimeParadox`, `onStep`, `backoff` and the rest); everything else gets the plain word. A flow, not an Effect tree. Part of a flow, not a node or a subtree. The Command's function, or `cmd`, not a thunk. Joining, not fan-in. Stops, not short-circuits. A stop, not an abort, for a returned `Failure`. A request, not cooperative. Attached, not stamped. Does the same thing again, not deterministic. No catch, not no catch combinator. Runs at the same time, not concurrently, wherever nothing turns on the distinction. `grep -rniE "thunk|combinator|monad|kleisli|effect tree|fan-in|fan-out|short-circuit|cooperative|imperative shell|arity|stamp" README.md REFERENCE.md` should print nothing. A precise term may stay if the plain words follow it in the same breath, as `idempotent (safe to run more than once)` does. A term the README coins, such as walking a flow, is defined where it first appears. The precise words are fine everywhere else.
+- Docs are written for a reader who skims and lands mid-file. Use short sentences, one idea each. A section works on its own: say where its code comes from, and remind the reader of a hazard where it applies, in a sentence or code comment that links to the full rule.
 - `RULES.md` ships the README's rules, the list between its `rules:start` and `rules:end` markers, with a task index. `scripts/rules-file.js` writes it: change the rules in the README and the index in the script, run `npm run generate`, and never edit `RULES.md` by hand.
-- The README's API Reference is a reference. Each entry gives the signature, what it returns, and one line per option, parameter or rule, and links to the guide section that teaches it rather than teaching it again. A new option gets one line there, and whatever more it needs goes in its guide section.
+- `README.md` teaches and `REFERENCE.md` holds the API and every exact rule, by feature. An entry gives the signature, what it returns, and one line per option, parameter or rule; the detail an option needs goes under its feature in `REFERENCE.md`, and the guide section teaches it and links there. A rule's full statement lives once, in `REFERENCE.md`; the Rules list, Limitations and a guide's advice summarise it and link.
 - The README's orientation sections, such as The Core, stay a few plain sentences. To fill a gap, propose a sentence or two and show the exact wording rather than restructuring the section, and propose moving something apart from changing it.
 - No em dashes anywhere in the repository, including JSDoc, comments, test names and assertion messages. Use a colon, parentheses, a semicolon, a comma or a full stop, whichever carries the relationship; a table cell that needs a placeholder uses `n/a`. `grep -rn "—" --include="*.js" --include="*.ts" --include="*.md" .` checks a change before it lands.
 - A comment in `index.js` says what the code does now and why, in a sentence or two. What broke before, and the full case for a choice, go in `DESIGN.md`. A comment never recounts an incident or restates the line below it.
@@ -63,7 +64,7 @@ Pure Effect is a zero-dependency effect system for JavaScript implementing the "
 
 - Outside `effectGen`, control structures stay in pipeline functions: an `if` or a loop never wraps a Command. A decision sits in a function that receives one value, and control that spans I/O is a node. `effectGen` is the one API that lets control span a Command, and its body yields only Effects; `DESIGN.md`'s Overview says why.
 - A `Failure` carries only its error, untrimmed, and no node or outcome carries the flow's input. `effectPipe` records the input in the private `flowInputs` map, keyed on a copy of the root it returns, since the last step can return a shared object; `interpret` hands it to `onRun` as `initialInput`, which is how a hook-based recorder finds it, and `recordEffect` reads it there for its trace. Only `effectPipe` and `effectGen` record one.
-- A Command's identity is `commandName(eff)`: a non-empty string `meta.name`, else `cmd.name`, else `'anonymous'`. Traces, replay matching, spans and tests all use it; never restate the rule.
+- A Command's identity is `commandName(eff)`: a non-empty string `meta.name`, else `cmd.name`, else `'anonymous'`. Traces, replay matching, spans and tests all use it; never restate the rule. A replay refuses a Command with no name of its own (`ownName`), and an explicit `meta.name: 'anonymous'` counts as one.
 - Docs and examples thread minimal values between steps rather than a growing accumulator object.
 
 ### Generator flows
@@ -82,9 +83,9 @@ Pure Effect is a zero-dependency effect system for JavaScript implementing the "
 
 ### Hooks
 
-- `onStep(name, type, op, path)` wraps each Command and each `Parallel`; a hook that only watches must `await op()` and return its result. `onRun(effect, op, flowName, initialInput)` wraps a whole run once. `onBeforeCommand(command, context)` runs before each Command, and throwing from it vetoes the Command as an abort.
+- `onStep(name, type, op, path)` wraps each Command and each `Parallel`; a hook that only watches must `await op()` and return its result. `onRun(op, flowName, initialInput, context)` wraps a whole run once. `onBeforeCommand(command, context)` runs before each Command, and throwing from it vetoes the Command as an abort.
 - `configureEffect` is additive. Each call adds one layer and returns a function that removes it; several configurations passed to one call form one layer; a bare call removes every layer; a call whose arguments are all `undefined` does nothing. `chainHooks` merges layers earliest outermost: `onStep` and `onRun` nest, and `onBeforeCommand` interceptors run in order. Keep those semantics if the hook shapes change. A per-call `callConfig` merges innermost, or over nothing under `inherit: false`, and a non-boolean `inherit` throws. A `retry` key throws as any key no hook has.
-- **Anything that wraps `onStep` passes `path` on as the fourth argument, and anything that wraps `onRun` passes `initialInput` on.** Only the innermost hook can pass `op` an argument, the recorded decision.
+- **Anything that wraps `onStep` passes `path` on as the fourth argument, and anything that wraps `onRun` passes `initialInput` and `context` on.** Only the innermost hook can pass `op` an argument, the recorded decision.
 - The recorder only watches: `op` always runs, its result is returned, and its error propagates. It catches exactly the two parts of recording a value that run the caller's code or read the caller's value, `redact` and the copy (`recordPart`), and marks the value `unrecorded` with which one threw. Every read of the caller's value, and of what `redact` returns, goes through `recordPart`. Nothing else in it may throw, and it has no catch-all to hide a bug of its own.
 
 ### Recording and replay
@@ -111,11 +112,11 @@ Pure Effect is a zero-dependency effect system for JavaScript implementing the "
 - Deliberate type errors are `// @ts-expect-error` directives, never `tsd`'s `expectError`, each on one line, small enough that only the intended mistake can fail it, with a reason.
 - `index.d.ts` ends with `export {}`, so only a declaration marked `export` is public; a helper type stays unmarked.
 - Change `effectPipe`'s overloads in `scripts/effect-pipe-overloads.js` and run `npm run generate`, **never by hand**.
-- Some declarations exist for a reason, and each is pinned in `test/types.test-d.ts`: `Retry`'s error and `RetryState`'s `R`, every `next` as a method signature, the `settled?: false` overloads, `Command`'s first and last overloads, `Failure`'s `const`, functions typed from their whole return (`AnyEffect`, `EffectValue`, `EffectError`, `EffectContext`), `commandName`'s parameter, `RunContext`, the context parameters `CheckedContext` keeps out of inference, `CommandInterceptor`, `redact`'s `any`, `Parallel`'s branch typing, and the `readonly` options of `RetryState` and `ParallelState`. Read `DESIGN.md`'s TypeScript section before changing one, and extend the tsd file when touching the recording, replay or `CallConfiguration` types.
+- Some declarations exist for a reason, and each is pinned in `test/types.test-d.ts`: `Retry`'s error and `RetryState`'s `R`, every `next` as a method signature, the `settled?: false` overloads, `Parallel`'s last overload (its messages in `test/parallel.js`), `Command`'s `T = R` default and last overload, `Failure`'s `const`, functions typed from their whole return (`AnyEffect`, `EffectValue`, `EffectError`, `EffectContext`), `commandName`'s parameter, the context parameters `CheckedContext` keeps out of inference, `CommandInterceptor`, `redact`'s `any`, `Parallel`'s branch typing, and the `readonly` options of `RetryState` and `ParallelState`. Read `DESIGN.md`'s TypeScript section before changing one, and extend the tsd file when touching the recording, replay or `CallConfiguration` types.
 
 ### Reference integrations
 
-- `examples/opentelemetry-example.js` and `examples/recording-example.js` are reference code: they ship under `examples/`, but `exports` offers only `index.js`. Edit them only with `npm test`. Each exports a function that returns a configuration and one that installs it, and nothing happens on import. Both import the library as `'pure-effect'`, so a copy runs as it is. Observing a run never decides it.
+- `examples/opentelemetry-example.js` and `examples/recording-example.js` are reference code: they ship under `examples/`, but `exports` offers only `index.js`. Edit them only with `npm test`. Each exports a function that returns a configuration and one that installs it, and nothing happens on import. Both import the library as `'pure-effect'`, so a copy runs as it is. Each ships a `.d.ts` that `npm run generate` writes from its JSDoc, never edited by hand. Observing a run never decides it.
 - Telemetry spans carry names, timings and status, never values, and nothing ahead of a run may throw. Recording keeps one recorder per run in an `AsyncLocalStorage` scope; an error from `keep` or the sink goes to `onSinkError`, a field the recorder cannot copy is marked rather than reported, since `toTrace` never throws, and each warning fires once per flow.
 
 ## Proposing changes
@@ -137,10 +138,11 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 - A `Parallel`'s trigger is the first failure to finish, not the first by array order.
 - No `AbortSignal` for a whole run, and none reaches a Command outside a `Parallel`.
 - No finalizer inside a flow: cleanup is a try/finally around `runEffect` in the shell.
+- No undo node: nested and flat forms were spiked and dropped; an undo after a later step's throw is caught inside that Command's function.
 - Nested pipelines for dependent values are a TypeScript cost only.
 - No join helper: `pair(f)` was built and dropped.
 - No flows written as one function: `flow(fn)` was built and dropped; `effectGen` replaced it.
-- No loop helper: a loop is a step that gets the list, then `Parallel(list.map(f), { limit: 1 })`.
+- No loop helper: a loop is a `for` loop with `yield*` in a generator flow, or a step that gets the list, then `Parallel(list.map(f), { limit: 1 })`, in a pipeline.
 - A `TimeParadox` after a flow changes shape is the design; an incident test is re-recorded when its flow changes shape.
 - A trace records results, never Command arguments.
 - A trace keeps data, not objects, in one form, JSON.
@@ -154,9 +156,10 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 - `effectPipe` stops at 20 steps, and nesting is the workaround.
 - `index.js` stays one file, divided into sections; a `utils.js` and a split into the core and recording and replay were weighed and dropped.
 - `runBranches` runs both modes through `settleBranches`.
-- Thrown errors stay out of the declared error union.
+- A result's error, and a settled outcome's, includes `Error` for what was thrown; a step's `Effect` keeps only its declared errors.
 - `meta` is unchecked: a `meta.name` that is not a non-empty string falls back to the function's name.
 - A `Failure` carries only its error; the flow's input reaches `onRun`, never an outcome.
+- A run's name is `flowName` in `runEffect`'s call configuration and `recordEffect`'s options, never the context; supporting both was dropped.
 - Sharp edges are documented, not guarded: `Retry` repeating its whole wrapped tree, a branch whose Command ignores its signal running to completion, a function passed by name taking the signal for a plain first parameter it treats as optional, and a step before the first Command that changes its input.
 
 ## Tests
@@ -170,5 +173,5 @@ The runtime tests are in `test/`, a file for each concern (`core`, `retry`, `par
 - Anchor an equation to a value, as the `Kleisli laws` suite does.
 - Each example file has a suite, so a change to the hook contract breaks the examples rather than letting them rot.
 - Audit the guidance when behaviour changes: write the flow a careful reader would write after reading each documented sharp edge, and run it.
-- README examples run. The `README examples` suite executes every `js` block as one program with its asserts live, so a fenced `js` block is real JavaScript: a value shape goes in a `text` block, a placeholder is written out rather than `...`, and anything new outside the library gets a stub in that suite. A `ts` block is not run, so check `assertCommand` by hand when the types it touches change.
+- README and `REFERENCE.md` examples run. The `README examples` suite executes every `js` block in both files as one program with its asserts live, so a fenced `js` block is real JavaScript: a value shape goes in a `text` block, a placeholder is written out rather than `...`, and anything new outside the library gets a stub in that suite. The `README TypeScript examples` suite compiles each README `ts` block as a file of its own in a strict project, with every export in scope, so a `ts` block is real TypeScript too, and anything it reaches for outside the library gets a stub under its heading there.
 - Documented pipelines keep their shape. Every step accepts and returns the piped value, so a guard's `next` returns `Success(input)`, not `Success(true)`; threading the value is preferred over `() => f(outer)`, without presenting it as a rule; and a Command's function body stays a single call.

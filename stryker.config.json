@@ -5,6 +5,7 @@
         "spec": ["test/*.js"]
     },
     "mutate": ["index.js"],
+    "disableTypeChecks": "index.js",
     "coverageAnalysis": "perTest",
     "reporters": ["clear-text", "progress", "html"],
     "htmlReporter": {

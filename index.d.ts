@@ -170,7 +170,7 @@ export type ParallelValues<B extends readonly unknown[]> = { -readonly [K in key
 
 /** What a settled `Parallel` hands to `next`: one outcome per branch, in array order, with that branch's error. */
 export type ParallelOutcomes<B extends readonly unknown[]> = {
-    -readonly [K in keyof B]: SuccessState<EffectValue<B[K]>> | FailureState<EffectError<B[K]>>;
+    -readonly [K in keyof B]: SuccessState<EffectValue<B[K]>> | FailureState<EffectError<B[K]> | Error>;
 };
 
 /** Every branch's context together, which is what `runEffect` needs for a `Parallel`. */
@@ -189,27 +189,23 @@ export declare function Success<T>(value: T): SuccessState<T>;
 /** Stops the pipeline with `error`. A literal keeps its exact type, and an object or array error is readonly. */
 export declare function Failure<const E = unknown>(error: E): FailureState<E>;
 
+// `N` is what `next` returns, whole, so Failures of different shapes join; given explicitly, `T`, `E` and `Ctx` build it.
+// Without `next`, `N` takes its default, so `T = R` types the value the result passes through as.
 /**
  * Defers a side effect: `cmd` makes the call and `next` decides what follows; without `next` the result passes through.
- * `meta.name` names it, else `cmd.name`.
+ * `meta.name` names it, else `cmd.name`. With no `next`, `meta` can come second: `Command(cmd, { name })`.
  */
-export declare function Command<R>(
+// `next` also takes `CommandMeta`, rather than a third overload, so a mistake in `next` reports two overloads, not three.
+export declare function Command<R, T = R, E = never, Ctx = unknown, N extends AnyEffect = Effect<T, E, Ctx>>(
     cmd: (signal?: AbortSignal) => Promise<R> | R,
-    next?: undefined,
-    meta?: CommandMeta
-): CommandState<R, R, never>;
-
-// `N` is what `next` returns, whole, so Failures of different shapes join; given explicitly, `T`, `E` and `Ctx` build it.
-export declare function Command<R, T = never, E = never, Ctx = unknown, N extends AnyEffect = Effect<T, E, Ctx>>(
-    cmd: (signal?: AbortSignal) => Promise<R> | R,
-    next?: (result: R) => N,
+    next?: ((result: R) => N) | CommandMeta,
     meta?: CommandMeta
 ): CommandState<R, EffectValue<N>, EffectError<N>, EffectContext<N>>;
 
 /** For `Command<User | null>(fetchJson, next)`: given some type arguments, TypeScript infers none of the rest. */
 export declare function Command<R, T = R, E = unknown, Ctx = unknown>(
     cmd: (signal?: AbortSignal) => Promise<R> | R,
-    next?: (result: R) => Effect<T, E, Ctx>,
+    next?: ((result: R) => Effect<T, E, Ctx>) | CommandMeta,
     meta?: CommandMeta
 ): CommandState<R, T, E, Ctx>;
 
@@ -219,7 +215,10 @@ export declare function commandName(command: CommandState<any, any, any, any>): 
 /** Reads the context passed to `runEffect`. With no argument it succeeds with the context; name its type as `Ask<AppCtx>()`. */
 export declare function Ask<Ctx = unknown>(): AskState<Ctx, never, Ctx>;
 
-/** Reads the context passed to `runEffect`. Give the value, error and context types, or none and annotate `ctx`. */
+/**
+ * Reads the context passed to `runEffect`. The first type argument is the value, not the context: annotate `ctx`, as in
+ * `Ask((ctx: AppCtx) => ...)`, or give the value, error and context types.
+ */
 export declare function Ask<T = never, E = never, Ctx = unknown, N extends AnyEffect = Effect<T, E, Ctx>>(
     next: (context: Ctx) => N
 ): AskState<EffectValue<N>, EffectError<N>, Ctx & EffectContext<N>>;
@@ -234,18 +233,21 @@ export declare function Retry<T, E = never, E2 = never, Ctx = unknown, N extends
 ): RetryState<T | EffectValue<N>, E | EffectError<N>, Ctx & EffectContext<N>>;
 
 /**
- * Runs `effect` again when a Command in it throws, and fails with `RetryExhaustedError` once the attempts run out. Give
- * every type argument or none.
+ * Runs `effect` again when a Command in it throws, and fails with `RetryExhaustedError` once the attempts run out, unless
+ * an `onExhausted` given here runs instead. Give every type argument or none.
  */
-export declare function Retry<T, E = never, Ctx = unknown>(
+// `onExhausted` may be left out or `undefined`, as any option may, so a fallback chosen at runtime compiles too; the
+// exhaustion then stays among the errors. `N` comes after `Ctx`, so a caller giving `<T, E, Ctx>` keeps their meaning.
+export declare function Retry<T, E = never, Ctx = unknown, N extends AnyEffect = Effect<T, never, Ctx>>(
     effect: Effect<T, E, Ctx>,
-    options?: RetryOptions
-): RetryState<T, E | RetryExhaustedError, Ctx>;
+    options?: RetryOptions & { onExhausted?: ((error: RetryExhaustedError) => N) | undefined }
+): RetryState<T | EffectValue<N>, E | EffectError<N> | RetryExhaustedError, Ctx & EffectContext<N>>;
 
 // `settled?: false | undefined` keeps a `settled` typed boolean from matching; `| []` infers tuples on TypeScript 5.1.
+// `N` defaults to an Effect rather than `never`, so a call no overload matches reports its options, not `next`.
 /**
  * Runs the branches at the same time and hands `next` their values in order. The first to fail cancels the rest, unless
- * `settled`, which hands `next` every outcome.
+ * `settled`, which hands `next` every outcome. Write `settled` as `true` or `false`; to choose at runtime, branch.
  */
 export declare function Parallel<B extends readonly unknown[] | []>(
     effects: ParallelBranches<B>,
@@ -259,7 +261,7 @@ export declare function Parallel<B extends readonly unknown[] | []>(
     EffectError<B[number]>
 >;
 
-export declare function Parallel<B extends readonly unknown[] | [], N extends AnyEffect = never>(
+export declare function Parallel<B extends readonly unknown[] | [], N extends AnyEffect = Effect<any, never, unknown>>(
     effects: ParallelBranches<B>,
     next: (outcomes: ParallelOutcomes<B>) => N,
     options: ParallelOptions & { settled: true }
@@ -277,7 +279,7 @@ export declare function Parallel<B extends readonly unknown[] | []>(
     options?: ParallelOptions & { settled?: false | undefined }
 ): ParallelState<ParallelValues<B>, ParallelValues<B>, EffectError<B[number]>, ParallelContext<B>>;
 
-export declare function Parallel<B extends readonly unknown[] | [], N extends AnyEffect = never>(
+export declare function Parallel<B extends readonly unknown[] | [], N extends AnyEffect = Effect<any, never, unknown>>(
     effects: ParallelBranches<B>,
     next: (values: ParallelValues<B>) => N,
     options?: ParallelOptions & { settled?: false | undefined }
@@ -287,6 +289,17 @@ export declare function Parallel<B extends readonly unknown[] | [], N extends An
     EffectError<B[number]> | EffectError<N>,
     ParallelContext<B> & EffectContext<N>
 >;
+
+// Accepts only calls the overloads above accept, so it types none. Some compilers report only the last overload a call
+// fails; a second argument that may be `next` or the options names a two-argument call's mistake, and taking no third
+// leaves a three-argument call reported against the overloads above.
+export declare function Parallel<
+    B extends readonly unknown[] | [],
+    S extends ((values: ParallelValues<B>) => AnyEffect) | (ParallelOptions & { settled?: false | undefined })
+>(
+    effects: ParallelBranches<B>,
+    nextOrOptions: S
+): ParallelState<ParallelValues<B>, unknown, unknown, ParallelContext<B>>;
 
 // BEGIN effectPipe overloads, generated by scripts/effect-pipe-overloads.js: edit it, then npm run generate.
 /**
@@ -1287,20 +1300,23 @@ export type Step<X extends AnyEffect, C = EffectContext<X>> = {
 /** Wraps an Effect for `yield*` inside `effectGen`: `const user = yield* step(findUser(email))`. */
 export declare function step<X extends AnyEffect>(effect: X): Step<X>;
 
+// The property names the fix, since TypeScript ends the error for a bare `yield effect` by saying it is missing.
+type YieldStarStep = { 'write yield* step(effect)': true };
 type StepEffectOf<Y> = Y extends Step<infer X, any> ? X : never;
 // An `any` return would match both branches and turn the error union into `any`, so it counts as a plain value.
 type ReturnedEffect<R> = IsAny<R> extends true ? never : R extends AnyEffect ? R : never;
 type GenValue<R> = IsAny<R> extends true ? any : R extends AnyEffect ? EffectValue<R> : R;
-type GenError<Y, R> = EffectError<StepEffectOf<Y>> | EffectError<ReturnedEffect<R>>;
 type GenContext<Y, R> = EffectContext<StepEffectOf<Y> | ReturnedEffect<R>>;
 
+// What a body yields is checked against `YieldStarStep` rather than constrained to a `Step`, so a bare `yield effect`
+// fails with an error that names the fix. The error union is written out, since hovers would show an alias unexpanded.
 /**
  * Builds a flow function from a generator function, written with `yield* step(effect)` where `async` code writes
  * `await`. A plain return value is a `Success`; return a `Failure` to stop.
  */
-export declare function effectGen<I, Y extends Step<any, any>, R>(
-    body: (input: I) => Generator<Y, R, unknown>
-): (input: I) => Effect<GenValue<R>, GenError<Y, R>, GenContext<Y, R>>;
+export declare function effectGen<I, Y, R>(
+    body: (input: I) => Generator<Y extends Step<any, any> ? Y : YieldStarStep, R, unknown>
+): (input: I) => Effect<GenValue<R>, EffectError<StepEffectOf<Y>> | EffectError<ReturnedEffect<R>>, GenContext<Y, R>>;
 
 /**
  * Wraps each Command, and each `Parallel`. Call `op` and return its result; a hook that calls another passes `path` on.
@@ -1328,14 +1344,15 @@ export type ParallelDecision =
       };
 
 /**
- * `flowName` is `context.flowName`, or `''` when the context has none. `initialInput` is what the flow was called with
- * when `effectPipe` built it, and `undefined` otherwise. A hook that calls another passes both on.
+ * `flowName` is the run's `flowName`, or `''` when it has none. `initialInput` is what the flow was called with when
+ * `effectPipe` built it, and `undefined` otherwise. `context` is what `Ask` reads, `{}` when the run was given none. A
+ * hook that calls another passes all three on.
  */
 export type RunWrapper = (
-    effect: Effect<unknown>,
     op: () => Promise<SuccessState<unknown> | FailureState<unknown>>,
     flowName: string,
-    initialInput: unknown
+    initialInput: unknown,
+    context: any
 ) => Promise<SuccessState<unknown> | FailureState<unknown>>;
 
 // A union, so a JSDoc `@type` on an async function fits it too.
@@ -1353,30 +1370,29 @@ export interface EffectConfiguration {
 /** Adds a layer of hooks and returns a function that removes it. With no arguments, removes every layer. */
 export declare function configureEffect(...configs: (EffectConfiguration | undefined)[]): () => void;
 
-/** Hooks for one `runEffect` call, inside the installed ones; `inherit: false` leaves those out. */
-export type CallConfiguration = EffectConfiguration & { inherit?: boolean | undefined };
-
-/** The context a run is given: what the flow reads, and a `flowName` naming the run in traces and spans. */
-export type RunContext<Ctx> = unknown extends Ctx
-    ? Ctx
-    : Ctx extends object
-      ? Ctx & { flowName?: string | undefined }
-      : Ctx;
+/**
+ * Hooks for one `runEffect` call, inside the installed ones; `inherit: false` leaves those out. `flowName` names the run
+ * in traces and spans.
+ */
+export type CallConfiguration = EffectConfiguration & {
+    inherit?: boolean | undefined;
+    flowName?: string | undefined;
+};
 
 // TypeScript 5.1's stand-in for NoInfer: it defers this indexed access, so it infers nothing from it.
 /** A context checked against the one the flow reads, and never inferred from. */
 type CheckedContext<T> = [T][T extends any ? 0 : never];
 
 /**
- * Runs a flow and returns its `Success` or `Failure`. A flow that reads a context requires one, so "Expected 2-3
- * arguments" here means the context was left out.
+ * Runs a flow and returns its `Success` or `Failure`, whose error includes `Error` for what a Command's function threw.
+ * A flow that reads a context requires one, so "Expected 2-3 arguments" here means the context was left out.
  */
 export declare function runEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     ...args: unknown extends Ctx
         ? [context?: CheckedContext<Ctx>, callConfig?: CallConfiguration]
-        : [context: RunContext<CheckedContext<Ctx>>, callConfig?: CallConfiguration]
-): Promise<SuccessState<T> | FailureState<E>>;
+        : [context: CheckedContext<Ctx>, callConfig?: CallConfiguration]
+): Promise<SuccessState<T> | FailureState<E | Error>>;
 
 export type ReplayStep = {
     /** Position in completion order, which varies with a `Parallel`; prefer `path`. */
@@ -1452,9 +1468,11 @@ export declare function recorder(options?: RecorderOptions): {
     toTrace<I = unknown, C = unknown>(meta?: TraceMeta<I, C>): TraceLog<I, C>;
 };
 
-/** `recordEffect`'s options: recorder options, plus the context the run gets and a build id. */
+/** `recordEffect`'s options: recorder options, plus the context the run gets, the run's name and a build id. */
 export type RecordOptions<Ctx = unknown> = RecorderOptions & {
-    context?: RunContext<Ctx> | undefined;
+    context?: Ctx | undefined;
+    /** Names the run in the trace, and in spans an installed hook makes. */
+    flowName?: string | undefined;
     version?: string | undefined;
 };
 
@@ -1467,12 +1485,12 @@ export declare function recordEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     ...options: unknown extends Ctx
         ? [options?: RecordOptions<CheckedContext<Ctx>>]
-        : [options: RecordOptions<CheckedContext<Ctx>> & { context: RunContext<CheckedContext<Ctx>> }]
-): Promise<{ result: SuccessState<T> | FailureState<E>; trace: TraceLog<unknown, Ctx> }>;
+        : [options: RecordOptions<CheckedContext<Ctx>> & { context: CheckedContext<Ctx> }]
+): Promise<{ result: SuccessState<T> | FailureState<E | Error>; trace: TraceLog<unknown, Ctx> }>;
 
 export interface ReplayOptions<Ctx = unknown> {
     /** Context for `Ask`; defaults to the one the trace recorded. */
-    context?: RunContext<Ctx> | undefined;
+    context?: Ctx | undefined;
     /** Strip `Retry` delays so a replay does not wait out production backoff (default `true`). */
     fastRetry?: boolean | undefined;
     /** Runs the replay inside the installed hooks, so they see it. Off by default. */
@@ -1487,13 +1505,13 @@ export interface ReplayOptions<Ctx = unknown> {
 
 /** The replay's outcome and, for a trace, the recorded steps the flow never asked for. */
 export interface Replay<T, E = unknown> {
-    result: SuccessState<T> | FailureState<E>;
+    result: SuccessState<T> | FailureState<E | Error>;
     unreached: TraceEntry[];
 }
 
 /**
  * The error a replay stops with, in its result's `Failure`: a `TimeParadox` when the flow asked for a different step,
- * else a `ReplayError`. The result's type leaves it out, so read the error as `unknown` and cast it.
+ * else a `ReplayError`. Each is an `Error`, which a result's error includes, so cast it directly.
  */
 export type ReplayFault =
     | (Error & {
@@ -1512,7 +1530,7 @@ export type ReplayFault =
           name: 'ReplayError';
           /** Where the replay stopped. */
           path?: string | undefined;
-          /** The Command the replay had no answer for. */
+          /** The Command the replay had no answer for, or `'anonymous'` for one with no name. */
           command?: string | undefined;
           index?: number | undefined;
           /** The trace field a replay needed and lacked. */
@@ -1533,21 +1551,21 @@ export declare function replayEffect<T, E = unknown, Ctx = unknown>(
     resolver: Resolver,
     ...options: unknown extends Ctx
         ? [options?: ReplayOptions<CheckedContext<Ctx>>]
-        : [options: ReplayOptions<CheckedContext<Ctx>> & { context: RunContext<CheckedContext<Ctx>> }]
+        : [options: ReplayOptions<CheckedContext<Ctx>> & { context: CheckedContext<Ctx> }]
 ): Promise<Omit<Replay<T, E>, 'unreached'>>;
 export declare function replayEffect<T, E = unknown, Ctx = unknown>(
     effect: Effect<T, E, Ctx>,
     traceOrResolver: Resolver | TraceLog | TraceEntry[],
     ...options: unknown extends Ctx
         ? [options?: ReplayOptions<CheckedContext<Ctx>>]
-        : [options: ReplayOptions<CheckedContext<Ctx>> & { context: RunContext<CheckedContext<Ctx>> }]
+        : [options: ReplayOptions<CheckedContext<Ctx>> & { context: CheckedContext<Ctx> }]
 ): Promise<Omit<Replay<T, E>, 'unreached'> & { unreached?: TraceEntry[] }>;
 
 export interface TimeTravelOptions<Ctx = unknown> {
     /** Receives each narrated line; `console.log` by default. */
     log?: ((...args: any[]) => void) | undefined;
     /** Context for `Ask`; defaults to the one the trace recorded. */
-    context?: RunContext<Ctx> | undefined;
+    context?: Ctx | undefined;
     /** The build replaying the trace; a trace recorded at another build gets a warning. */
     version?: string | undefined;
 }
