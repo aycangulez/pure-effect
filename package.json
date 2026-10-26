@@ -15,11 +15,22 @@
         "typescript"
     ],
     "type": "module",
-    "exports": "./index.js",
+    "exports": {
+        ".": {
+            "types": "./index.d.ts",
+            "default": "./index.js"
+        },
+        "./flight-recorder": {
+            "types": "./flight-recorder.d.ts",
+            "default": "./flight-recorder.js"
+        }
+    },
     "types": "./index.d.ts",
     "files": [
         "index.js",
         "index.d.ts",
+        "flight-recorder.js",
+        "flight-recorder.d.ts",
         "README.md",
         "RULES.md",
         "REFERENCE.md",
@@ -34,8 +45,8 @@
         "test": "mocha && tsd && tsc -p jsconfig.json",
         "test:ts-minimum": "npx --yes -p typescript@5.1 tsc -p test/tsconfig.minimum.json",
         "test:fuzz": "FUZZ_SCALE=20 mocha test/fuzz.js",
-        "generate": "node scripts/effect-pipe-overloads.js && node scripts/rules-file.js && node scripts/example-declarations.js",
-        "format": "prettier --write index.js index.d.ts examples/*.js examples/*.d.ts scripts/*.js test/*.js test/types.test-d.ts README.md REFERENCE.md CLAUDE.md DESIGN.md CHANGELOG.md CONTRIBUTING.md RULES.md"
+        "generate": "node scripts/effect-pipe-overloads.js && node scripts/rules-file.js && node scripts/js-declarations.js",
+        "format": "prettier --write index.js index.d.ts flight-recorder.js flight-recorder.d.ts examples/*.js examples/*.d.ts scripts/*.js test/*.js test/types.test-d.ts README.md REFERENCE.md CLAUDE.md DESIGN.md CHANGELOG.md CONTRIBUTING.md RULES.md"
     },
     "tsd": {
         "directory": "test",

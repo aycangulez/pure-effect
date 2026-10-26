@@ -16,12 +16,19 @@ import {
     commandName
 } from '../index.js';
 import { registerUserFlow, registerUser, valueOf, errorOf } from './helpers.js';
+import { readFileSync } from 'node:fs';
 
 /** @import { CommandInterceptor } from "../index.js" */
 
 describe('Core', function () {
     // Global hooks outlive a suite, so this guards against inheriting another suite's wiring.
     beforeEach(() => configureEffect());
+
+    it('should import nothing, so the core runs in a browser', function () {
+        // Recording needs node:async_hooks, which is why it ships as pure-effect/flight-recorder.
+        const source = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+        assert.deepEqual(source.match(/^\s*import\s.*from\s/gm), null);
+    });
 
     it('should return Failure when e-mail is invalid', async function () {
         const badInput = { email: 'bad-email', password: '123' };

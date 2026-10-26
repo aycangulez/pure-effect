@@ -116,6 +116,26 @@ export const importCopiedExample = async (file) => {
     }
 };
 
+/**
+ * Imports `source` as a module of a project that installs this library, from a directory whose node_modules holds the
+ * repository under its package name, so imports resolve through package.json's `exports` as a user's would.
+ * @param {string} source
+ * @returns {Promise<any>}
+ */
+export const importInProject = async (source) => {
+    const repo = fileURLToPath(new URL('..', import.meta.url));
+    const project = mkdtempSync(join(tmpdir(), 'pure-effect-project-'));
+    try {
+        mkdirSync(join(project, 'node_modules'));
+        symlinkSync(repo, join(project, 'node_modules', 'pure-effect'), 'dir');
+        writeFileSync(join(project, 'package.json'), '{ "type": "module" }');
+        writeFileSync(join(project, 'main.js'), source);
+        return await import(pathToFileURL(join(project, 'main.js')).href);
+    } finally {
+        rmSync(project, { recursive: true, force: true });
+    }
+};
+
 /** The options of a strict TypeScript project with `exactOptionalPropertyTypes` on, which `jsconfig.json` leaves off. */
 const strictProject = {
     allowJs: true,
@@ -138,11 +158,11 @@ const typeErrorsOf = (program) =>
     });
 
 /**
- * The type errors an example raises in a strict TypeScript project that copied it.
- * @param {string} file - The example's file name in examples/
+ * The type errors a JavaScript file that ships raises in a strict TypeScript project.
+ * @param {string} path - The file's path from the repository root, such as 'flight-recorder.js'
  * @returns {string[]}
  */
-export const exampleTypeErrors = (file) => typeErrorsOf(ts.createProgram([join('examples', file)], strictProject));
+export const jsTypeErrors = (path) => typeErrorsOf(ts.createProgram([path], strictProject));
 
 /**
  * The type errors a strict TypeScript project gets from `files`, each a file at the repository root, so it can import

@@ -1,19 +1,13 @@
 // @ts-check
 
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { configureEffect, recorder, Failure } from 'pure-effect';
+import { configureEffect, recorder, Failure } from './index.js';
 
-/** @import { EffectConfiguration, RunWrapper, StepRunner, TraceEntry, TraceLog, SuccessState, FailureState, RecorderOptions } from "pure-effect" */
-
-/**
- * Records every run of an application without touching any call site, one trace per run. `recordEffect` covers
- * tests and scripts, where one call holds the whole run.
- */
+/** @import { EffectConfiguration, RunWrapper, StepRunner, TraceEntry, TraceLog, SuccessState, FailureState, RecorderOptions } from "./index.js" */
 
 /**
- * @typedef {Object} RecordingStore
- * @property {ReturnType<typeof recorder>} rec
- * @property {TraceLog} head - The trace's own fields, packaged as the run starts rather than after it
+ * The flight recorder: records every run of an application without touching any call site, one trace per run, and
+ * keeps the runs worth replaying. `recordEffect` covers tests and scripts, where one call holds the whole run.
  */
 
 /**
@@ -58,7 +52,8 @@ export function recordingHooks(options = {}) {
         onWarning = (message) => console.warn(message)
     } = options;
     // One recorder per run, found through async-local scope: a single shared recorder would mix concurrent runs.
-    /** @type {AsyncLocalStorage<RecordingStore>} */
+    // `head` holds the trace's own fields, packaged as the run starts rather than after it.
+    /** @type {AsyncLocalStorage<{ rec: ReturnType<typeof recorder>, head: TraceLog }>} */
     const scope = new AsyncLocalStorage();
     /** Warnings already given, as `kind:flowName`. */
     const warned = new Set();
