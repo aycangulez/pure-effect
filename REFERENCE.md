@@ -394,7 +394,7 @@ Replays a trace and narrates it as a tree of the flow, each Command under the `P
 
 ### `pure-effect/flight-recorder`
 
-The flight recorder, a second entry point, records every run of an application with one recorder per run: `import { enableRecording, recordingHooks } from 'pure-effect/flight-recorder'`. For one run in a test or a script, use `recordEffect`. It needs `AsyncLocalStorage` from `node:async_hooks`, so it runs in Node, Deno, Bun, and Cloudflare Workers with `nodejs_compat`, not in a browser. In TypeScript, it needs `moduleResolution` set to `node16`, `nodenext` or `bundler`.
+The flight recorder, a second entry point, records every run of an application with one recorder per run: `import { enableRecording, recordingHooks } from 'pure-effect/flight-recorder'`. For one run in a test or a script, use `recordEffect`. It needs `AsyncLocalStorage` from `node:async_hooks`, so it runs in Node, Deno, Bun, and Cloudflare Workers with `nodejs_compat`, not in a browser.
 
 - `recordingHooks(options?)`: returns the configuration that records each run, to pass to `configureEffect` beside your other hooks.
 - `enableRecording(options?)`: installs that configuration, and returns a function that removes it.

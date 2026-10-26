@@ -1153,7 +1153,7 @@ const { result: replayed } = await replayEffect(registerUserFlow(trace.initialIn
 assert.deepEqual(replayed, live); // holds while results are plain data and errors plain Errors; see Keeping a replay faithful
 ```
 
-In production, record each run with a version and a flow name, and replay its trace anywhere with `timeTravel`, which narrates each step:
+Record each run with a version and a flow name, and replay its trace anywhere with `timeTravel`, which narrates each step. Here `recordEffect` records one run; to record every run of an application, use the flight recorder, in [Recording in Production](#recording-in-production):
 
 ```js
 import { recordEffect, replayEffect, timeTravel } from 'pure-effect';
@@ -1268,7 +1268,7 @@ Pick the recording function by the job:
 
 The flight recorder records every run of an application without changing any call site. Like a plane's flight recorder, it is always on, and it keeps the runs worth looking at after a failure. Install it once at startup.
 
-It ships as a second entry point, `pure-effect/flight-recorder`, so the core stays free of imports. It needs `AsyncLocalStorage` from `node:async_hooks`, so it runs in Node, Deno, Bun, and Cloudflare Workers with `nodejs_compat`, but not in a browser. In TypeScript, set `moduleResolution` to `node16`, `nodenext` or `bundler`, so the import finds its types.
+It ships as a second entry point, `pure-effect/flight-recorder`, so the core stays free of imports. It needs `AsyncLocalStorage` from `node:async_hooks`, so it runs in Node, Deno, Bun, and Cloudflare Workers with `nodejs_compat`, but not in a browser.
 
 The telemetry example below is reference code you copy, not an entry point you import. It ships in the package's `examples` folder, `node_modules/pure-effect/examples`, and in the repository's [examples folder](https://github.com/aycangulez/pure-effect/blob/main/examples); copy it into your project.
 
@@ -1344,6 +1344,7 @@ Use a veto as a guardrail, not as part of the flow's logic. A veto stops the who
 `configureEffect` adds a layer of hooks for the whole process and returns a function that removes it. Removing a layer removes only that layer, even when others were installed after it, so a library can add and remove its own hooks without touching the application's:
 
 ```js
+// recordingHooks comes from pure-effect/flight-recorder; telemetryHooks from the telemetry example.
 const remove = configureEffect(telemetryHooks(), recordingHooks({ sink }));
 // the same as configureEffect(telemetryHooks()) followed by configureEffect(recordingHooks({ sink }))
 remove();

@@ -1019,9 +1019,9 @@ Nothing about the library lives in an agent's private memory. An agent once kept
 
 ### Mutation testing
 
-Mutation testing stays out of CI. Its survivors need reading rather than counting, so it sets no score to fail on, and a run is much slower than the rest of the gate. Run it after changing `index.js` or its tests, since a test that passes whatever the code does is invisible to every other check.
+Mutation testing stays out of CI. Its survivors need reading rather than counting, so it sets no score to fail on, and a run is much slower than the rest of the gate. Run it after changing `index.js`, `flight-recorder.js` or their tests, since a test that passes whatever the code does is invisible to every other check.
 
-`stryker.config.json` disables type checks only in `index.js`, the one file it mutates. By default Stryker adds `// @ts-nocheck` to every file it copies into its sandbox, the examples' declaration files included, so the test that compares them with the generator's output failed the initial run and no mutant ran.
+`stryker.config.json` disables type checks only in `index.js` and `flight-recorder.js`, the files it mutates. By default Stryker adds `// @ts-nocheck` to every file it copies into its sandbox, the generated declaration files included, so the test that compares them with the generator's output failed the initial run and no mutant ran.
 
 Its survivors are not a to-do list:
 
