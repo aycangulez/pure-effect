@@ -98,9 +98,11 @@ That rule catches a function passed by name whose first parameter is optional an
 
 #### Undoing under `settled`
 
-A settled `Parallel` cancels nothing, so both steps always run to the end, and the undoing starts once both have finished. The undo steps are part of the flow, so a trace records them and a replay repeats them. An undo step that fails ends the flow with its own error rather than the original one; wrap it in `Retry` if it can fail for a moment.
+A settled `Parallel` cancels nothing, so both steps always run to the end, and the undoing starts once both have finished. The undo steps are part of the flow, so a trace records them and a replay repeats them. An undo step that fails ends the flow with its own error rather than the original one; wrap it in `Retry` if it can fail for a moment. An undo whose answer can say it did not happen, as `{ refunded: false }` does, needs a `next` that turns that answer into a `Failure`, or nothing reports it.
 
-Under `settled`, a branch whose Command throws reaches `next` as a `Failure`, so the undo still runs. When one call follows another instead, as a shipment follows a charge, the later Command's function has to catch its own error and return it as data: a throw stops the flow before its `next` runs, and the charge stays. [Translating `try`/`catch`](README.md#translating-trycatch) shows that shape.
+Run several undo steps as a settled `Parallel` of their own, whose `next` returns the original error and reports any undo that failed, as the README's `undoAll` does. Under `settled`, an undo that fails cancels none of the others, and with `limit: 1` they run one at a time, in array order. Without `settled`, the first undo to fail cancels the rest and ends the flow with its own error.
+
+Under `settled`, a branch whose Command throws reaches `next` as a `Failure`, so the undo still runs. When one call follows another instead, as a shipment follows a charge, the later Command's function has to catch its own error and return it as data: a throw stops the flow before its `next` runs, and the charge stays. A `Retry` that gives up never reaches its Command's `next` either. So a later Command under `Retry` keeps its default `next`, its `onExhausted` returns the failure as data, and the step after the `Retry` sees every failure and undoes in one place. [Translating `try`/`catch`](README.md#translating-trycatch) shows both shapes.
 
 #### Loops
 

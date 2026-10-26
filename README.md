@@ -600,16 +600,27 @@ const chargeOrder = (order) => {
     return Command(cmdChargeOrder, (c) => (c.ok ? Success(c.chargeId) : Failure('card_declined')));
 };
 
-// Each undo step ends the flow with the error that made it necessary.
-const releaseStock = (reservationId, error) => {
+// Each undo step checks its answer, so an undo that did not happen is a Failure, not lost.
+const releaseStock = (reservationId) => {
     const cmdReleaseStock = () => inventory.release(reservationId);
-    return Command(cmdReleaseStock, () => Failure(error));
+    return Command(cmdReleaseStock, (r) => (r.released ? Success(reservationId) : Failure('release_failed')));
 };
 
-const refundCharge = (chargeId, error) => {
+const refundCharge = (chargeId) => {
     const cmdRefundCharge = () => payments.refund(chargeId);
-    return Command(cmdRefundCharge, () => Failure(error));
+    return Command(cmdRefundCharge, (r) => (r.refunded ? Success(chargeId) : Failure('refund_failed')));
 };
+
+// Runs every undo, then fails with the original error and any undo that failed.
+const undoAll = (undos, error) =>
+    Parallel(
+        undos,
+        (outcomes) => {
+            const undoFailed = outcomes.filter((o) => o.type === 'Failure').map((o) => o.error);
+            return Failure(undoFailed.length > 0 ? { error, undoFailed } : error);
+        },
+        { settled: true }
+    );
 
 // Passes both results on, or undoes whichever step succeeded and then fails.
 const reserveAndCharge = (order) =>
@@ -617,16 +628,18 @@ const reserveAndCharge = (order) =>
         [reserveStock(order), chargeOrder(order)],
         ([reservation, charge]) => {
             if (reservation.type === 'Failure') {
-                return charge.type === 'Success' ? refundCharge(charge.value, reservation.error) : reservation;
+                return charge.type === 'Success'
+                    ? undoAll([refundCharge(charge.value)], reservation.error)
+                    : reservation;
             }
-            if (charge.type === 'Failure') return releaseStock(reservation.value, charge.error);
+            if (charge.type === 'Failure') return undoAll([releaseStock(reservation.value)], charge.error);
             return Success({ order, reservationId: reservation.value, chargeId: charge.value });
         },
         { settled: true }
     );
 ```
 
-With more than two branches, several steps may need undoing at once: return `Parallel(undos, () => Failure(error))` to run them all and then fail.
+`undoAll` takes any number of undo steps and runs them as a settled `Parallel`, so an undo that fails cancels none of the others. Without `settled`, it would cancel the rest and replace the original error. Add `limit: 1` to run them one at a time, in the order listed.
 
 `next` is a plain function, so each case is tested by handing it the outcomes, with no I/O:
 
@@ -635,8 +648,11 @@ const order = { id: 'order_1', customerId: 'cus_1', items: [], total: 120 };
 
 // The card was charged, then the stock ran out: the flow refunds the charge and fails.
 const undoing = reserveAndCharge(order).next([Failure('out_of_stock'), Success('ch_1')]);
-assert.equal(commandName(undoing), 'cmdRefundCharge');
-assert.deepEqual(undoing.next({ refunded: true }), Failure('out_of_stock'));
+assert.equal(commandName(undoing.effects[0]), 'cmdRefundCharge');
+assert.deepEqual(
+    undoing.next([Failure('refund_failed')]),
+    Failure({ error: 'out_of_stock', undoFailed: ['refund_failed'] })
+);
 
 // Both succeeded, so there is nothing to undo.
 assert.deepEqual(
@@ -905,7 +921,7 @@ A `catch` around `yield*` can log and rethrow, but it cannot recover, and it see
 
 - **Carry on past a failed call.** Catch inside the Command's function and return the error as data, as below.
 - **Undo the calls that succeeded when one running beside them fails.** Run the calls in a `Parallel` with `settled: true`, and have its `next` undo the ones that succeeded; see [Undoing what succeeded when a branch fails](#undoing-what-succeeded-when-a-branch-fails).
-- **Undo an earlier call when a later one fails.** Catch inside the later Command's function and return the error as data, and have its `next` return the Command that undoes the earlier one, as in the second example below. A later Command that throws instead stops the flow before its `next` runs, so nothing is undone. If the later Command is under `Retry`, undo in `onExhausted` as well. A `Retry` that gives up never reaches the Command's `next`.
+- **Undo an earlier call when a later one fails.** Catch inside the later Command's function and return the error as data, and have its `next` return the Command that undoes the earlier one, as in the second example below. A later Command that throws instead stops the flow before its `next` runs, so nothing is undone. A `Retry` that gives up never reaches the Command's `next` either. So when the later Command is under `Retry`, give it no `next`, have `onExhausted` return the failure as data, and decide in the step after the `Retry`. Every failure then reaches one place that undoes, as in the third example below.
 - **Retry, then give up.** Wrap the Command in `Retry`, and put what the `catch` did after the last try in `onExhausted`; see [Retrying Transient Failures](#retrying-transient-failures).
 
 A welcome email whose failure the flow reports but does not stop for:
@@ -935,7 +951,10 @@ A reservation made after a charge, which refunds the charge when the reservation
 ```js
 const refundCharge = (charge, reason) => {
     const cmdRefundCharge = () => payments.refund(charge.chargeId);
-    return Command(cmdRefundCharge, () => Failure(`Reservation failed: ${reason}`));
+    return Command(cmdRefundCharge, (r) => {
+        const error = `Reservation failed: ${reason}`;
+        return Failure(r.refunded ? error : { error, undoFailed: ['refund_failed'] });
+    });
 };
 
 const reserveStock = (charge) => {
@@ -952,6 +971,21 @@ const reserveStock = (charge) => {
 const reservation = await runEffect(reserveStock({ orderId: 'order_1', chargeId: 'ch_1' }));
 assert.deepEqual(reservation, Failure('Reservation failed: out of stock'));
 ```
+
+A courier booked after the charge, under `Retry`. Giving up answers like a refusal, so one step decides both, and refunds the charge with the `refundCharge` above:
+
+```js
+const bookCourier = (charge) => {
+    const cmdBookCourier = () => courier.book(charge.orderId); // { ok: false } for a refusal; throws on a timeout
+    return Retry(Command(cmdBookCourier), { onExhausted: () => Success({ ok: false, reason: 'courier unavailable' }) });
+};
+
+const confirmBooking = (charge, booking) => (booking.ok ? Success(booking) : refundCharge(charge, booking.reason));
+
+assert.equal(commandName(confirmBooking({ chargeId: 'ch_1' }, { ok: false, reason: 'no slots' })), 'cmdRefundCharge');
+```
+
+In a generator flow, the body only puts them in order: `const booking = yield* step(bookCourier(charge))`, then `yield* step(confirmBooking(charge, booking))`. When several earlier calls need undoing, hand the deciding step their undo steps, latest first, and have it return `undoAll` with them, as in [Undoing what succeeded when a branch fails](#undoing-what-succeeded-when-a-branch-fails).
 
 ## TypeScript: Typed Errors and Context
 

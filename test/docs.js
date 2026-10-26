@@ -185,7 +185,12 @@ describe('README examples', function () {
             charge: async () => ({ ok: true, chargeId: 'ch_1' }),
             refund: async () => ({ refunded: true })
         },
-        inventory: { reserve: async () => ({ ok: true, reservationId: 'res_1' }) },
+        inventory: {
+            reserve: async () => ({ ok: true, reservationId: 'res_1' }),
+            release: async () => ({ released: true })
+        },
+        // The courier the undo list example books, which its walk never calls.
+        courier: { book: async () => ({ ok: true, bookingId: 'bk_1' }) },
         sku: 'sku_1',
         summarize: (/** @type {any} */ outcome) => outcome.type,
         sink: () => {},
