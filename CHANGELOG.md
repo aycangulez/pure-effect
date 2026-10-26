@@ -2,6 +2,12 @@
 
 All notable changes to Pure Effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
+## [Unreleased]
+
+### Added
+
+- `pure-effect/flight-recorder`, which records every run of an application with one recorder per run, replaces `examples/recording-example.js`. Import `recordingHooks` or `enableRecording` from it instead of copying the example.
+
 ## [0.22.0] - 2026-10-24
 
 ### Added

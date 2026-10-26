@@ -635,13 +635,14 @@ Under `settled`:
 
 ## Reference integrations
 
-`examples/opentelemetry-example.js` and `examples/recording-example.js` are reference code, not part of the library. The rule for both is that observing a run never decides it.
+`examples/opentelemetry-example.js` is reference code, not part of the library, and `flight-recorder.js` is the second entry point, `pure-effect/flight-recorder` (see [Recording ships as its own entry point](#recording-ships-as-its-own-entry-point)). The rule for both is that observing a run never decides it.
 
-- They ship in the package under `examples/`, through the `files` list, so an application can copy them from `node_modules`. But `exports` offers only `index.js`, so neither can be imported as part of the library.
+- The example ships in the package under `examples/`, through the `files` list, so an application can copy it from `node_modules`. `exports` offers only `index.js` and `flight-recorder.js`, so the example cannot be imported as part of the library.
 - Both have suites, so edit them only with `npm test`.
-- Each ships a declaration file beside it, which `scripts/example-declarations.js` writes from the example's JSDoc, and a test fails when one differs from what it writes. They shipped as JavaScript alone until 0.22.0, so a TypeScript project that copied one needed `allowJs`, which also type-checked the copy under its own settings: the telemetry example's SDK imports then failed a project without the SDK installed. A TypeScript reader raised it in every round of the October 2026 DX experiments. Generating the declarations keeps them in step with the code. `startTelemetrySdk`'s JSDoc declares its result as what a caller uses, `{ shutdown() }`, since the SDK's own type would put the SDK back in every declaration that imports it, and each optional field is declared `T | undefined`, as `index.d.ts`'s are.
+- Each ships a declaration file beside it, which `scripts/js-declarations.js` writes from its JSDoc, and a test fails when one differs from what it writes. They shipped as JavaScript alone until 0.22.0, so a TypeScript project that copied one needed `allowJs`, which also type-checked the copy under its own settings: the telemetry example's SDK imports then failed a project without the SDK installed. A TypeScript reader raised it in every round of the October 2026 DX experiments. Generating the declarations keeps them in step with the code. `startTelemetrySdk`'s JSDoc declares its result as what a caller uses, `{ shutdown() }`, since the SDK's own type would put the SDK back in every declaration that imports it, and each optional field is declared `T | undefined`, as `index.d.ts`'s are.
 - Each exports a function that returns a configuration (`telemetryHooks`, `recordingHooks`), which is the form that composes, and one that installs it (`enableTelemetry`, `enableRecording`). Nothing happens on import.
-- Both import the library as `'pure-effect'`, which resolves to this repository through `package.json`'s `exports`, so a copy runs as it is in a project that installs the library. They imported `'../index.js'`, and every copy an evaluator made failed with `Cannot find module` until its import was edited. A test in each suite imports the file from such a project.
+- The example imports the library as `'pure-effect'`, which resolves to this repository through `package.json`'s `exports`, so a copy runs as it is in a project that installs the library. The examples imported `'../index.js'`, and every copy an evaluator made failed with `Cannot find module` until its import was edited. A test imports the example from such a project.
+- The flight recorder imports `'./index.js'`. Nobody copies it, and in an installed package both that path and `'pure-effect'` resolve to the same file, so it shares the `configureEffect` state of the application that imports the core. A test imports it as `pure-effect/flight-recorder` from a project that installs the library, through `import` and through `require`, and checks a run it records went through that shared state.
 
 ### Telemetry
 
@@ -652,7 +653,7 @@ It opens a span per run in `onRun`, a child span per Command in `onStep`, and on
 - `onStep` must `await op()` and return its result.
 - Nothing ahead of the run may throw, since serializing a cyclic input there once left flows unexecuted.
 
-### Recording
+### The flight recorder
 
 - It keeps one recorder per run in an `AsyncLocalStorage` scope. `onRun` packages the input and the context it is handed before the run, and `onStep` passes `path` on.
 - An error from `keep` or the sink goes to `onSinkError`, by default `console.error`, rather than replacing the run's outcome. The wiring copies the input and the context in `onRun` ahead of the run, where a throw would stop the run before it started, so it relies on `toTrace` never throwing. A field it cannot copy is marked `unrecorded` on the trace and warned about, rather than left out and reported to `onSinkError` with nothing on the trace to say so.
@@ -871,9 +872,17 @@ Saving lines is not enough: `pair`, `Loop`, `flow(fn)`, `tap` and `observe` each
 
 `recordEffect` and `timeTravel` own the trace metadata. `timeTravel` could be rebuilt from `onResolved` in ten lines, but the one-line form is what makes the feature graspable.
 
-### Recording stays out of the library
+### Recording ships as its own entry point
 
-`node:async_hooks` would be `index.js`'s only import, and a Node-only one. And the policy the reference wiring encodes (what to keep, where the sink is, what `redact` strips) belongs to the application.
+Recording stayed out of the library until October 2026, for two reasons. `node:async_hooks` would be `index.js`'s only import, and a Node-only one. And the policy the reference wiring encodes (what to keep, where the sink is, what `redact` strips) belongs to the application.
+
+The second reason lapsed as the wiring matured: it takes that policy as options (`sink`, `keep`, `redact`, `maxEntries`, `stack`, `version`, `onSinkError`, `onWarning`), so the application still decides it. Copying the file out of `node_modules` gave users nothing the options did not, and left each copy to miss every fix. So it ships as `pure-effect/flight-recorder`.
+
+The first reason still holds, and it is why the wiring is a second entry point rather than an export of `index.js`. The core imports nothing and runs in a browser; only a user who imports the flight recorder pulls in `node:async_hooks`. A fallback without `AsyncLocalStorage` would be correct only when one run happens at a time, so it would mix concurrent runs without a word. A hook contract that handed hooks a run identity would make the recorder portable, but changes every hook, and was left for another time.
+
+It is named `flight-recorder` rather than `recording`, since the core already exports `recorder` and `recordEffect`, and `recording` read as the place all recording lives. Like a plane's flight recorder, it is always on and keeps what happened for after a failure.
+
+Telemetry may follow as `pure-effect/telemetry`, taking the tracer as an option so it imports nothing from OpenTelemetry. The two must never share an entry point: telemetry would run in a browser, and sharing would bring `node:async_hooks` in with it.
 
 ### `effectPipe` stops at 20 steps
 
