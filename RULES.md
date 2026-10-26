@@ -37,7 +37,7 @@ The rules for writing a correct flow, and where the README covers each task.
 - Keep secrets out of a trace: [Keeping secrets out of a trace](README.md#keeping-secrets-out-of-a-trace)
 - Turn a production incident into a test: [Time-Travel Debugging](README.md#time-travel-debugging)
 - Prove a fix with a recorded trace: [Proving a fix that changes the flow's shape](README.md#proving-a-fix-that-changes-the-flows-shape)
-- Add telemetry: [Hooks](README.md#hooks)
+- Add telemetry: [Tracing with OpenTelemetry](README.md#tracing-with-opentelemetry)
 - Type a flow's errors and context: [TypeScript: Typed Errors and Context](README.md#typescript-typed-errors-and-context)
 - Handle every error a flow can end with, in TypeScript: [Handling every error](README.md#handling-every-error)
 - Test a flow in TypeScript: [Testing a flow in TypeScript](README.md#testing-a-flow-in-typescript)

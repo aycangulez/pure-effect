@@ -16,7 +16,7 @@
 
 - **Getting started:** [Installation](#installation) · [The Core](#the-core) · [Quick Start](#quick-start) · [Coming from async/await](#coming-from-asyncawait) · [Writing Flows as Generators](#writing-flows-as-generators) · [Testing Without Mocks](#testing-without-mocks) · [Rules for Writing a Flow](#rules-for-writing-a-flow)
 - **Building flows:** [Passing Runtime Context](#passing-runtime-context) · [Retrying Transient Failures](#retrying-transient-failures) · [Running Effects in Parallel](#running-effects-in-parallel) · [Composing Larger Flows](#composing-larger-flows) · [Writing Loops](#writing-loops) · [Which Errors Are Data](#which-errors-are-data) · [TypeScript](#typescript-typed-errors-and-context)
-- **Recording and replay:** [Time-Travel Debugging](#time-travel-debugging) · [Recording in Production](#recording-in-production) · [Hooks](#hooks) · [Replay in Depth](#replay-in-depth)
+- **Recording and replay:** [Time-Travel Debugging](#time-travel-debugging) · [Recording in Production](#recording-in-production) · [Hooks](#hooks) · [Tracing with OpenTelemetry](#tracing-with-opentelemetry) · [Replay in Depth](#replay-in-depth)
 - **Reference:** [Why Pure Effect](#why-pure-effect) · [Limitations](#limitations) · [REFERENCE.md](REFERENCE.md): the API and the exact rules
 
 The sections under Getting started are enough to write and test a flow. Come back to the rest when a flow needs it.
@@ -133,7 +133,9 @@ async function registerUser(input) {
 ```js
 import { recordEffect, replayEffect } from 'pure-effect';
 
-const { result: live, trace } = await recordEffect(registerUserFlow(input));
+// Keeps the password out of the trace, with a stand-in that still passes validation on replay.
+const redact = (value, name, kind) => (kind === 'initialInput' ? { ...value, password: '[redacted]' } : value);
+const { result: live, trace } = await recordEffect(registerUserFlow(input), { redact });
 const { result: replayed } = await replayEffect(registerUserFlow(trace.initialInput), trace);
 assert.deepEqual(replayed, live);
 ```
@@ -792,7 +794,7 @@ assert.equal(payEveryUnpaid('cus_1').next(unpaid).effects.length, 2);
 assert.equal(payUnpaidInOrder('cus_1').next(unpaid).effects.length, 2);
 ```
 
-A `for` loop and a `Parallel` record different paths, so a trace recorded before you switch one for the other ends its replay in a `TimeParadox`; record it again. See [Running Effects in Parallel](#running-effects-in-parallel).
+A `for` loop and a `Parallel` record different paths, so a trace recorded before you switch one for the other ends its replay in a `TimeParadox`; record it again. See [Reading a trace](#reading-a-trace).
 
 ### Paging
 
@@ -1140,7 +1142,7 @@ Exact rules: [`replayEffect`](REFERENCE.md#replayeffecteffect-traceorresolver-op
 
 Record what each Command returned, then feed those results back into the flow to retrace the path a request took, with no database or network.
 
-Record a run with `recordEffect`, and `replayEffect` hands each Command what it returned the first time. That is how a run recorded in production replays on your machine, with nothing connected:
+Record a run with `recordEffect`, and `replayEffect` hands each Command what it returned the first time. A production run replays the same way, from the trace the [flight recorder](#recording-in-production) keeps, with nothing connected:
 
 ```js
 import { recordEffect, replayEffect } from 'pure-effect';
@@ -1212,7 +1214,7 @@ it('incident 8f3a fixed: a 100% promo checks out without a charge', async () => 
 });
 ```
 
-For every other recording, `unreached` should be empty, so a fix that skips a step by accident fails the test. [Proving a fix that changes the flow's shape](#proving-a-fix-that-changes-the-flows-shape) shows how to test such a fix.
+For every other recording, `unreached` should be empty, so a fix that skips a step by accident fails the test. A fix that removes or moves a step in the middle of the flow shifts every later step's path, so the old trace no longer replays as it is; [Proving a fix that changes the flow's shape](#proving-a-fix-that-changes-the-flows-shape) shows how to test it.
 
 A test can also run a whole flow with no recording at all, answering each Command itself; see [Testing a whole flow](#testing-a-whole-flow).
 
@@ -1272,47 +1274,29 @@ The flight recorder records every run of an application without changing any cal
 It ships as a second entry point, `pure-effect/flight-recorder`, so the core stays free of imports. It needs `AsyncLocalStorage` from `node:async_hooks`, so it runs in Node, Deno, Bun, and Cloudflare Workers with `nodejs_compat`, but not in a browser.
 
 ```js
+import { randomUUID } from 'node:crypto';
 import { enableRecording } from 'pure-effect/flight-recorder';
 
-// trace.flowName is the name passed as runEffect(flow, context, { flowName }), so pass one for every run.
-enableRecording({ sink: (trace) => putObject(`traces/${trace.flowName}/${randomUUID()}.json`, JSON.stringify(trace)) });
+enableRecording({
+    // trace.flowName is the name passed as runEffect(flow, context, { flowName }), so pass one for every run.
+    sink: (trace) => putObject(`traces/${trace.flowName}/${randomUUID()}.json`, JSON.stringify(trace)),
+    // Attached to each trace, so timeTravel(flow, trace, { version }) warns when it replays one against another build.
+    version: process.env.BUILD_ID,
+    // A replay runs validation again on the stored input, so the stand-in keeps the password rule's verdict.
+    redact: (value, name, kind) =>
+        kind === 'initialInput' && typeof value?.password === 'string'
+            ? { ...value, password: value.password.length >= 8 ? '[redacted]' : '' }
+            : value,
+    maxEntries: 500,
+    keep: (result, entries) => result.type === 'Failure' || entries.some((e) => e.threw) // the default
+});
 ```
 
-To install it beside other hooks, such as the telemetry example's, pass `recordingHooks` to `configureEffect` instead. It takes the same options.
+To install it beside other hooks, such as the [telemetry example](#tracing-with-opentelemetry)'s, pass `recordingHooks` to `configureEffect` instead. It takes the same options, and [Hooks](#hooks) shows how hooks installed together run.
 
-The telemetry example below is reference code you copy, not an entry point you import. It ships in the package's `examples` folder, `node_modules/pure-effect/examples`, and in the repository's [examples folder](https://github.com/aycangulez/pure-effect/blob/main/examples); copy it into your project.
+The flight recorder keeps the trace of a run that failed or in which a Command threw, passes every value through `redact`, caps a trace at `maxEntries`, reports a storage failure to `onSinkError`, and warns once per flow about a trace that has no input, was capped, is missing values, or has steps named `'anonymous'`.
 
-In a TypeScript project, copy its `.d.ts` beside it, which types the import, so the project needs no `allowJs`. Without `allowJs`, though, `tsc` does not copy a `.js` file into its output folder. If your compiled code runs from that folder, copy the example's `.js` there as part of the build, or the import fails at runtime with `ERR_MODULE_NOT_FOUND`.
-
-The telemetry example needs `@opentelemetry/api` installed, and its `.d.ts` does not compile without it. Its `startTelemetrySdk` loads `@opentelemetry/sdk-node`, `@opentelemetry/exporter-trace-otlp-proto` and `@opentelemetry/sdk-trace-base` only when it is called, so a project that starts the SDK itself needs none of them. If you start OpenTelemetry that way, also register a context manager, such as `AsyncLocalStorageContextManager` from `@opentelemetry/context-async-hooks`. Without one, each Command's span is a separate root instead of a child of the run's span.
-
-```js
-import { randomUUID } from 'node:crypto';
-import { configureEffect } from 'pure-effect';
-import { recordingHooks } from 'pure-effect/flight-recorder';
-import { telemetryHooks } from './opentelemetry-example.js';
-
-configureEffect(
-    telemetryHooks(),
-    recordingHooks({
-        // trace.flowName is the name passed as runEffect(flow, context, { flowName }), so pass one for every run.
-        sink: (trace) => putObject(`traces/${trace.flowName}/${randomUUID()}.json`, JSON.stringify(trace)),
-        // Attached to each trace, so timeTravel(flow, trace, { version }) warns when it replays one against another build.
-        version: process.env.BUILD_ID,
-        // A replay runs validation again on the stored input, so the stand-in keeps the password rule's verdict.
-        redact: (value, name, kind) =>
-            kind === 'initialInput' ? { ...value, password: value.password.length >= 8 ? '[redacted]' : '' } : value,
-        maxEntries: 500,
-        keep: (result, entries) => result.type === 'Failure' || entries.some((e) => e.threw) // the default
-    })
-);
-```
-
-The flight recorder keeps the trace of a run that failed or in which a Command threw, passes every value through `redact`, caps a trace at `maxEntries`, reports a storage failure to `onSinkError`, and warns once per flow about a trace that was capped, is missing values, or has steps named `'anonymous'`.
-
-**A trace keeps data, not objects.** A value is copied into the form JSON stores when it is recorded, and copied again each time a replay hands it to the flow.
-
-Return plain data from a Command's function. Turn a class instance into a plain object before returning it, with a small named function you can test on its own, as in `() => db.findCart(id).then(cartToData)`. Rebuild the object in `next` if the flow needs its methods. When you catch an error to return it as data, copy the fields the flow branches on, as in `.catch((error) => ({ ok: false, code: error.code }))`, rather than returning the error itself.
+A trace stores every value as JSON, so return plain data from Commands; [Keeping a replay faithful](#keeping-a-replay-faithful) shows how.
 
 Exact rules: [the flight recorder](REFERENCE.md#pure-effectflight-recorder).
 
@@ -1333,7 +1317,7 @@ const redact = (value, name, kind) => {
     if (kind === 'error') return mask(value, 'attempted');
     return name === 'cmdFetchUser' ? mask(value, 'email') : value;
 };
-recorder({ redact });
+// Pass it as the redact option of enableRecording, recordEffect or recorder.
 
 assert.equal(redact(null, 'cmdFetchUser', 'result'), null); // still nothing found
 assert.equal(redact('card_declined', 'cmdCharge', 'error'), 'card_declined'); // still a string
@@ -1347,7 +1331,7 @@ Exact rules: [what `redact` gets](REFERENCE.md#what-redact-gets).
 
 ## Hooks
 
-Hooks see every run, and recording, replay and the telemetry example are built on them. There are three: `onRun` wraps a whole run, `onStep` wraps each Command and each `Parallel`, and `onBeforeCommand` runs before each Command and can veto it by throwing. A hook that only watches must `await` what it wraps and return its result; [`configureEffect`](REFERENCE.md#configureeffectconfigs) lists each hook's arguments.
+Hooks see every run, and recording, replay and the [telemetry example](#tracing-with-opentelemetry) are built on them. There are three: `onRun` wraps a whole run, `onStep` wraps each Command and each `Parallel`, and `onBeforeCommand` runs before each Command and can veto it by throwing. A hook that only watches must `await` what it wraps and return its result; [`configureEffect`](REFERENCE.md#configureeffectconfigs) lists each hook's arguments.
 
 Use a veto as a guardrail, not as part of the flow's logic. A veto stops the whole run. The trace has no entry for the vetoed Command, so a replay of that run fails there. Put a decision the flow should handle in a step instead. Check a permission with `Ask` before the first Command writes anything, so a refusal leaves nothing half done. To turn off a supplier, read the switch in a Command and let its `next` fall back or return a `Failure`. The trace then records the switch, and a replay makes the same decision; [Errors no branch returned](REFERENCE.md#errors-no-branch-returned) shows one.
 
@@ -1356,7 +1340,7 @@ Use a veto as a guardrail, not as part of the flow's logic. A veto stops the who
 ```js
 // recordingHooks comes from pure-effect/flight-recorder; telemetryHooks from the telemetry example.
 const remove = configureEffect(telemetryHooks(), recordingHooks({ sink }));
-// the same as configureEffect(telemetryHooks()) followed by configureEffect(recordingHooks({ sink }))
+// One layer whose hooks run as two calls' layers would; remove() removes both.
 remove();
 ```
 
@@ -1379,7 +1363,7 @@ runEffect(flow(input))
 ├─ telemetry.onRun returns
 ```
 
-Neither example has an `onBeforeCommand` hook. One you add runs before `onStep` for each Command. If several layers have one, they run in the order the layers were installed.
+Neither the telemetry example nor the flight recorder has an `onBeforeCommand` hook. One you add runs before `onStep` for each Command. If several layers have one, they run in the order the layers were installed.
 
 **Knowing which request a step belongs to.** `onRun` gets the run's context, but `onStep` does not, so a hook that logs each step per request finds the request the way the rest of your logging does. An `AsyncLocalStorage` scope entered around `runEffect` reaches every hook the run calls, and the flight recorder uses one to give each run its own recorder:
 
@@ -1417,9 +1401,28 @@ A Command that `onBeforeCommand` vetoes never reaches `onStep`, so log a veto wh
 
 In tests, call `configureEffect()` with no arguments in a `beforeEach`, so a test that fails before removing its hooks does not leave them installed for the next. A bare call removes every layer, your app's own hooks included. So when a test needs the app's hooks, such as a server's permission check or its recording, install them after the reset, in the same `beforeEach`, not once in a `before`. Nothing warns when they are missing: the run just goes ahead without them.
 
-**Per-call hooks.** `runEffect`'s third argument takes hooks for that call only.
+**Per-call hooks.** `runEffect`'s third argument takes hooks for that call only, and the run's `flowName`.
 
 Exact rules: [per-call hooks](REFERENCE.md#per-call-hooks).
+
+## Tracing with OpenTelemetry
+
+The telemetry example opens a span for each run, a child span for each Command, and one for each `Parallel` around its branches' spans. Spans carry names, timings and status, never values, so nothing a step returns reaches your tracing backend.
+
+It is reference code you copy, not an entry point you import. It ships in the package's `examples` folder, `node_modules/pure-effect/examples`, and in the repository's [examples folder](https://github.com/aycangulez/pure-effect/blob/main/examples); copy it into your project.
+
+In a TypeScript project, copy its `.d.ts` beside it, which types the import, so the project needs no `allowJs`. Without `allowJs`, though, `tsc` does not copy a `.js` file into its output folder. If your compiled code runs from that folder, copy the example's `.js` there as part of the build, or the import fails at runtime with `ERR_MODULE_NOT_FOUND`.
+
+The telemetry example needs `@opentelemetry/api` installed, and its `.d.ts` does not compile without it. Its `startTelemetrySdk` loads `@opentelemetry/sdk-node`, `@opentelemetry/exporter-trace-otlp-proto` and `@opentelemetry/sdk-trace-base` only when it is called, so a project that starts the SDK itself needs none of them. If you start OpenTelemetry that way, also register a context manager, such as `AsyncLocalStorageContextManager` from `@opentelemetry/context-async-hooks`. Without one, each Command's span is a separate root instead of a child of the run's span.
+
+```js
+import { enableTelemetry, startTelemetrySdk } from './opentelemetry-example.js';
+
+await startTelemetrySdk({ serviceName: 'checkout' }); // or start the OpenTelemetry SDK yourself
+enableTelemetry(); // installs telemetryHooks(); returns a function that removes them
+```
+
+Telemetry and the flight recorder work together as two layers: call `enableTelemetry()` and `enableRecording()` once each. Or install `telemetryHooks()` and `recordingHooks()` in one `configureEffect` call, as [Hooks](#hooks) shows, in place of both, never beside them, or each run is traced or recorded twice.
 
 ## Replay in Depth
 
@@ -1479,6 +1482,8 @@ The walk takes production's answers only up to the change. Past it, each recorde
 
 Put anything that varies between runs inside a Command. For replay, the current time or a random ID counts as I/O. In a Command it is recorded and replayed like any other result. A step that calls `Date.now()` directly gets a new value on every replay, and drifts from the trace.
 
+**A trace keeps data, not objects.** A value is copied into the form JSON stores when it is recorded, and copied again each time a replay hands it to the flow. Return plain data from a Command's function. Turn a class instance into a plain object before returning it, with a small named function you can test on its own, as in `() => db.findCart(id).then(cartToData)`. Rebuild the object in `next` if the flow needs its methods. When you catch an error to return it as data, copy the fields the flow branches on, as in `.catch((error) => ({ ok: false, code: error.code }))`, rather than returning the error itself.
+
 To check a flow, record it, replay the trace, and compare the outcomes. A step that computes a fresh value shows up as a different final value, or as a `TimeParadox` if it changes which Commands run. A trace holds each result in the form JSON stores it, so this also catches a result your storage cannot keep, such as a `Date` the flow calls a method on:
 
 ```js
@@ -1491,12 +1496,12 @@ Exact rules: [how errors come back](REFERENCE.md#how-errors-come-back).
 
 ### Replaying from your own storage
 
-`replayEffect` also accepts a resolver function instead of a trace, so you can replay from OpenTelemetry spans, a log pipeline, or a database table, not only from the JSON that `recorder` produces. Whatever you store needs each step's `path`, which `onStep` receives, and its result. The telemetry example puts the path on each span as `effect.path`, but not the result, since it keeps values off spans.
+`replayEffect` also accepts a resolver function instead of a trace, so you can replay from OpenTelemetry spans, a log pipeline, or a database table, not only from the JSON that `recorder` produces. Whatever you store needs each step's `path`, which `onStep` receives, and its result. The telemetry example puts the path on each span as `effect.path`, but not the result, since it keeps values off spans. So spans you replay from need the result added, stored here as `output`. Pass it through your `redact` first, since a tracing backend keeps what it receives:
 
 ```js
 // A resolver answers one question: what did production get back for this step? Look the step up by its path, its
 // position in the flow. `step.index` counts steps in the order they finished, which shifts around a Parallel.
-const outputs = new Map(mySpans.map((span) => [span.attributes.path, span.attributes.output]));
+const outputs = new Map(mySpans.map((span) => [span.attributes['effect.path'], span.attributes.output]));
 const resolve = (step) => (outputs.has(step.path) ? { result: outputs.get(step.path) } : undefined);
 await replayEffect(checkoutFlow(input), resolve);
 ```

@@ -141,7 +141,7 @@ describe('README examples', function () {
             throw new Error('a README example must not perform network I/O');
         },
         checkoutFlow: stubCommand,
-        mySpans: [{ attributes: { path: '0', output: {} } }],
+        mySpans: [{ attributes: { 'effect.path': '0', output: {} } }],
         flags: { get: async () => false },
         chargeCard: stubCommand,
         sendReceipt: stubCommand,
@@ -192,6 +192,8 @@ describe('README examples', function () {
         telemetryHooks: () => ({}),
         recordingHooks: () => ({}),
         enableRecording: () => () => {},
+        enableTelemetry: () => () => {},
+        startTelemetrySdk: async () => ({ shutdown: async () => {} }),
         // Real: the Hooks example shows a scope reaching every hook, which only the real one does.
         AsyncLocalStorage
     };
