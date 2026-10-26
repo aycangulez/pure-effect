@@ -1259,16 +1259,27 @@ When a Command's result changes shape, rename the Command. A trace matches it by
 
 ## Recording in Production
 
-`recordEffect` suits tests and scripts, where one call covers the whole run. To record an application without changing any call site, install the hooks once at startup. The two files imported below ship in the package's `examples` folder, `node_modules/pure-effect/examples`, and in the repository's [examples folder](https://github.com/aycangulez/pure-effect/blob/main/examples); copy them into your project. Copy only the ones you use.
+Pick the recording function by the job:
 
-In a TypeScript project, copy each one's `.d.ts` beside it, which types the import, so the project needs no `allowJs`. Without `allowJs`, though, `tsc` does not copy a `.js` file into its output folder. If your compiled code runs from that folder, copy the example's `.js` there as part of the build, or the import fails at runtime with `ERR_MODULE_NOT_FOUND`.
+- One run, in a test or a script: `recordEffect`.
+- Every run of an application: `enableRecording` or `recordingHooks`, from the flight recorder.
+- Your own wiring: `recorder`.
+- Reading a trace back: `replayEffect` or `timeTravel`.
+
+The flight recorder records every run of an application without changing any call site. Like a plane's flight recorder, it is always on, and it keeps the runs worth looking at after a failure. Install it once at startup.
+
+It ships as a second entry point, `pure-effect/flight-recorder`, so the core stays free of imports. It needs `AsyncLocalStorage` from `node:async_hooks`, so it runs in Node, Deno, Bun, and Cloudflare Workers with `nodejs_compat`, but not in a browser. In TypeScript, set `moduleResolution` to `node16`, `nodenext` or `bundler`, so the import finds its types.
+
+The telemetry example below is reference code you copy, not an entry point you import. It ships in the package's `examples` folder, `node_modules/pure-effect/examples`, and in the repository's [examples folder](https://github.com/aycangulez/pure-effect/blob/main/examples); copy it into your project.
+
+In a TypeScript project, copy its `.d.ts` beside it, which types the import, so the project needs no `allowJs`. Without `allowJs`, though, `tsc` does not copy a `.js` file into its output folder. If your compiled code runs from that folder, copy the example's `.js` there as part of the build, or the import fails at runtime with `ERR_MODULE_NOT_FOUND`.
 
 The telemetry example needs `@opentelemetry/api` installed, and its `.d.ts` does not compile without it. Its `startTelemetrySdk` loads `@opentelemetry/sdk-node`, `@opentelemetry/exporter-trace-otlp-proto` and `@opentelemetry/sdk-trace-base` only when it is called, so a project that starts the SDK itself needs none of them. If you start OpenTelemetry that way, also register a context manager, such as `AsyncLocalStorageContextManager` from `@opentelemetry/context-async-hooks`. Without one, each Command's span is a separate root instead of a child of the run's span.
 
 ```js
 import { randomUUID } from 'node:crypto';
 import { configureEffect } from 'pure-effect';
-import { recordingHooks } from './recording-example.js';
+import { recordingHooks } from 'pure-effect/flight-recorder';
 import { telemetryHooks } from './opentelemetry-example.js';
 
 configureEffect(
@@ -1287,13 +1298,13 @@ configureEffect(
 );
 ```
 
-The example keeps the trace of a run that failed or in which a Command threw, passes every value through `redact`, caps a trace at `maxEntries`, reports a storage failure to `onSinkError`, and warns once per flow about a trace that was capped, is missing values, or has steps named `'anonymous'`.
+The flight recorder keeps the trace of a run that failed or in which a Command threw, passes every value through `redact`, caps a trace at `maxEntries`, reports a storage failure to `onSinkError`, and warns once per flow about a trace that was capped, is missing values, or has steps named `'anonymous'`.
 
 **A trace keeps data, not objects.** A value is copied into the form JSON stores when it is recorded, and copied again each time a replay hands it to the flow.
 
 Return plain data from a Command's function. Turn a class instance into a plain object before returning it, with a small named function you can test on its own, as in `() => db.findCart(id).then(cartToData)`. Rebuild the object in `next` if the flow needs its methods. When you catch an error to return it as data, copy the fields the flow branches on, as in `.catch((error) => ({ ok: false, code: error.code }))`, rather than returning the error itself.
 
-Exact rules: [the recording example](REFERENCE.md#the-recording-example).
+Exact rules: [the flight recorder](REFERENCE.md#pure-effectflight-recorder).
 
 ### Keeping secrets out of a trace
 
@@ -1359,7 +1370,7 @@ runEffect(flow(input))
 
 Neither example has an `onBeforeCommand` hook. One you add runs before `onStep` for each Command. If several layers have one, they run in the order the layers were installed.
 
-**Knowing which request a step belongs to.** `onRun` gets the run's context, but `onStep` does not, so a hook that logs each step per request finds the request the way the rest of your logging does. An `AsyncLocalStorage` scope entered around `runEffect` reaches every hook the run calls, and the recording example uses one to give each run its own recorder:
+**Knowing which request a step belongs to.** `onRun` gets the run's context, but `onStep` does not, so a hook that logs each step per request finds the request the way the rest of your logging does. An `AsyncLocalStorage` scope entered around `runEffect` reaches every hook the run calls, and the flight recorder uses one to give each run its own recorder:
 
 ```js
 import { AsyncLocalStorage } from 'node:async_hooks';

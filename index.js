@@ -2227,7 +2227,7 @@ const snapshot = (value) => {
 /**
  * Builds an `onStep` hook that records every Command's result or error and every Parallel's decision, and `toTrace`,
  * which packages them. Give each run its own recorder: one installed for a whole application mixes runs into a trace
- * a replay refuses. examples/recording-example.js shows how.
+ * a replay refuses. pure-effect/flight-recorder does this for an application.
  *
  * @param {RecorderOptions} [options] - Redaction and size limits
  * @returns {{ onStep: StepRunner, entries: TraceEntry[], toTrace: (meta?: TraceMeta) => TraceLog }}
@@ -2379,7 +2379,7 @@ const packTrace = (settings, meta, entries, dropped) => {
 /**
  * Runs a flow for real while recording it, and returns the outcome and a replayable trace. The trace holds the input
  * of a flow `effectPipe` or `effectGen` built, read from `flowInputs`. Convenient in tests and scripts; to record an
- * application, give each run its own recorder, as examples/recording-example.js does.
+ * application, give each run its own recorder, as pure-effect/flight-recorder does.
  *
  * @param {Effect} effect - The flow, called with its input
  * @param {RecorderOptions & { context?: any, flowName?: string, version?: string }} [options] - Recorder options,
