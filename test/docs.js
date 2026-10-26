@@ -191,6 +191,7 @@ describe('README examples', function () {
         sink: () => {},
         telemetryHooks: () => ({}),
         recordingHooks: () => ({}),
+        enableRecording: () => () => {},
         // Real: the Hooks example shows a scope reaching every hook, which only the real one does.
         AsyncLocalStorage
     };

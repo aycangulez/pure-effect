@@ -7,6 +7,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 ### Added
 
 - `pure-effect/flight-recorder`, which records every run of an application with one recorder per run, replaces `examples/recording-example.js`. Import `recordingHooks` or `enableRecording` from it instead of copying the example.
+- `CONTRIBUTING.md` ships in the package.
 
 ## [0.22.0] - 2026-10-24
 

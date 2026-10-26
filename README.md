@@ -1262,13 +1262,23 @@ When a Command's result changes shape, rename the Command. A trace matches it by
 Pick the recording function by the job:
 
 - One run, in a test or a script: `recordEffect`.
-- Every run of an application: `enableRecording` or `recordingHooks`, from the flight recorder.
-- Your own wiring: `recorder`.
+- Every run of an application: `enableRecording`, from `pure-effect/flight-recorder`.
 - Reading a trace back: `replayEffect` or `timeTravel`.
+
+To build your own wiring instead, start from [`recorder`](REFERENCE.md#recorderoptions).
 
 The flight recorder records every run of an application without changing any call site. Like a plane's flight recorder, it is always on, and it keeps the runs worth looking at after a failure. Install it once at startup.
 
 It ships as a second entry point, `pure-effect/flight-recorder`, so the core stays free of imports. It needs `AsyncLocalStorage` from `node:async_hooks`, so it runs in Node, Deno, Bun, and Cloudflare Workers with `nodejs_compat`, but not in a browser.
+
+```js
+import { enableRecording } from 'pure-effect/flight-recorder';
+
+// trace.flowName is the name passed as runEffect(flow, context, { flowName }), so pass one for every run.
+enableRecording({ sink: (trace) => putObject(`traces/${trace.flowName}/${randomUUID()}.json`, JSON.stringify(trace)) });
+```
+
+To install it beside other hooks, such as the telemetry example's, pass `recordingHooks` to `configureEffect` instead. It takes the same options.
 
 The telemetry example below is reference code you copy, not an entry point you import. It ships in the package's `examples` folder, `node_modules/pure-effect/examples`, and in the repository's [examples folder](https://github.com/aycangulez/pure-effect/blob/main/examples); copy it into your project.
 

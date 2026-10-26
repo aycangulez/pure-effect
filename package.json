@@ -35,6 +35,7 @@
         "RULES.md",
         "REFERENCE.md",
         "CHANGELOG.md",
+        "CONTRIBUTING.md",
         "examples"
     ],
     "sideEffects": false,
