@@ -98,6 +98,24 @@ describe('README examples', function () {
         });
     });
 
+    it('should import from pure-effect/flight-recorder only names it exports', async function () {
+        const shipped = Object.keys(await import('../flight-recorder.js'));
+        const pattern = /import\s*\{([^}]*)\}\s*from\s*'pure-effect\/flight-recorder'/g;
+        const imports = [...(markdown + reference).matchAll(pattern)];
+        assert.ok(imports.length > 0, 'expected the README to import from pure-effect/flight-recorder');
+        for (const match of imports) {
+            for (const name of match[1]
+                .split(',')
+                .map((n) => n.trim())
+                .filter(Boolean)) {
+                assert.ok(
+                    shipped.includes(name),
+                    `README imports '${name}', which pure-effect/flight-recorder does not export`
+                );
+            }
+        }
+    });
+
     // The Quick Start's definitions, which every later example may use.
     const [quickStart, ...readmeRest] = sections.filter((section) => section.length > 0);
 
@@ -123,7 +141,7 @@ describe('README examples', function () {
             throw new Error('a README example must not perform network I/O');
         },
         checkoutFlow: stubCommand,
-        mySpans: [{ attributes: { path: '0', output: {} } }],
+        mySpans: [{ attributes: { 'effect.path': '0', output: {} } }],
         flags: { get: async () => false },
         chargeCard: stubCommand,
         sendReceipt: stubCommand,
@@ -167,12 +185,20 @@ describe('README examples', function () {
             charge: async () => ({ ok: true, chargeId: 'ch_1' }),
             refund: async () => ({ refunded: true })
         },
-        inventory: { reserve: async () => ({ ok: true, reservationId: 'res_1' }) },
+        inventory: {
+            reserve: async () => ({ ok: true, reservationId: 'res_1' }),
+            release: async () => ({ released: true })
+        },
+        // The courier the undo list example books, which its walk never calls.
+        courier: { book: async () => ({ ok: true, bookingId: 'bk_1' }) },
         sku: 'sku_1',
         summarize: (/** @type {any} */ outcome) => outcome.type,
         sink: () => {},
         telemetryHooks: () => ({}),
         recordingHooks: () => ({}),
+        enableRecording: () => () => {},
+        enableTelemetry: () => () => {},
+        startTelemetrySdk: async () => ({ shutdown: async () => {} }),
         // Real: the Hooks example shows a scope reaching every hook, which only the real one does.
         AsyncLocalStorage
     };

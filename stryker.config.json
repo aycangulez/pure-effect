@@ -4,8 +4,8 @@
     "mochaOptions": {
         "spec": ["test/*.js"]
     },
-    "mutate": ["index.js"],
-    "disableTypeChecks": "index.js",
+    "mutate": ["index.js", "flight-recorder.js"],
+    "disableTypeChecks": "{index,flight-recorder}.js",
     "coverageAnalysis": "perTest",
     "reporters": ["clear-text", "progress", "html"],
     "htmlReporter": {

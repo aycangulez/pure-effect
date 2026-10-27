@@ -57,6 +57,7 @@ Returns `{ type: 'Retry', effect, options, next }`. See [Retrying Transient Fail
 - `options.backoff`: the multiplier applied to the delay on each attempt, a finite number of 0 or more (default `1`, flat).
 - `options.onExhausted(error)`: a fallback Effect to run when every attempt has failed, given `{ retryExhausted, lastError, retries }`. Its success feeds `next`; its failure is returned unwrapped. Per use only.
 - An option set to `undefined` keeps its default.
+- A third argument throws, since `Retry` takes no `next`.
 
 #### The fallback
 
@@ -98,9 +99,11 @@ That rule catches a function passed by name whose first parameter is optional an
 
 #### Undoing under `settled`
 
-A settled `Parallel` cancels nothing, so both steps always run to the end, and the undoing starts once both have finished. The undo steps are part of the flow, so a trace records them and a replay repeats them. An undo step that fails ends the flow with its own error rather than the original one; wrap it in `Retry` if it can fail for a moment.
+A settled `Parallel` cancels nothing, so both steps always run to the end, and the undoing starts once both have finished. The undo steps are part of the flow, so a trace records them and a replay repeats them. An undo step that fails ends the flow with its own error rather than the original one; wrap it in `Retry` if it can fail for a moment. An undo whose answer can say it did not happen, as `{ refunded: false }` does, needs a `next` that turns that answer into a `Failure`, or nothing reports it.
 
-Under `settled`, a branch whose Command throws reaches `next` as a `Failure`, so the undo still runs. When one call follows another instead, as a shipment follows a charge, the later Command's function has to catch its own error and return it as data: a throw stops the flow before its `next` runs, and the charge stays. [Translating `try`/`catch`](README.md#translating-trycatch) shows that shape.
+Run several undo steps as a settled `Parallel` of their own, whose `next` returns the original error and reports any undo that failed, as the README's `undoAll` does. Under `settled`, an undo that fails cancels none of the others, and with `limit: 1` they run one at a time, in array order. Without `settled`, the first undo to fail cancels the rest and ends the flow with its own error.
+
+Under `settled`, a branch whose Command throws reaches `next` as a `Failure`, so the undo still runs. When one call follows another instead, as a shipment follows a charge, the later Command's function has to catch its own error and return it as data: a throw stops the flow before its `next` runs, and the charge stays. A `Retry` that gives up never reaches its Command's `next` either. So a later Command under `Retry` keeps its default `next`, its `onExhausted` returns the failure as data, and the step after the `Retry` sees every failure and undoes in one place. [Translating `try`/`catch`](README.md#translating-trycatch) shows both shapes.
 
 #### Loops
 
@@ -320,7 +323,7 @@ onStep            C.onStep( K.onStep( cmd ) )    K.onStep
 
 ### `recorder(options?)`
 
-Returns `{ onStep, entries, toTrace }`, a hook that records every step of a run, passed as `runEffect(flow, context, { onStep })`. Give each run its own recorder: one shared by a whole application mixes requests into one trace, which a replay refuses. `recordEffect` and the [recording example](https://github.com/aycangulez/pure-effect/blob/main/examples/recording-example.js) both do this for you.
+Returns `{ onStep, entries, toTrace }`, a hook that records every step of a run, passed as `runEffect(flow, context, { onStep })`. Give each run its own recorder: one shared by a whole application mixes requests into one trace, which a replay refuses. `recordEffect` and the [flight recorder](#pure-effectflight-recorder) both do this for you.
 
 - `onStep`: the hook. Recording never changes a run's outcome.
 - `entries`: the steps recorded so far, one per Command and one per `Parallel`. A replay matches each on its `path`, the step's position in the flow.
@@ -349,9 +352,9 @@ Returns `{ onStep, entries, toTrace }`, a hook that records every step of a run,
 
 ### `recordEffect(effect, options?)`
 
-Runs a flow for real while recording, returning `{ result, trace }`. The trace holds the flow's input when `effectPipe` or `effectGen` built it, so `timeTravel` can build the flow again. Accepts `recorder` options plus `context`, `flowName` and `version`; without a `context`, the trace records the empty one the run gets, which `redact` is not handed. For tests and scripts; to record an application without changing call sites, use the wiring in [`examples/recording-example.js`](https://github.com/aycangulez/pure-effect/blob/main/examples/recording-example.js), which gives each run its own recorder.
+Runs a flow for real while recording, returning `{ result, trace }`. The trace holds the flow's input when `effectPipe` or `effectGen` built it, so `timeTravel` can build the flow again. Accepts `recorder` options plus `context`, `flowName` and `version`; without a `context`, the trace records the empty one the run gets, which `redact` is not handed. For tests and scripts; to record an application without changing call sites, use the [flight recorder](#pure-effectflight-recorder), which gives each run its own recorder.
 
-- A run whose own code throws makes it reject without a trace. The recording example keeps the trace of such a run; see [The recording example](#the-recording-example).
+- A run whose own code throws makes it reject without a trace. The flight recorder keeps the trace of such a run; see [`pure-effect/flight-recorder`](#pure-effectflight-recorder).
 
 ### `replayEffect(effect, traceOrResolver, options?)`
 
@@ -392,20 +395,36 @@ Replays a trace and narrates it as a tree of the flow, each Command under the `P
 - Refuses a trace whose input could not be recorded, since the flow is rebuilt from it.
 - `options.context` overrides the trace's; `options.log` replaces `console.log`.
 
-### The recording example
+### `pure-effect/flight-recorder`
 
-What the example does with each run:
+The flight recorder, a second entry point, records every run of an application with one recorder per run: `import { enableRecording, recordingHooks } from 'pure-effect/flight-recorder'`. For one run in a test or a script, use `recordEffect`. It needs `AsyncLocalStorage` from `node:async_hooks`, so it runs in Node, Deno, Bun, and Cloudflare Workers with `nodejs_compat`, not in a browser.
+
+- `recordingHooks(options?)`: returns the configuration that records each run, to pass to `configureEffect` beside your other hooks.
+- `enableRecording(options?)`: installs that configuration, and returns a function that removes it.
+
+Options, each optional:
+
+- `sink`: receives each kept trace, to write to S3 or a database. Hand slow writes to a queue rather than awaiting them inside a request.
+- `keep`: decides which runs reach the sink, from the outcome and the trace's entries. See below.
+- `redact`: scrubs every value before it enters the trace, as `recorder`'s does.
+- `maxEntries`: caps a trace's length, 500 by default.
+- `stack`: records stack traces for thrown errors.
+- `version`: a commit or build id attached to each trace, so `timeTravel` warns when it replays a trace against another build.
+- `onSinkError`: receives an error thrown by `keep` or `sink`. Defaults to `console.error`.
+- `onWarning`: receives a warning, once per flow, about a kept trace that will not replay as recorded. Defaults to `console.warn`.
+
+What the flight recorder does with each run:
 
 - **Which runs it keeps.** `keep` decides, from the run's outcome and its trace's entries. By default it keeps a run that ended in a `Failure` or in which a Command threw, as one that succeeded on a retry or went to a dead-letter fallback did, and discards the rest after holding them in memory. A settled `Parallel` hands its failures to `next`, an `onBeforeCommand` veto among them, so a batch whose items failed or were vetoed ends in a `Success` with nothing thrown; keep it with a `keep` that reads the result, such as `(result, entries) => result.type === 'Failure' || result.value.failed > 0`. Return `true` to keep everything, or sample.
 - **When your own code throws.** A `TypeError` after an API changed the shape of its response, say, makes the run reject. `keep` is offered a `Failure` carrying the thrown error, so by default its trace is kept, and replaying it reproduces the throw. A step before the flow's first Command runs when the flow is built, outside `runEffect`, so its throw reaches no hook and is not recorded. That run did no I/O, so its input reproduces it.
 - **What a trace holds.** `redact` runs before anything enters the trace, including the stored `initialInput` and `context`. A value it throws on, or one JSON cannot hold, such as a `BigInt`, is left out and marked `unrecorded`, and a replay stops there. Everything else is already in the form JSON holds, so the sink can write it to S3 or a database column with `JSON.stringify`.
 - **How long a trace gets.** `maxEntries` caps it and reports the overflow as `dropped`, and a capped trace replays only up to the first step it lacks.
 - **When storage fails.** If `keep` or the sink throws, for example because storage is unreachable, the run keeps its own outcome and the error goes to `onSinkError`, which defaults to `console.error`.
-- **What it warns about.** The example warns through `onWarning`, once per flow, when it keeps a trace that was capped, one holding values it could not record, or one whose steps include any named `'anonymous'`.
+- **What it warns about.** The flight recorder warns through `onWarning`, once per flow, when it keeps a trace that has no input, one that was capped, one holding values it could not record, or one whose steps include any named `'anonymous'`.
 
-The example takes the input from `onRun`, which is handed it only for a flow `effectPipe` or `effectGen` built, so build the outermost flow with one of them. A flow that starts with a bare `Command`, `Ask`, `Retry`, or `Parallel` records no input, and `timeTravel` would rebuild it from `undefined`. A one-step pipeline is enough, as in `runEffect(effectPipe(loadProfile)(userId))`. The example warns through `onWarning`, which defaults to `console.warn`, the first time it keeps a trace of such a flow, and `timeTravel` warns when it replays one.
+The flight recorder takes the input from `onRun`, which is handed it only for a flow `effectPipe` or `effectGen` built, so build the outermost flow with one of them. A flow that starts with a bare `Command`, `Ask`, `Retry`, or `Parallel` records no input, and `timeTravel` would rebuild it from `undefined`. A one-step pipeline is enough, as in `runEffect(effectPipe(loadProfile)(userId))`. It warns through `onWarning`, which defaults to `console.warn`, the first time it keeps a trace of such a flow, and `timeTravel` warns when it replays one. A flow that takes no input, such as a nightly job, gets the same warning from the flight recorder, which is handed only the input and cannot tell the two apart; there it can be ignored. `timeTravel` can tell them apart, and does not warn about one.
 
-The example takes the context from `onRun` too, as the run starts, so a run that stops before its first Command, such as one a permission check refuses, still records it.
+The flight recorder takes the context from `onRun` too, as the run starts, so a run that stops before its first Command, such as one a permission check refuses, still records it.
 
 ### What a trace keeps
 

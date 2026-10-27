@@ -2,6 +2,16 @@
 
 All notable changes to Pure Effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
+## [0.23.0] - 2026-10-27
+
+### Added
+
+- `pure-effect/flight-recorder`, which records every run of an application with one recorder per run, replaces `examples/recording-example.js`. Import `recordingHooks` or `enableRecording` from it instead of copying the example.
+
+### Fixed
+
+- `Retry` refuses a third argument, which it ignored, so `Retry(effect, options, next)` no longer drops its `next` without a word.
+
 ## [0.22.0] - 2026-10-24
 
 ### Added
@@ -352,6 +362,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 
 - Initial release: `Success`, `Failure`, `Command`, `effectPipe`, and `runEffect`.
 
+[0.23.0]: https://github.com/aycangulez/pure-effect/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/aycangulez/pure-effect/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/aycangulez/pure-effect/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/aycangulez/pure-effect/compare/v0.20.0...v0.20.1

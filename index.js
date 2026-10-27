@@ -188,15 +188,26 @@ const Ask = (...args) => {
  *        more
  * @param {(error: any) => Effect} [options.onExhausted] - Builds a fallback from `{ retryExhausted, lastError,
  *        retries }` once every attempt has failed. Its success feeds `next`; its failure propagates unwrapped.
+ * @param {...any} extra - Refused, since nothing reads it
  * @returns {RetryState}
  */
-const Retry = (effect, options) => {
+const Retry = (effect, options, ...extra) => {
     if (!isEffect(effect)) throw malformed(`Retry expects the Effect to run, got ${describeValue(effect)}.`, effect);
     if (typeof options === 'number') {
         const got = describeArgument(options);
         throw malformed(
             `Retry's options must be an object, got ${got}: write Retry(effect, { retries: ${options} }).`,
             options
+        );
+    }
+    // Nothing reads a third argument; a function there is usually a next, which Retry does not take.
+    if (extra[0] != null) {
+        throw malformed(
+            typeof extra[0] === 'function'
+                ? 'Retry takes no next: continue in the step after the Retry, or give the wrapped Command its next.'
+                : `Retry takes the Effect and its options, so its third argument, ${describeArgument(extra[0])}, ` +
+                      'would be ignored.',
+            extra[0]
         );
     }
     checkOptions(options, 'Retry', retryOptionRules, malformed);
@@ -2227,7 +2238,7 @@ const snapshot = (value) => {
 /**
  * Builds an `onStep` hook that records every Command's result or error and every Parallel's decision, and `toTrace`,
  * which packages them. Give each run its own recorder: one installed for a whole application mixes runs into a trace
- * a replay refuses. examples/recording-example.js shows how.
+ * a replay refuses. pure-effect/flight-recorder does this for an application.
  *
  * @param {RecorderOptions} [options] - Redaction and size limits
  * @returns {{ onStep: StepRunner, entries: TraceEntry[], toTrace: (meta?: TraceMeta) => TraceLog }}
@@ -2379,7 +2390,7 @@ const packTrace = (settings, meta, entries, dropped) => {
 /**
  * Runs a flow for real while recording it, and returns the outcome and a replayable trace. The trace holds the input
  * of a flow `effectPipe` or `effectGen` built, read from `flowInputs`. Convenient in tests and scripts; to record an
- * application, give each run its own recorder, as examples/recording-example.js does.
+ * application, give each run its own recorder, as pure-effect/flight-recorder does.
  *
  * @param {Effect} effect - The flow, called with its input
  * @param {RecorderOptions & { context?: any, flowName?: string, version?: string }} [options] - Recorder options,

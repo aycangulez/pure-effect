@@ -203,6 +203,23 @@ describe('Retry options and the removed global retry', function () {
         }
     });
 
+    it('should refuse a third argument, which nothing reads', function () {
+        // `Retry(effect, options, next)` dropped the next without a word, while Parallel refused an argument it
+        // would ignore.
+        const retry = /** @type {any} */ (Retry);
+        assert.throws(() => retry(failing(), { retries: 1 }, (/** @type {any} */ x) => Success(x)), {
+            name: 'EffectTypeError',
+            message: /Retry takes no next: continue in the step after the Retry/
+        });
+        assert.throws(() => retry(failing(), { retries: 1 }, { delay: 5 }), {
+            name: 'EffectTypeError',
+            message: /Retry takes the Effect and its options, so its third argument, a plain object, would be ignored/
+        });
+        // An absent third argument, as a caller forwarding one may pass, is still fine.
+        assert.doesNotThrow(() => retry(failing(), { retries: 1 }, undefined));
+        assert.doesNotThrow(() => retry(failing(), undefined, null));
+    });
+
     it('should name the alternatives when it rejects retries: 0', function () {
         assert.throws(() => Retry(failing(), { retries: 0 }), /settled|data/);
     });

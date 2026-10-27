@@ -7,5 +7,5 @@
         "noEmit": true,
         "types": []
     },
-    "files": ["../index.d.ts", "types.test-d.ts"]
+    "files": ["../index.d.ts", "../flight-recorder.d.ts", "types.test-d.ts"]
 }
