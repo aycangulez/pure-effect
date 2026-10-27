@@ -1104,6 +1104,8 @@ const nightlyCount = effectPipe(
 const counted = await runEffect(nightlyCount());
 ```
 
+The flight recorder warns once that such a flow's traces hold no input. For a flow that takes none, that is expected, and the warning can be ignored; see [`pure-effect/flight-recorder`](REFERENCE.md#pure-effectflight-recorder).
+
 ### Testing a flow in TypeScript
 
 A flow is typed as any kind of step it could start with, since validation may already have returned a `Success` or a `Failure`. So `.cmd` and `.next` compile only after the test checks that the step is a Command. `node:assert`'s `assert(step.type === 'Command')` is such a check, and TypeScript follows it. Jest's and Vitest's `expect` is not, so a walk needs a check at every step, and two small helpers make that one line per step with any test framework. `assertStep` checks the kind of step, and `assertCommand` checks a Command's name too:

@@ -57,6 +57,7 @@ Returns `{ type: 'Retry', effect, options, next }`. See [Retrying Transient Fail
 - `options.backoff`: the multiplier applied to the delay on each attempt, a finite number of 0 or more (default `1`, flat).
 - `options.onExhausted(error)`: a fallback Effect to run when every attempt has failed, given `{ retryExhausted, lastError, retries }`. Its success feeds `next`; its failure is returned unwrapped. Per use only.
 - An option set to `undefined` keeps its default.
+- A third argument throws, since `Retry` takes no `next`.
 
 #### The fallback
 
@@ -421,7 +422,7 @@ What the flight recorder does with each run:
 - **When storage fails.** If `keep` or the sink throws, for example because storage is unreachable, the run keeps its own outcome and the error goes to `onSinkError`, which defaults to `console.error`.
 - **What it warns about.** The flight recorder warns through `onWarning`, once per flow, when it keeps a trace that has no input, one that was capped, one holding values it could not record, or one whose steps include any named `'anonymous'`.
 
-The flight recorder takes the input from `onRun`, which is handed it only for a flow `effectPipe` or `effectGen` built, so build the outermost flow with one of them. A flow that starts with a bare `Command`, `Ask`, `Retry`, or `Parallel` records no input, and `timeTravel` would rebuild it from `undefined`. A one-step pipeline is enough, as in `runEffect(effectPipe(loadProfile)(userId))`. It warns through `onWarning`, which defaults to `console.warn`, the first time it keeps a trace of such a flow, and `timeTravel` warns when it replays one.
+The flight recorder takes the input from `onRun`, which is handed it only for a flow `effectPipe` or `effectGen` built, so build the outermost flow with one of them. A flow that starts with a bare `Command`, `Ask`, `Retry`, or `Parallel` records no input, and `timeTravel` would rebuild it from `undefined`. A one-step pipeline is enough, as in `runEffect(effectPipe(loadProfile)(userId))`. It warns through `onWarning`, which defaults to `console.warn`, the first time it keeps a trace of such a flow, and `timeTravel` warns when it replays one. A flow that takes no input, such as a nightly job, gets the same warning from the flight recorder, which is handed only the input and cannot tell the two apart; there it can be ignored. `timeTravel` can tell them apart, and does not warn about one.
 
 The flight recorder takes the context from `onRun` too, as the run starts, so a run that stops before its first Command, such as one a permission check refuses, still records it.
 
