@@ -1688,6 +1688,7 @@ const runRetry = async (runtime, retry, signal, stepPath) => {
  * @returns {Promise<SuccessState | FailureState | IoFaultState>}
  */
 const runParallel = async (runtime, parallel, signal, stepPath) => {
+    // Each branch's path continues with its number, which `nodesAlong` and `branchesOf` read back.
     const branchPath = `${stepPath}p`;
     const options = parallel.options ?? {};
     const { settled } = options;
@@ -1999,8 +2000,9 @@ const runEffect = (effect, context, callConfig) => interpret(effect, context, ca
  * The step a replay is asking about. `path` is its position in the Effect tree, stable across runs; `index` is its
  * position in completion order, which is not stable for a flow with a `Parallel`. A step whose `type` is 'Parallel'
  * asks for the recorded decision and does not advance `index`; an answer that holds no decision replays that
- * Parallel by timing.
- * @typedef {{ index: number, name: string, type: 'Command' | 'Parallel', path?: string }} ReplayStep
+ * Parallel by timing. `branches` is the branch taken at each Parallel along `path`, outermost first, so a Resolver
+ * can answer each branch without reading the path's format.
+ * @typedef {{ index: number, name: string, type: 'Command' | 'Parallel', path?: string, branches: number[] }} ReplayStep
  */
 
 /**
@@ -2438,6 +2440,20 @@ const hasPath = (step) => typeof step.path === 'string';
  * @returns {boolean}
  */
 const isInsideParallel = (path) => typeof path === 'string' && /p\d+\//.test(path);
+
+/**
+ * The branch taken at each Parallel along a path, outermost first: `2p16/1r0/0` gives `[16]`, and `0p1/3p0/0` gives
+ * `[1, 0]`. `runParallel` opens the `p` segments these are read from, as it does for `nodesAlong`.
+ * @param {string | undefined} path
+ * @returns {number[]}
+ */
+const branchesOf = (path) =>
+    typeof path === 'string'
+        ? path
+              .split('/')
+              .flatMap((segment) => /^\d+p(\d+)$/.exec(segment)?.slice(1) ?? [])
+              .map(Number)
+        : [];
 
 /** @typedef {'Command' | 'Retry' | 'Parallel'} NodeKind */
 
@@ -3081,10 +3097,10 @@ const replayHook = ({ resolve, missing, onResolved, onMissing, droppedEntries })
         if (type === 'Parallel') {
             // A Parallel's step carries its recorded decision into `op`, where `runBranches` reproduces it. It is not
             // a Command: `index` still counts Commands, and `onResolved` still sees only them.
-            const outcome = answer({ index, name, type, path });
+            const outcome = answer({ index, name, type, path, branches: branchesOf(path) });
             return await op(outcome !== undefined && 'result' in outcome ? outcome.result : undefined);
         }
-        const step = { index: index++, name, type, path };
+        const step = { index: index++, name, type, path, branches: branchesOf(path) };
         const outcome = answer(step);
         if (onResolved) {
             try {

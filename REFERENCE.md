@@ -2,7 +2,7 @@
 
 The exact rules and the API, by feature. [README.md](README.md) teaches each feature; this file is where to look a rule up.
 
-**Contents:** [Building blocks](#building-blocks) · [Building flows](#building-flows) · [Running a flow](#running-a-flow) · [Recording and replay](#recording-and-replay) · [TypeScript](#typescript)
+**Contents:** [Building blocks](#building-blocks) · [Building flows](#building-flows) · [Running a flow](#running-a-flow) · [Recording and replay](#recording-and-replay) · [Testing](#testing) · [TypeScript](#typescript)
 
 Every `options` argument and hook configuration below throws for a name it does not read or a value it cannot use, so a misspelt option fails instead of running with its default. `Retry` and `Parallel` throw an `EffectTypeError` where they are built.
 
@@ -440,6 +440,20 @@ A value is copied into the form JSON stores when it is recorded, and again each 
 | an error returned inside a result   | its own fields, such as `code`, without its message |
 
 A reference back to an object the value is inside of, as between an HTTP client's request and response, is cut. A value JSON cannot hold at all, such as a `BigInt` or an object whose getter throws, is left out of the trace and marked `unrecorded` before `redact` sees it. So a context holding a lazy client is left out whole.
+
+## Testing
+
+### `pure-effect/testing`
+
+Helpers for tests, with any test runner: `import { answers, assertCommand, assertStep } from 'pure-effect/testing'`. See [Testing a whole flow](README.md#testing-a-whole-flow).
+
+- `assertStep(step, type)`: returns `step` when its `type` is `type`, typed as that kind of step. Otherwise throws an `AssertionError` with `expected` and `actual`, which test runners show as a diff. A `Failure` in its place is named with its error.
+- `assertCommand(step, name)`: returns `step` when it is a Command whose `commandName` is `name`, typed as a Command. Otherwise throws an `AssertionError`.
+- `answers(table)`: returns a `Resolver` for `replayEffect`. `table` maps a Command name to `{ result }` or `{ error }`, given every time; a non-empty list of them, given in turn; or a function `(step) => outcome | undefined`.
+- A Command the table does not name gets `undefined`, which ends the replay with a `ReplayError`. A `Parallel` asks about its decision under the name `'Parallel'`, which a table leaves out, so its branches run as written.
+- The table is copied as it is built. An entry of any other shape, such as a plain value, throws a `TypeError` there.
+- `unused()`, on the Resolver `answers` returns, lists each answer the replay never asked for: `'cmdX: never asked for'` for an entry never reached, and `'cmdX: 1 of 2 answers left'` for a list not used up. It returns `[]` when every answer was used.
+- A step handed to any `Resolver` carries `branches`: the branch taken at each `Parallel` on its path, outermost first. Branch `i` is the `i`th effect given to that `Parallel`. A step outside any `Parallel`, as in a generator flow's `for` loop, has none.
 
 ## TypeScript
 

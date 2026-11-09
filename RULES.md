@@ -22,7 +22,7 @@ The rules for writing a correct flow, and where the README covers each task.
 ## Find It by Task
 
 - Test a decision or a branch without mocks: [Testing Without Mocks](README.md#testing-without-mocks)
-- Run a whole flow in a test, a retry that fails and then succeeds included: [Testing a whole flow](README.md#testing-a-whole-flow)
+- Run a whole flow in a test from a table of answers, a retry that fails and then succeeds included: [Testing a whole flow](README.md#testing-a-whole-flow)
 - Write a flow that reads like `async` code: [Writing Flows as Generators](README.md#writing-flows-as-generators)
 - Port an `async` function, `try`/`catch` included: [Coming from async/await](README.md#coming-from-asyncawait), [Translating `try`/`catch`](README.md#translating-trycatch)
 - Read request values such as a tenant or a request ID: [Passing Runtime Context](README.md#passing-runtime-context)

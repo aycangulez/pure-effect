@@ -1062,6 +1062,7 @@ const resolver: Resolver = (step) => {
     expectType<string>(step.name);
     expectType<'Command' | 'Parallel'>(step.type);
     expectType<string>(step.path);
+    expectType<readonly number[]>(step.branches);
     return step.index === 0 ? { result: 1 } : undefined;
 };
 expectAssignable<ReplayOutcome>({ error: new Error('x') });

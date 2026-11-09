@@ -18,6 +18,7 @@ import {
     step
 } from '../index.js';
 import * as lib from '../index.js';
+import * as testing from '../testing.js';
 import ts from 'typescript';
 import { readFileSync } from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -96,6 +97,24 @@ describe('README examples', function () {
                     assert.ok(shipped.includes(name), `README imports '${name}', which the library does not export`);
                 });
         });
+    });
+
+    it('should import from pure-effect/testing only names it exports', function () {
+        const shipped = Object.keys(testing);
+        const pattern = /import\s*\{([^}]*)\}\s*from\s*'pure-effect\/testing'/g;
+        const imports = [...(markdown + reference).matchAll(pattern)];
+        assert.ok(imports.length > 0, 'expected the README to import from pure-effect/testing');
+        for (const match of imports) {
+            for (const name of match[1]
+                .split(',')
+                .map((n) => n.trim())
+                .filter(Boolean)) {
+                assert.ok(
+                    shipped.includes(name),
+                    `README imports '${name}', which pure-effect/testing does not export`
+                );
+            }
+        }
     });
 
     it('should import from pure-effect/flight-recorder only names it exports', async function () {
@@ -227,8 +246,15 @@ describe('README examples', function () {
         const log = console.log;
         console.log = () => {}; // timeTravel narrates, and that is its job rather than this suite's
         try {
-            const run = new AsyncFunction(...Object.keys(lib), 'assert', ...Object.keys(stubs), program);
-            await run(...Object.values(lib), assert, ...Object.values(stubs));
+            // The testing helpers are real, as the library is: an example's assertions run through them.
+            const run = new AsyncFunction(
+                ...Object.keys(lib),
+                ...Object.keys(testing),
+                'assert',
+                ...Object.keys(stubs),
+                program
+            );
+            await run(...Object.values(lib), ...Object.values(testing), assert, ...Object.values(stubs));
         } finally {
             console.log = log;
         }

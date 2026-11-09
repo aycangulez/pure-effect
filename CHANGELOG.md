@@ -2,6 +2,13 @@
 
 All notable changes to Pure Effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
+## [Unreleased]
+
+### Added
+
+- `pure-effect/testing`, with `answers`, which builds a Resolver from a table of answers keyed by Command name, and `assertStep` and `assertCommand`, which walk a flow with any test runner. Import them in place of a hand-written Resolver or a copy of the README's walk helpers.
+- A step handed to a Resolver carries `branches`, the branch taken at each `Parallel` on its path, so a test answers each branch without reading the path.
+
 ## [0.23.0] - 2026-10-27
 
 ### Added

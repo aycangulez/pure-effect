@@ -9,20 +9,20 @@ This file holds the rules. `DESIGN.md` holds the reasons: how each part works, w
 ```bash
 npm test                                          # run all tests
 npx mocha --grep "pattern"                        # run a single test by name; npx mocha test/replay.js runs one file
-npm run format                                    # Prettier over index.js, flight-recorder.js, their .d.ts, examples/*.js and *.d.ts, scripts/*.js, test/*.js, test/types.test-d.ts, README.md, REFERENCE.md, CLAUDE.md, DESIGN.md, CHANGELOG.md, CONTRIBUTING.md, RULES.md
+npm run format                                    # Prettier over the files package.json's format script lists
 npx tsd                                           # type-level gate over test/types.test-d.ts
-npx tsc -p jsconfig.json                          # strict tsc over index.js, flight-recorder.js, test/*.js, test/types.test-d.ts, examples/*.js, and scripts/*.js, reading index.d.ts as a consumer; the same config VS Code uses
+npx tsc -p jsconfig.json                          # strict tsc over jsconfig.json's include list, reading index.d.ts as a consumer; the same config VS Code uses
 npm run test:fuzz                                 # test/fuzz.js over twenty times as many seeds as npm test runs; CI runs it
-npm run test:ts-minimum                           # compiles index.d.ts, flight-recorder.d.ts and test/types.test-d.ts with TypeScript 5.1, the oldest the declarations support
-npm run generate                                  # rewrites effectPipe's overloads, RULES.md, flight-recorder.d.ts and examples/*.d.ts, from the scripts in scripts/
+npm run test:ts-minimum                           # compiles the shipped .d.ts files and test/types.test-d.ts with TypeScript 5.1, the oldest the declarations support
+npm run generate                                  # rewrites effectPipe's overloads, RULES.md, and the .d.ts of flight-recorder.js, testing.js and examples/*.js
 npx esbuild index.js --minify --format=esm | gzip -9 | wc -c    # the size the README claims
-npx stryker run                                   # mutation testing: mutates index.js and flight-recorder.js, runs the tests in test/ against each mutant; report in reports/mutation/
+npx stryker run                                   # mutation testing over stryker.config.json's mutate list, with the tests in test/; report in reports/mutation/
 npx stryker run --mutate "index.js:120-180"       # the same, limited to the lines a change touched
 ```
 
 There is no build or lint step: the library ships as plain ES modules. Formatting is Prettier, configured in `.prettierrc`. CI (`.github/workflows/ci.yml`) runs `npm test` on Node 22, 24 and 26, Prettier's check, `npm run test:ts-minimum` and `npm run test:fuzz`, on pull requests and on pushes to `main`; the TypeScript 5.1 check fetches 5.1 with `npx`, so it needs the network the first time. **Check `npm test` by its exit code**: a `tsd` failure prints neither "passing" nor "failing". After a structural edit to `index.d.ts`, compare the runtime exports against the declared ones rather than trusting the diff. `package.json` has a `files` list, so anything new that must ship is added there; `npm pack --dry-run` shows what would be published.
 
-Mutation testing stays out of CI. Run it after changing `index.js`, `flight-recorder.js` or their tests. Its survivors are not a to-do list: most are equivalent mutants (arrays sized in advance, a check after a retry backoff that the loop repeats) or message wording, and a few flip between runs because some tests depend on timing. Two gaps are deliberate: whether each nested `Parallel` removes its listener from the enclosing signal, and the wording of `timeTravel`'s narration. Before calling a survivor new, apply the mutant by hand to the old code and the new and run the suite: one that survives both is an old gap, not a regression.
+Mutation testing stays out of CI. Run it after changing `index.js`, `flight-recorder.js`, `testing.js` or their tests. Its survivors are not a to-do list: most are equivalent mutants (arrays sized in advance, a check after a retry backoff that the loop repeats) or message wording, and a few flip between runs because some tests depend on timing. Two gaps are deliberate: whether each nested `Parallel` removes its listener from the enclosing signal, and the wording of `timeTravel`'s narration. Before calling a survivor new, apply the mutant by hand to the old code and the new and run the suite: one that survives both is an old gap, not a regression.
 
 ## Where things go
 
@@ -117,6 +117,7 @@ Pure Effect is a zero-dependency effect system for JavaScript implementing the "
 ### Reference integrations
 
 - `examples/opentelemetry-example.js` is reference code shipped under `examples/`, and `flight-recorder.js` ships as `pure-effect/flight-recorder`. Edit either only with `npm test`. Each exports a function that returns a configuration and one that installs it, and nothing happens on import. The example imports `'pure-effect'`, so a copy runs as it is; the flight recorder imports `'./index.js'`. Each ships a `.d.ts` that `npm run generate` writes from its JSDoc, never edited by hand. Observing a run never decides it.
+- `testing.js` ships as `pure-effect/testing`, imports `'./index.js'`, and is for tests only. `answers` keeps the outcome wrappers and copies its table; `branches` is read in `index.js`, which owns the path format.
 - Telemetry spans carry names, timings and status, never values, and nothing ahead of a run may throw. The flight recorder keeps one recorder per run in an `AsyncLocalStorage` scope; an error from `keep` or the sink goes to `onSinkError`, a field the recorder cannot copy is marked rather than reported, since `toTrace` never throws, and each warning fires once per flow.
 
 ## Proposing changes
@@ -164,7 +165,7 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 
 ## Tests
 
-The runtime tests are in `test/`, a file for each concern (`core`, `retry`, `parallel`, `hooks`, `recording`, `replay`, `gen`, `fuzz`, `examples` and `docs`), and a new test goes in the file for its concern. `fuzz` runs seeded random flows as pipelines and with generator flows mixed in, and checks they do the same; run `npm run test:fuzz` after changing `chain`, `execute`, `Retry`, `Parallel`, replay or `gen`, and turn a failing seed into a test in the file for its concern. `test/helpers.js` holds what more than one file needs, including the user-registration domain that is their running example; `registerUserFlow` has the same shape as the README's Quick Start. `test/types.test-d.ts` holds the type-level tests, run by `tsd`.
+The runtime tests are in `test/`, a file for each concern (`core`, `retry`, `parallel`, `hooks`, `recording`, `replay`, `gen`, `fuzz`, `testing`, `examples` and `docs`), and a new test goes in the file for its concern. `fuzz` runs seeded random flows as pipelines and with generator flows mixed in, and checks they do the same; run `npm run test:fuzz` after changing `chain`, `execute`, `Retry`, `Parallel`, replay or `gen`, and turn a failing seed into a test in the file for its concern. `test/helpers.js` holds what more than one file needs, including the user-registration domain that is their running example; `registerUserFlow` has the same shape as the README's Quick Start. `test/types.test-d.ts` holds the type-level tests, run by `tsd`.
 
 - Assert on the returned data, such as Commands, Failures and traces, rather than on side effects.
 - Reset the hooks in every suite with `beforeEach(() => configureEffect())`, a bare call; `configureEffect({})` adds an empty layer rather than resetting.

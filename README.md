@@ -313,29 +313,50 @@ In TypeScript, a walk needs a check at each step that the step is a Command; [Te
 
 ### Testing a whole flow
 
-To run a whole flow in a test instead of walking it, `Retry` and `Parallel` included, hand `replayEffect` a function that answers each Command. Nothing is called and no retry waits. The function gets each step the flow asks for, with its `name`, and returns `{ result }` for the Command to return, `{ error }` for it to throw, or `undefined` for a step it has no answer for, which ends the replay in a `Failure` holding a `ReplayError`:
+To run a whole flow in a test instead of walking it, `Retry` and `Parallel` included, hand `replayEffect` the answer each Command gives. Nothing is called and no retry waits. `answers` from `pure-effect/testing` builds them from a table keyed by Command name:
 
 ```js
 import { replayEffect } from 'pure-effect';
+import { answers, assertStep } from 'pure-effect/testing';
 
-const answers = { cmdFindUser: null, cmdSaveUser: { id: 1, ...input } };
-const answer = (step) => (step.name in answers ? { result: answers[step.name] } : undefined);
+const answer = answers({ cmdFindUser: { result: null }, cmdSaveUser: { result: { id: 1, ...input } } });
 const { result } = await replayEffect(registerUserFlow(input), answer);
-assert.deepEqual(result, Success({ id: 1, ...input }));
+assert.deepEqual(assertStep(result, 'Success').value, { id: 1, ...input });
+assert.deepEqual(answer.unused(), []);
 ```
 
-Answering `{ error }` is how a test reaches a `Retry`'s next attempt or its `onExhausted` fallback. An answer takes the place of the Command's function, its `catch` included: for a function that catches an error and returns it, answer with what it returns, not `{ error }`. To answer each attempt differently, give a name a list of answers and hand them out in turn. Here the Quick Start's `saveUserWithRetry` fails once, then goes through:
+Each entry in the table is one of three things:
+
+- `{ result }` for the Command to return, or `{ error }` for it to throw. The Command gets it every time it is asked.
+- A list of those, handed out in turn. This is how a test reaches a `Retry`'s next attempt or its `onExhausted` fallback.
+- A function that gets the step and returns `{ result }`, `{ error }`, or `undefined`. Use it for anything a table cannot say.
+
+An answer takes the place of the Command's function, its `catch` included. For a function that catches an error and returns it, answer with what it returns, not `{ error }`. Here the Quick Start's `saveUserWithRetry` fails once, then goes through:
 
 ```js
-const answers = { cmdSaveUser: [{ error: new Error('connection reset') }, { result: { id: 1, ...input } }] };
-const inTurn = (step) => answers[step.name]?.shift();
-const { result } = await replayEffect(saveUserWithRetry(input), inTurn);
+const answer = answers({ cmdSaveUser: [{ error: new Error('connection reset') }, { result: { id: 1, ...input } }] });
+const { result } = await replayEffect(saveUserWithRetry(input), answer);
 assert.deepEqual(result, Success({ id: 1, ...input }));
 ```
 
-Each `shift()` takes an answer off its list, so a table is used up by the test that reads it: build a fresh one in each test. A replay from a resolver also has no `unreached` in its result, since that list compares a replay with a recording.
+`assertStep(result, 'Success')` returns the result when the run succeeded. When it failed, it throws an error that names the `Failure`, which a bare `assert.equal(result.type, 'Success')` does not.
 
-The function is also asked about each `Parallel`, under the name `'Parallel'`; answering `undefined` lets its branches run as written. A step also carries its `path`, its position in the flow, which [Reading a trace](#reading-a-trace) explains; answer by path to tell apart two Commands with the same name.
+A Command the table does not name ends the replay in a `Failure` holding a `ReplayError`. The opposite mistake is an answer the flow never asked for, and it passes silently unless the test checks. `answer.unused()` lists each one, as `'cmdSaveUser: never asked for'` or `'cmdSaveUser: 1 of 2 answers left'`, and is `[]` when the replay used the whole table. An answer left in a list usually means a planned retry never happened. An entry never asked for means the flow stopped earlier than the test expected. Check `unused()` in a test that owns its whole table: one that spreads a shared table into its own sees the shared entries its scenario never reached.
+
+The table is copied as it is built, so a list used up in one test is whole again in the next. A replay from answers has no `unreached` in its result, since that list compares a replay with a recording.
+
+The branches of a `Parallel` usually ask for Commands with the same name. A step carries `branches`, the branch it is in at each `Parallel`, outermost first, so a function entry can answer each branch. Branch `i` is the `i`th effect given to the `Parallel`:
+
+```js
+const zones = ['nyc-1', 'nyc-2'];
+const forecasts = { 'nyc-1': [{ result: [1, 2] }], 'nyc-2': [{ error: new Error('HTTP 503') }, { result: [3] }] };
+const answerByZone = answers({
+    cmdLoadZones: { result: zones },
+    cmdFetchForecast: (step) => forecasts[zones[step.branches[0]]].shift()
+});
+```
+
+`answers` returns an ordinary `Resolver`, so a test can also write one by hand: a function that gets each step, with its `name`, `path` and `branches`, and returns `{ result }`, `{ error }`, or `undefined`. A `Parallel` asks about its own decision too, under the name `'Parallel'`. A table leaves that name out, so the branches run as written.
 
 ## Rules for Writing a Flow
 
@@ -1108,25 +1129,10 @@ The flight recorder warns once that such a flow's traces hold no input. For a fl
 
 ### Testing a flow in TypeScript
 
-A flow is typed as any kind of step it could start with, since validation may already have returned a `Success` or a `Failure`. So `.cmd` and `.next` compile only after the test checks that the step is a Command. `node:assert`'s `assert(step.type === 'Command')` is such a check, and TypeScript follows it. Jest's and Vitest's `expect` is not, so a walk needs a check at every step, and two small helpers make that one line per step with any test framework. `assertStep` checks the kind of step, and `assertCommand` checks a Command's name too:
+A flow is typed as any kind of step it could start with, since validation may already have returned a `Success` or a `Failure`. So `.cmd` and `.next` compile only after the test checks that the step is a Command. `node:assert`'s `assert(step.type === 'Command')` is such a check, and TypeScript follows it. Jest's and Vitest's `expect` is not. `pure-effect/testing` has two helpers that work with any test framework. `assertStep` checks the kind of step, and `assertCommand` checks a Command's name too. Each returns the step typed as what it checked. Otherwise each throws an `AssertionError` that names what it found, such as `Expected Command 'cmdSaveUser', got Failure("Email already in use.")`:
 
 ```ts
-import assert from 'node:assert/strict';
-import { commandName } from 'pure-effect';
-import type { Effect } from 'pure-effect';
-
-// Fails unless the step is of the kind given, and returns it typed as one. It takes undefined for a Parallel's branch read by index.
-function assertStep<T, E, C, K extends Effect<T, E, C>['type']>(step: Effect<T, E, C> | undefined, type: K) {
-    assert(step?.type === type, `expected a ${type}, got ${step?.type}`);
-    return step as Extract<Effect<T, E, C>, { type: K }>;
-}
-
-// Fails unless the step is the Command named, and returns it typed as one.
-function assertCommand<T, E, C>(step: Effect<T, E, C> | undefined, name: string) {
-    const command = assertStep(step, 'Command');
-    assert.equal(commandName(command), name);
-    return command;
-}
+import { assertCommand, assertStep } from 'pure-effect/testing';
 
 const step1 = assertCommand(registerUserFlow(input), 'cmdFindUser');
 assertCommand(step1.next(null), 'cmdSaveUser');
@@ -1136,6 +1142,8 @@ const retry = assertStep(saveUserWithRetry(input), 'Retry');
 assertCommand(retry.effect, 'cmdSaveUser');
 assertStep(retry.next({ id: 1 }), 'Success');
 ```
+
+They work the same in JavaScript.
 
 Exact rules: [walking a flow in a test](REFERENCE.md#walking-a-flow-in-a-test).
 
@@ -1560,4 +1568,4 @@ await replayEffect(checkoutFlow(input), resolve);
 - **A trace keeps data, not objects.** A replayed value is what JSON stores: a class instance loses its methods, a `Date` becomes a string, and a thrown error comes back as a plain `Error`, so check `error.name` rather than `instanceof`. See [what a trace keeps](REFERENCE.md#what-a-trace-keeps).
 - **A trace records the input as the run starts, and a step before the first Command has already run by then.** That step runs as the flow is built, so one that changes its input, as `input.count++` does, leaves the trace holding the changed input. Return a new value rather than change the one a step receives.
 - **Replay reproduces what one flow saw, not timing.** See [timing](REFERENCE.md#timing).
-- **Configuration belongs to one copy of the library.** Hooks live in module state, so two copies in one process (a dual ESM and CJS setup, two versions in the dependency tree, or a worker thread) do not share them, and nothing warns you.
+- **Configuration and recording belong to one copy of the library.** Two copies in one process, such as two versions in the dependency tree, a linked package beside an installed one, or a worker thread, do not share hooks, and a flow built with one copy and run with another records no input, so its trace cannot be replayed. `import` and `require()` load the same copy.

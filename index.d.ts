@@ -1403,6 +1403,8 @@ export type ReplayStep = {
     type: 'Command' | 'Parallel';
     /** The step's position in the flow, the same in every run; a Resolver should key off it. */
     path: string;
+    /** The branch taken at each `Parallel` on the path, outermost first: `[2]` is the third effect given to one `Parallel`. */
+    branches: readonly number[];
 };
 
 /**

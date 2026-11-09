@@ -2809,3 +2809,46 @@ describe('Replay errors are harness errors', function () {
         await assert.rejects(() => replayEffect(flow(), trace), /missingReturn/);
     });
 });
+
+describe('The steps a Resolver is asked about', function () {
+    beforeEach(() => configureEffect());
+
+    it('should carry the branch taken at each Parallel, outermost first, for a Command and a decision alike', async function () {
+        // Tests that answered each branch apart once parsed `step.path` with a regex, which copied the path's format
+        // into every project; `branches` reads it once, where the format is written.
+        const leaf = (/** @type {string} */ name) => Command(() => name, { name: 'cmdLeaf' });
+        const flow = Parallel([leaf('a'), Parallel([leaf('b'), Retry(leaf('c'))])]);
+        /** @type {[string, string, number[]][]} */
+        const asked = [];
+        const { result } = await replayEffect(flow, (s) => {
+            asked.push([s.type, s.path, [...s.branches]]);
+            return s.type === 'Parallel' ? undefined : { result: s.path };
+        });
+        assert.deepEqual(result, Success(['0p0/0', ['0p1/0p0/0', '0p1/0p1/0r0/0']]));
+        assert.deepEqual(
+            asked.sort((x, y) => x[1].localeCompare(y[1])),
+            [
+                ['Parallel', '0p', []],
+                ['Command', '0p0/0', [0]],
+                ['Parallel', '0p1/0p', [1]],
+                ['Command', '0p1/0p0/0', [1, 0]],
+                ['Command', '0p1/0p1/0r0/0', [1, 1]]
+            ]
+        );
+    });
+
+    it('should read positions and branch numbers of more than one digit', async function () {
+        const leaf = () => Command(() => 0, { name: 'cmdLeaf' });
+        // effectPipe is typed for a written-out list of steps, so a spread one goes through a looser view of it.
+        const pipe = /** @type {(...steps: (() => any)[]) => (input: unknown) => any} */ (effectPipe);
+        const flow = pipe(...Array.from({ length: 10 }, () => leaf), () => Parallel(Array.from({ length: 12 }, leaf)));
+        /** @type {Map<string, number[]>} */
+        const branches = new Map();
+        await replayEffect(flow(undefined), (s) => {
+            branches.set(s.path, [...s.branches]);
+            return s.type === 'Parallel' ? undefined : { result: 0 };
+        });
+        assert.deepEqual(branches.get('9'), []);
+        assert.deepEqual(branches.get('10p11/0'), [11]);
+    });
+});

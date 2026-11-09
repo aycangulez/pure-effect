@@ -20,7 +20,10 @@ const rulesPath = fileURLToPath(new URL('../RULES.md', import.meta.url));
 /** Each task, and the README headings that cover it, by their text as written. */
 const TASKS = /** @type {[string, string[]][]} */ ([
     ['Test a decision or a branch without mocks', ['Testing Without Mocks']],
-    ['Run a whole flow in a test, a retry that fails and then succeeds included', ['Testing a whole flow']],
+    [
+        'Run a whole flow in a test from a table of answers, a retry that fails and then succeeds included',
+        ['Testing a whole flow']
+    ],
     ['Write a flow that reads like `async` code', ['Writing Flows as Generators']],
     ['Port an `async` function, `try`/`catch` included', ['Coming from async/await', 'Translating `try`/`catch`']],
     ['Read request values such as a tenant or a request ID', ['Passing Runtime Context']],
