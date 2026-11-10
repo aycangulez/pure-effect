@@ -6,8 +6,13 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 
 ### Added
 
-- `pure-effect/testing`, with `answers`, which builds a Resolver from a table of answers keyed by Command name, and `assertStep` and `assertCommand`, which walk a flow with any test runner. Import them in place of a hand-written Resolver or a copy of the README's walk helpers.
+- `pure-effect/testing`, with `answers`, which builds a Resolver from a table of answers keyed by Command name, `assertStep` and `assertCommand`, which walk a flow with any test runner, and `assertReproduced`, which checks that a replay did what the recorded run did. Import them in place of a hand-written Resolver or a copy of the README's walk helpers.
+- A replay of a trace that holds how its run ended returns `changed`, which says whether the replay ended the same way and where it first differs. `timeTravel` reports it too.
 - A step handed to a Resolver carries `branches`, the branch taken at each `Parallel` on its path, so a test answers each branch without reading the path.
+
+### Changed
+
+- Breaking: `recordEffect` and the flight recorder store how each run ended in the trace's `outcome`, which `redact` gets as a result or an error named `'outcome'`. A `redact` that masks results by Command name must mask `name === 'outcome'` too, or pass `recordOutcome: false`.
 
 ## [0.23.0] - 2026-10-27
 

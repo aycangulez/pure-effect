@@ -340,11 +340,11 @@ Returns `{ onStep, entries, toTrace }`, a hook that records every step of a run,
 ```
 
 - An older entry with `error` and no `threw` still counts as a throw.
-- `toTrace(meta)`: the entries as a trace, with `meta`'s `initialInput`, `context`, `flowName` and `version`, copied into the form JSON stores when it is called. If a Command can change the input or the context, as an ORM save that adds an id does, call it before the run as well, as `recordEffect` does.
-- `options.redact(value, name, kind)`: returns what the trace stores in place of `value`. `kind` is `'result'`, `'error'`, `'initialInput'` or `'context'`, and `name` is the Command's name, or the kind. See [Keeping secrets out of a trace](README.md#keeping-secrets-out-of-a-trace).
+- `toTrace(meta)`: the entries as a trace, with `meta`'s `initialInput`, `context`, `flowName` and `version`, and its `outcome` when given, copied into the form JSON stores when it is called. If a Command can change the input or the context, as an ORM save that adds an id does, call it before the run as well, as `recordEffect` does.
+- `options.redact(value, name, kind)`: returns what the trace stores in place of `value`. `kind` is `'result'`, `'error'`, `'initialInput'` or `'context'`, and `name` is the Command's name, or the kind. How the run ended comes as a `'result'` or an `'error'` named `'outcome'`. See [Keeping secrets out of a trace](README.md#keeping-secrets-out-of-a-trace).
 - `options.maxEntries`: the most entries a trace keeps; the rest are counted in `dropped`, and a replay stops at the first step the trace lacks.
 - `options.stack`: record stack traces for thrown errors (off by default).
-- A value `redact` throws on or returns `undefined` for, or one JSON cannot hold, is left out and marked `unrecorded`: on its entry, or for the input and context in the trace's `unrecorded`, as in `{ context: 'copy' }`. A replay stops there with a `ReplayError` rather than hand the flow a stand-in. An error `redact` returns `undefined` for is recorded as a throw with nothing to show. See [What a trace keeps](#what-a-trace-keeps) for what a copy keeps.
+- A value `redact` throws on or returns `undefined` for, or one JSON cannot hold, is left out and marked `unrecorded`: on its entry, or for the input, context and outcome in the trace's `unrecorded`, as in `{ context: 'copy' }`. A replay stops there with a `ReplayError` rather than hand the flow a stand-in. An error `redact` returns `undefined` for is recorded as a throw with nothing to show. See [What a trace keeps](#what-a-trace-keeps) for what a copy keeps.
 
 #### What `redact` gets
 
@@ -352,13 +352,16 @@ Returns `{ onStep, entries, toTrace }`, a hook that records every step of a run,
 
 ### `recordEffect(effect, options?)`
 
-Runs a flow for real while recording, returning `{ result, trace }`. The trace holds the flow's input when `effectPipe` or `effectGen` built it, so `timeTravel` can build the flow again. Accepts `recorder` options plus `context`, `flowName` and `version`; without a `context`, the trace records the empty one the run gets, which `redact` is not handed. For tests and scripts; to record an application without changing call sites, use the [flight recorder](#pure-effectflight-recorder), which gives each run its own recorder.
+Runs a flow for real while recording, returning `{ result, trace }`. The trace holds the flow's input when `effectPipe` or `effectGen` built it, so `timeTravel` can build the flow again. Accepts `recorder` options plus `context`, `flowName`, `version` and `recordOutcome`; without a `context`, the trace records the empty one the run gets, which `redact` is not handed. For tests and scripts; to record an application without changing call sites, use the [flight recorder](#pure-effectflight-recorder), which gives each run its own recorder.
 
+- `options.recordOutcome` (default `true`): store how the run ended in the trace's `outcome`, as `{ type: 'Success', value }` or `{ type: 'Failure', error }`, through `redact`; `false` leaves it out. An error in it keeps no stack. See [Checking that a replay ends the same way](README.md#checking-that-a-replay-ends-the-same-way).
 - A run whose own code throws makes it reject without a trace. The flight recorder keeps the trace of such a run; see [`pure-effect/flight-recorder`](#pure-effectflight-recorder).
 
 ### `replayEffect(effect, traceOrResolver, options?)`
 
 Runs a flow with each Command answered from a trace instead of run, and returns `{ result, unreached }`: the flow's outcome, and the recorded steps it never asked for. See [Time-Travel Debugging](README.md#time-travel-debugging).
+
+- For a trace that recorded its outcome, it also returns `changed`: `null` when the replay ended the same way, else `{ path, recorded, replayed }`, the first place the two differ, such as `$.value[0].slot`, and the value each holds there. The replay's outcome is recorded as the trace's was, and both are compared as JSON. One it cannot copy differs at `$`. A trace that recorded none, its bare entries, and a resolver get no `changed`.
 
 - A flow that no longer matches the trace ends in a `Failure` whose `error` is a `TimeParadox`, or a `ReplayError` for a step the trace lacks. Neither is thrown, so a test checks `error.name`. In TypeScript, a result's error includes `Error`, which both are, so cast it directly, as in `result.error as ReplayFault`; `ReplayFault` types `name` and the fields locating the stop, such as `path`.
 - A malformed trace rejects with a `ReplayError`.
@@ -372,6 +375,7 @@ Runs a flow with each Command answered from a trace instead of run, and returns 
 - `options.fastRetry` (default `true`): strip `Retry` delays.
 - `options.hooks` (default `false`): run the replay inside the configured hooks, a configured recorder included, so they see the replayed steps. Off, a replay cannot reach a telemetry backend or a trace sink.
 - `options.onResolved(step, outcome)`: observes each replayed step. A throw stops the replay, and `replayEffect` rejects with it; it never changes an outcome.
+- `options.redact(value, name, kind)`: masks the replay's outcome before it is compared, as the recorder's `redact` masked the trace's. Pass the recorder's where it masks a value the flow built itself rather than one a Command returned. A throw rejects the replay.
 - A trace whose entries have no `path`, written by hand or recorded before paths existed, is matched in order, and a Command inside a `Parallel` is refused with a `ReplayError`.
 
 #### What ends a replay
@@ -393,7 +397,8 @@ Replays a trace and narrates it as a tree of the flow, each Command under the `P
 - Names any recorded steps that were never reached.
 - Warns when the trace's `version` differs from `options.version`, and when steps are named `'anonymous'`.
 - Refuses a trace whose input could not be recorded, since the flow is rebuilt from it.
-- `options.context` overrides the trace's; `options.log` replaces `console.log`.
+- `options.context` overrides the trace's; `options.log` replaces `console.log`; `options.redact` is passed to `replayEffect`.
+- For a trace that recorded its outcome, its last line says whether the replay ended the same way, or the first place it differs, and it returns `changed` too.
 
 ### `pure-effect/flight-recorder`
 
@@ -409,6 +414,7 @@ Options, each optional:
 - `redact`: scrubs every value before it enters the trace, as `recorder`'s does.
 - `maxEntries`: caps a trace's length, 500 by default.
 - `stack`: records stack traces for thrown errors.
+- `recordOutcome` (default `true`): stores how each run ended in its trace, as `recordEffect`'s does, so a replay can say whether it ends the same way; `false` leaves it out.
 - `version`: a commit or build id attached to each trace, so `timeTravel` warns when it replays a trace against another build.
 - `onSinkError`: receives an error thrown by `keep` or `sink`. Defaults to `console.error`.
 - `onWarning`: receives a warning, once per flow, about a kept trace that will not replay as recorded. Defaults to `console.warn`.
@@ -420,7 +426,7 @@ What the flight recorder does with each run:
 - **What a trace holds.** `redact` runs before anything enters the trace, including the stored `initialInput` and `context`. A value it throws on, or one JSON cannot hold, such as a `BigInt`, is left out and marked `unrecorded`, and a replay stops there. Everything else is already in the form JSON holds, so the sink can write it to S3 or a database column with `JSON.stringify`.
 - **How long a trace gets.** `maxEntries` caps it and reports the overflow as `dropped`, and a capped trace replays only up to the first step it lacks.
 - **When storage fails.** If `keep` or the sink throws, for example because storage is unreachable, the run keeps its own outcome and the error goes to `onSinkError`, which defaults to `console.error`.
-- **What it warns about.** The flight recorder warns through `onWarning`, once per flow, when it keeps a trace that has no input, one that was capped, one holding values it could not record, or one whose steps include any named `'anonymous'`.
+- **What it warns about.** The flight recorder warns through `onWarning`, once per flow, when it keeps a trace that has no input, one that was capped, one holding values it could not record, one whose outcome it could not record, or one whose steps include any named `'anonymous'`.
 
 The flight recorder takes the input from `onRun`, which is handed it only for a flow `effectPipe` or `effectGen` built, so build the outermost flow with one of them. A flow that starts with a bare `Command`, `Ask`, `Retry`, or `Parallel` records no input, and `timeTravel` would rebuild it from `undefined`. A one-step pipeline is enough, as in `runEffect(effectPipe(loadProfile)(userId))`. It warns through `onWarning`, which defaults to `console.warn`, the first time it keeps a trace of such a flow, and `timeTravel` warns when it replays one. A flow that takes no input, such as a nightly job, gets the same warning from the flight recorder, which is handed only the input and cannot tell the two apart; there it can be ignored. `timeTravel` can tell them apart, and does not warn about one.
 
@@ -445,7 +451,7 @@ A reference back to an object the value is inside of, as between an HTTP client'
 
 ### `pure-effect/testing`
 
-Helpers for tests, with any test runner: `import { answers, assertCommand, assertStep } from 'pure-effect/testing'`. See [Testing a whole flow](README.md#testing-a-whole-flow).
+Helpers for tests, with any test runner: `import { answers, assertCommand, assertReproduced, assertStep } from 'pure-effect/testing'`. See [Testing a whole flow](README.md#testing-a-whole-flow).
 
 - `assertStep(step, type)`: returns `step` when its `type` is `type`, typed as that kind of step. Otherwise throws an `AssertionError` with `expected` and `actual`, which test runners show as a diff. A `Failure` in its place is named with its error.
 - `assertCommand(step, name)`: returns `step` when it is a Command whose `commandName` is `name`, typed as a Command. Otherwise throws an `AssertionError`.
@@ -453,6 +459,7 @@ Helpers for tests, with any test runner: `import { answers, assertCommand, asser
 - A Command the table does not name gets `undefined`, which ends the replay with a `ReplayError`. A `Parallel` asks about its decision under the name `'Parallel'`, which a table leaves out, so its branches run as written.
 - The table is copied as it is built. An entry of any other shape, such as a plain value, throws a `TypeError` there.
 - `unused()`, on the Resolver `answers` returns, lists each answer the replay never asked for: `'cmdX: never asked for'` for an entry never reached, and `'cmdX: 1 of 2 answers left'` for a list not used up. It returns `[]` when every answer was used.
+- `assertReproduced(replay)`: returns `replay.result` when a replay of a trace reproduced the run: it stopped at no `TimeParadox` or `ReplayError`, `unreached` is empty, and `changed` is `null`. Otherwise throws an `AssertionError` naming the first of those that failed, with the recorded and replayed values as `expected` and `actual` for an outcome that changed. A trace recorded with `recordOutcome: false` fails it, and what a replay from a resolver returns throws a `TypeError`. See [Checking that a replay ends the same way](README.md#checking-that-a-replay-ends-the-same-way).
 - A step handed to any `Resolver` carries `branches`: the branch taken at each `Parallel` on its path, outermost first. Branch `i` is the `i`th effect given to that `Parallel`. A step outside any `Parallel`, as in a generator flow's `for` loop, has none.
 
 ## TypeScript

@@ -45,7 +45,9 @@ import type {
     ReplayOptions,
     Replay,
     ReplayFault,
-    TimeTravelOptions
+    TimeTravelOptions,
+    RecordedOutcome,
+    OutcomeChange
 } from '../index.js';
 
 interface User {
@@ -975,6 +977,13 @@ declare const traceOrResolver: TraceLog | TraceEntry[] | Resolver;
     expectType<SuccessState<number> | FailureState<Error>>(forwarded.result);
     expectType<TraceEntry[] | undefined>(forwarded.unreached);
 })();
+// A trace that recorded its outcome says whether the replay ended the same way, under the recorder's redact if given
+(async () => {
+    const { changed } = await replayEffect(readRow, traceLog, { redact: (value) => value });
+    expectType<OutcomeChange | null | undefined>(changed);
+    if (changed) expectType<string>(changed.path);
+    expectType<RecordedOutcome | undefined>(traceLog.outcome);
+})();
 // @ts-expect-error strict was removed: paths make it unnecessary
 replayEffect(readRow, traceLog, { strict: false });
 // @ts-expect-error unreached is returned, not observed
@@ -993,6 +1002,11 @@ expectType<TraceLog<number, { tenant: string }>>(packaged);
 const typedHead: TraceLog<{ id: string }> = rec.toTrace({ initialInput: { id: 'a' } });
 expectAssignable<EffectConfiguration>({ onStep: rec.onStep });
 expectAssignable<TraceMeta>({ version: 'abc' });
+// toTrace records how a run ended when given it, and recordEffect does when asked
+expectType<TraceLog>(rec.toTrace({ outcome: Success(1) }));
+recordEffect(readRow, { recordOutcome: true });
+// @ts-expect-error recordOutcome is true or false
+recordEffect(readRow, { recordOutcome: 'yes' });
 
 // an entry for a step that threw says so, and one without the flag, as older traces have, is still an entry
 expectType<boolean | undefined>(rec.entries[0].threw);
@@ -1014,7 +1028,10 @@ expectAssignable<TraceLog>(importedFixture);
 replayEffect(typedFlow(importedFixture.initialInput), importedFixture);
 // A value the recorder could not record is marked rather than stored, and declared as JSON imports widen it, as `threw` is
 expectType<string | undefined>(rec.entries[0].unrecorded);
-expectType<{ initialInput?: string; context?: string } | undefined>(rec.toTrace().unrecorded);
+expectType<{ initialInput?: string; context?: string; outcome?: string } | undefined>(rec.toTrace().unrecorded);
+// A fixture imported as JSON widens its outcome's type to a string, and still replays
+declare const fixtureWithOutcome: { trace: []; outcome: { type: string; value: { id: number } } };
+expectAssignable<TraceLog>(fixtureWithOutcome);
 declare const unrecordedFixture: {
     unrecorded: { context: string };
     trace: { command: string; path: string; unrecorded: string; durationMs: number }[];

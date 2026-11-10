@@ -14,6 +14,8 @@
  *           the trace, which marks where, as is one the recorder cannot copy.
  * @property {number | undefined} [maxEntries] - Caps trace length, 500 by default; the overflow is reported as `dropped`.
  * @property {boolean | undefined} [stack] - Records stack traces for thrown errors.
+ * @property {boolean | undefined} [recordOutcome] - Records how each run ended in its trace, through `redact`, so a
+ *           replay can say whether it ends the same way. On by default; `false` leaves it out.
  * @property {string | undefined} [version] - Commit or build id, attached to each trace, so `timeTravel` can warn
  *           when it replays a trace against another build.
  * @property {((result: SuccessState<any> | FailureState<any>, entries: TraceEntry[]) => boolean) | undefined} [keep] - Decides which
@@ -24,7 +26,8 @@
  *           `sink`. Defaults to `console.error`.
  * @property {((message: string, flowName?: string) => void) | undefined} [onWarning] - Receives a warning, once per flow, about a
  *           kept trace that will not replay as recorded: it has no input, `maxEntries` cut it short, some of its values
- *           could not be recorded, or some of its steps are named 'anonymous'. Defaults to `console.warn`.
+ *           could not be recorded, its outcome could not be recorded, or some of its steps are named 'anonymous'.
+ *           Defaults to `console.warn`.
  */
 /**
  * Builds the two hooks that record each run, without installing them, so the caller decides where recording sits
@@ -63,6 +66,11 @@ export type RecordingOptions = {
      */
     stack?: boolean | undefined;
     /**
+     * - Records how each run ended in its trace, through `redact`, so a
+     * replay can say whether it ends the same way. On by default; `false` leaves it out.
+     */
+    recordOutcome?: boolean | undefined;
+    /**
      * - Commit or build id, attached to each trace, so `timeTravel` can warn
      * when it replays a trace against another build.
      */
@@ -82,7 +90,8 @@ export type RecordingOptions = {
     /**
      * - Receives a warning, once per flow, about a
      * kept trace that will not replay as recorded: it has no input, `maxEntries` cut it short, some of its values
-     * could not be recorded, or some of its steps are named 'anonymous'. Defaults to `console.warn`.
+     * could not be recorded, its outcome could not be recorded, or some of its steps are named 'anonymous'.
+     * Defaults to `console.warn`.
      */
     onWarning?: ((message: string, flowName?: string) => void) | undefined;
 };

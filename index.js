@@ -13,7 +13,7 @@
 //    `Runtime`, then `stopAt`, which tells a waiting generator flow its step stopped, `ownRun`, which builds a
 //    generator flow again for each execution after its first, `execute` and a function for each kind of node,
 //    which each take it; and `runEffect`.
-// 5. Recording and replay: the trace format and replay errors, copying values and errors into a trace,
+// 5. Recording and replay: the trace format and replay errors, copying values, errors and outcomes into a trace,
 //    `recorder` and `recordEffect`, then `fromTrace`, `replayEffect` and `timeTravel`, each followed by the
 //    functions it hands its parts to.
 //
@@ -2039,16 +2039,23 @@ const isReplayOutcome = (value) => isObject(value) && ('result' in value || 'err
 
 /**
  * The reference trace format produced by `recorder`. A convenience, not a contract: `replayEffect` takes a Resolver,
- * so any storage shape works. `unrecorded` says why the trace holds no `initialInput` or `context`.
+ * so any storage shape works. `outcome` is how the run ended, unless it was recorded with `recordOutcome: false`, and
+ * `unrecorded` says why the trace holds no `initialInput`, `context` or `outcome`.
  * @typedef {{
  *   flowName?: string,
  *   version?: string,
  *   initialInput?: any,
  *   context?: any,
- *   unrecorded?: { initialInput?: UnrecordedCause, context?: UnrecordedCause },
+ *   outcome?: RecordedOutcome,
+ *   unrecorded?: { initialInput?: UnrecordedCause, context?: UnrecordedCause, outcome?: UnrecordedCause },
  *   dropped?: number,
  *   trace: TraceEntry[]
  * }} TraceLog
+ */
+
+/**
+ * How a run ended, as a trace holds it: a Success's value or a Failure's error, copied and redacted.
+ * @typedef {{ type: 'Success', value: any } | { type: 'Failure', error: any }} RecordedOutcome
  */
 
 /**
@@ -2211,6 +2218,8 @@ const recordPart = (cause, compute) => {
  * @property {string} [flowName]
  * @property {any} [context] - Context passed to `runEffect`; required to replay `Ask`.
  * @property {string} [version] - Commit or build id, so a replay can detect a stale trace.
+ * @property {SuccessState | FailureState} [outcome] - How the run ended, so a replay can say whether it ends the same
+ *           way. Given once the run has ended.
  */
 
 /**
@@ -2347,22 +2356,54 @@ const recordError = (settings, thrown, name) => {
     // Read inside the copy, since it reads the caller's value, and before `redact` can change the copy.
     const copied = recordPart('copy', () => {
         const copy = snapshot(serializeError(thrown, settings.stack));
-        return { copy, wasError: isObject(copy) && copy.__error === true };
+        return { copy, wasError: isErrorCopy(copy) };
     });
     if ('unrecorded' in copied) return copied;
     const { copy: serialized, wasError } = copied.value;
-    return recordPart('redact', () => {
-        const redacted = snapshot(settings.redact(serialized, name, 'error'));
-        const rebuilt = wasError && isObject(redacted) && !Array.isArray(redacted) && redacted.__error !== true;
-        return rebuilt ? { __error: true, ...redacted } : redacted;
-    });
+    return recordPart('redact', () => remarked(snapshot(settings.redact(serialized, name, 'error')), wasError));
+};
+
+/**
+ * Whether a serialized value is an `Error`'s, which `serializeError` marks.
+ * @param {any} copy
+ * @returns {boolean}
+ */
+const isErrorCopy = (copy) => isObject(copy) && copy.__error === true;
+
+/**
+ * What `redact` returned for an `Error`'s copy, marked as an Error again if it returned an object without the mark.
+ * @param {any} redacted
+ * @param {boolean} wasError
+ * @returns {any}
+ */
+const remarked = (redacted, wasError) =>
+    wasError && isObject(redacted) && !Array.isArray(redacted) && redacted.__error !== true
+        ? { __error: true, ...redacted }
+        : redacted;
+
+/**
+ * How a run ended, as a trace holds it: a Success's value or a Failure's error, copied and redacted as a result or
+ * an error named `'outcome'`, so a `redact` that masks by kind covers it. An error keeps no stack, since a replay's has
+ * none to match and a stack holds the recording machine's paths. A replay records its own outcome the same way, in
+ * `outcomeChange`, to compare the two.
+ * @param {RecorderSettings} settings
+ * @param {SuccessState | FailureState} outcome
+ * @returns {Recorded}
+ */
+const recordOutcome = (settings, outcome) => {
+    const failed = outcome.type === 'Failure';
+    const recorded = failed
+        ? recordError({ ...settings, stack: false }, outcome.error, 'outcome')
+        : copyAndRedact(settings, outcome.value, 'outcome', 'result');
+    if ('unrecorded' in recorded) return recorded;
+    return { value: failed ? { type: 'Failure', error: recorded.value } : { type: 'Success', value: recorded.value } };
 };
 
 /**
  * A recorder's `toTrace`: its entries as a trace, with `meta.initialInput` and `meta.context` copied and redacted
- * when it is called, so call it before a run that can change them, and again once it ends for `dropped` and `trace`.
- * A field it cannot record is named in `unrecorded`. It never throws. `undefined` is left alone, so a redact that
- * spreads its argument cannot invent an empty object.
+ * when it is called, so call it before a run that can change them, and again once it ends for `dropped`, `trace`
+ * and, when given, `meta.outcome`. A field it cannot record is named in `unrecorded`. It never throws. `undefined` is
+ * left alone, so a redact that spreads its argument cannot invent an empty object.
  * @param {RecorderSettings} settings
  * @param {TraceMeta} meta
  * @param {TraceEntry[]} entries
@@ -2374,15 +2415,18 @@ const packTrace = (settings, meta, entries, dropped) => {
         value === undefined ? { value } : copyAndRedact(settings, value, kind, kind);
     const initialInput = field(meta.initialInput, 'initialInput');
     const context = field(meta.context, 'context');
-    /** @type {{ initialInput?: UnrecordedCause, context?: UnrecordedCause }} */
+    const outcome = meta.outcome === undefined ? undefined : recordOutcome(settings, meta.outcome);
+    /** @type {{ initialInput?: UnrecordedCause, context?: UnrecordedCause, outcome?: UnrecordedCause }} */
     const unrecorded = {};
     if ('unrecorded' in initialInput) unrecorded.initialInput = initialInput.unrecorded;
     if ('unrecorded' in context) unrecorded.context = context.unrecorded;
+    if (outcome !== undefined && 'unrecorded' in outcome) unrecorded.outcome = outcome.unrecorded;
     return {
         flowName: meta.flowName,
         version: meta.version,
         initialInput: 'value' in initialInput ? initialInput.value : undefined,
         context: 'value' in context ? context.value : undefined,
+        ...(outcome !== undefined && 'value' in outcome ? { outcome: outcome.value } : {}),
         ...(Object.keys(unrecorded).length > 0 ? { unrecorded } : {}),
         dropped,
         trace: entries.slice()
@@ -2395,8 +2439,9 @@ const packTrace = (settings, meta, entries, dropped) => {
  * application, give each run its own recorder, as pure-effect/flight-recorder does.
  *
  * @param {Effect} effect - The flow, called with its input
- * @param {RecorderOptions & { context?: any, flowName?: string, version?: string }} [options] - Recorder options,
- *        plus the `context` given to `runEffect` (stored so `Ask` can be replayed), the run's name and a build id
+ * @param {RecorderOptions & { context?: any, flowName?: string, version?: string, recordOutcome?: boolean }} [options]
+ *        Recorder options, plus the `context` given to `runEffect` (stored so `Ask` can be replayed), the run's name,
+ *        a build id, and whether the trace records how the run ended, which it does unless this is `false`
  * @returns {Promise<{ result: SuccessState | FailureState, trace: TraceLog }>}
  */
 const recordEffect = async (effect, options = {}) => {
@@ -2406,18 +2451,39 @@ const recordEffect = async (effect, options = {}) => {
         context: contextOptionRule,
         flowName: [isString, 'a string'],
         version: null,
+        recordOutcome: [isBoolean, 'true or false'],
         ...recorderOptionRules
     });
-    const { context, flowName, version, ...recorderOptions } = options ?? {};
+    const { context, flowName, version, recordOutcome: withOutcome = true, ...recorderOptions } = options ?? {};
     const rec = recorder(recorderOptions);
     // Before the run, so a Command that writes to the input or the context cannot rewrite what the trace received.
     const initialInput = flowInputs.get(effect);
     const head = rec.toTrace({ initialInput, flowName, context, version });
     // Merged over the global wiring, so recording inside an instrumented application keeps its spans.
     const result = await runEffect(effect, context, { onStep: rec.onStep, flowName });
-    const { dropped, trace } = rec.toTrace();
-    // A context nobody passed holds nothing to redact, so it is recorded as the empty one the run got, unredacted.
-    return { result, trace: { ...head, ...(context === undefined && { context: {} }), dropped, trace } };
+    const tail = rec.toTrace(withOutcome ? { outcome: result } : {});
+    return { result, trace: joinTrace(head, tail, context === undefined) };
+};
+
+/**
+ * A trace from the fields packed as a run started and the entries, and any outcome, packed once it ended: what each
+ * could not record, merged. A context nobody passed holds nothing to redact, so it is recorded as the empty one the
+ * run got, unredacted.
+ * @param {TraceLog} head
+ * @param {TraceLog} tail
+ * @param {boolean} noContext
+ * @returns {TraceLog}
+ */
+const joinTrace = (head, tail, noContext) => {
+    const unrecorded = { ...head.unrecorded, ...tail.unrecorded };
+    return {
+        ...head,
+        ...(noContext && { context: {} }),
+        ...('outcome' in tail && { outcome: tail.outcome }),
+        ...(Object.keys(unrecorded).length > 0 && { unrecorded }),
+        dropped: tail.dropped,
+        trace: tail.trace
+    };
 };
 
 /**
@@ -2915,12 +2981,22 @@ const unrecordedCause = (traceLog, field) => {
  *           (default) fails the replay, so no side effect can occur. `'execute'` runs the real Command, so pass it
  *           only where the Commands reach test doubles or only read. A trace that dropped entries refuses it.
  * @property {(step: ReplayStep, outcome: ReplayOutcome | undefined) => void} [onResolved] - Observes each step.
+ * @property {(value: any, name: string, kind: string) => any} [redact] - Masks the replay's outcome before it is
+ *           compared with the trace's. Needed only where the recorder's `redact` masks a value the flow computed.
  */
 
 /**
  * What a replay returns: the flow's own outcome and, for a trace, the recorded entries the flow never asked for. A
- * flow that stops early mismatches nothing, so `unreached` is the only sign that a step went away.
- * @typedef {{ result: SuccessState | FailureState, unreached?: TraceEntry[] }} Replay
+ * flow that stops early mismatches nothing, so `unreached` is the only sign that a step went away. A trace that
+ * recorded its outcome also gets `changed`: `null` when the replay ended the same way, else where the two first
+ * differ.
+ * @typedef {{ result: SuccessState | FailureState, unreached?: TraceEntry[], changed?: OutcomeChange | null }} Replay
+ */
+
+/**
+ * Where a replay's outcome first differs from the recorded one: a path such as `$.value[0].slot`, and the value each
+ * holds there.
+ * @typedef {{ path: string, recorded: any, replayed: any }} OutcomeChange
  */
 
 /**
@@ -2940,9 +3016,17 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
         fastRetry: [isBoolean, 'true or false'],
         hooks: [isBoolean, 'true or false'],
         onMissing: [(value) => value === 'throw' || value === 'execute', "'throw' or 'execute'"],
-        onResolved: [isFunction, 'a function']
+        onResolved: [isFunction, 'a function'],
+        redact: [isFunction, 'a function']
     });
-    const { context: givenContext, fastRetry = true, hooks = false, onMissing = 'throw', onResolved } = options ?? {};
+    const {
+        context: givenContext,
+        fastRetry = true,
+        hooks = false,
+        onMissing = 'throw',
+        onResolved,
+        redact = (/** @type {any} */ value) => value
+    } = options ?? {};
     const fromResolver = typeof traceOrResolver === 'function';
     /** @type {Set<TraceEntry>} */
     const reached = new Set();
@@ -2997,7 +3081,59 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
     if (fromResolver) return { result };
     // `fromTrace` has already checked the shape.
     const entries = Array.isArray(traceOrResolver) ? traceOrResolver : traceOrResolver.trace;
-    return { result, unreached: entries.filter((entry) => !reached.has(entry)) };
+    const unreached = entries.filter((entry) => !reached.has(entry));
+    const recorded = traceLog?.outcome;
+    if (recorded === undefined) return { result, unreached };
+    return { result, unreached, changed: outcomeChange(recorded, result, redact) };
+};
+
+/**
+ * Where a replay's outcome first differs from the one a trace recorded, or `null` when they are the same. The
+ * replay's is recorded as `recordOutcome` recorded the trace's, so both are compared as JSON, through the same
+ * `redact`. One that cannot be copied differs at the root. A throw from `redact` rejects the replay, as one from
+ * `onResolved` does.
+ * @param {RecordedOutcome} recorded
+ * @param {SuccessState | FailureState} result
+ * @param {(value: any, name: string, kind: string) => any} redact
+ * @returns {OutcomeChange | null}
+ */
+const outcomeChange = (recorded, result, redact) => {
+    const failed = result.type === 'Failure';
+    const copied = recordPart('copy', () => snapshot(failed ? serializeError(result.error, false) : result.value));
+    if ('unrecorded' in copied) return { path: '$', recorded, replayed: undefined };
+    const redacted = snapshot(redact(copied.value, 'outcome', failed ? 'error' : 'result'));
+    const replayed = failed
+        ? { type: 'Failure', error: remarked(redacted, isErrorCopy(copied.value)) }
+        : { type: 'Success', value: redacted };
+    return firstDifference(recorded, replayed, '$') ?? null;
+};
+
+/**
+ * The first place two JSON values differ, with the value each holds there, or `undefined` when they are equal. A key
+ * that is not an identifier is written in brackets, as `$.value["order-id"]`.
+ * @param {any} recorded
+ * @param {any} replayed
+ * @param {string} path
+ * @returns {OutcomeChange | undefined}
+ */
+const firstDifference = (recorded, replayed, path) => {
+    if (Array.isArray(recorded) && Array.isArray(replayed)) {
+        for (let i = 0; i < Math.max(recorded.length, replayed.length); i++) {
+            const found = firstDifference(recorded[i], replayed[i], `${path}[${i}]`);
+            if (found) return found;
+        }
+        return undefined;
+    }
+    const isRecord = (/** @type {any} */ value) => isObject(value) && !Array.isArray(value);
+    if (isRecord(recorded) && isRecord(replayed)) {
+        for (const key of new Set([...Object.keys(recorded), ...Object.keys(replayed)])) {
+            const at = /^[A-Za-z_$][\w$]*$/.test(key) ? `${path}.${key}` : `${path}[${JSON.stringify(key)}]`;
+            const found = firstDifference(recorded[key], replayed[key], at);
+            if (found) return found;
+        }
+        return undefined;
+    }
+    return recorded === replayed ? undefined : { path, recorded, replayed };
 };
 
 /**
@@ -3132,11 +3268,18 @@ const replayHook = ({ resolve, missing, onResolved, onMissing, droppedEntries })
  * @param {(...args: any[]) => void} [options.log] - Defaults to `console.log`
  * @param {any} [options.context] - Overrides the context stored on the trace
  * @param {string} [options.version] - Current build id; warns when it differs from the trace's
- * @returns {Promise<Replay>} `{ result, unreached }`, as `replayEffect` returns for a trace
+ * @param {(value: any, name: string, kind: string) => any} [options.redact] - Passed to `replayEffect`
+ * @returns {Promise<Replay>} `{ result, unreached }`, and `changed` for a trace that recorded its outcome, as
+ *          `replayEffect` returns them
  */
 const timeTravel = async (flowFn, traceLog, options = {}) => {
-    checkOptions(options, 'timeTravel', { log: [isFunction, 'a function'], context: contextOptionRule, version: null });
-    const { log = console.log, context, version } = options ?? {};
+    checkOptions(options, 'timeTravel', {
+        log: [isFunction, 'a function'],
+        context: contextOptionRule,
+        version: null,
+        redact: [isFunction, 'a function']
+    });
+    const { log = console.log, context, version, redact } = options ?? {};
     checkFlowFn(flowFn, 'timeTravel');
     // Checked here, since timeTravel reads the trace's own fields before `replayEffect` checks its shape.
     const trace = checkTrace(traceLog, 'timeTravel', "a trace from recordEffect or a recorder's toTrace", false);
@@ -3174,6 +3317,7 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
         // `replayEffect` defaults the context to the trace's.
         replay = await replayEffect(/** @type {Effect} */ (root), traceLog, {
             context,
+            redact,
             onResolved: (step, outcome) => {
                 // A step the trace does not hold is refused or run live by `replayEffect`, not narrated here.
                 if (outcome === undefined) return;
@@ -3191,12 +3335,19 @@ const timeTravel = async (flowFn, traceLog, options = {}) => {
         const decisionAt = new Map(decisions.map((e) => [e.path, e.result]));
         for (const line of narrationTree(narrated, decisionAt)) log(line);
     }
-    const { result, unreached = [] } = replay;
+    const { result, unreached = [], changed } = replay;
     log(`Replay finished with state: ${result.type}`);
     log(result.type === 'Failure' ? `Error: ${formatForLog(result.error)}` : `Result: ${formatForLog(result.value)}`);
     const warning = unreachedWarning(result, unreached);
     if (warning !== undefined) log(warning);
-    return { result, unreached };
+    if (changed === undefined) return { result, unreached };
+    log(
+        changed === null
+            ? 'The outcome is the one recorded.'
+            : `The outcome differs from the one recorded at ${changed.path}: recorded ` +
+                  `${formatForLog(changed.recorded, 0)}, replayed ${formatForLog(changed.replayed, 0)}.`
+    );
+    return { result, unreached, changed };
 };
 
 /**

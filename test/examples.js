@@ -38,7 +38,7 @@ describe('The generated declaration files', function () {
         this.timeout(20000);
         const source = [
             "import { Command, Failure, Retry, Success, effectPipe, replayEffect } from 'pure-effect';",
-            "import { answers, assertCommand, assertStep } from 'pure-effect/testing';",
+            "import { answers, assertCommand, assertReproduced, assertStep } from 'pure-effect/testing';",
             "import type { Answer, AnswerResolver } from 'pure-effect/testing';",
             'type User = { id: number };',
             'declare const db: { find(email: string): Promise<User | null>; save(email: string): Promise<User> };',
@@ -57,6 +57,8 @@ describe('The generated declaration files', function () {
             "void replayEffect(flow('a@b.c'), answer).then(({ result }) => assertStep(result, 'Success').value.id);",
             "assertStep(found.next(null), 'Retry').effect;",
             'const left: string[] = answer.unused();',
+            "declare const recorded: import('pure-effect').TraceLog;",
+            "void replayEffect(flow('a@b.c'), recorded).then((replay) => assertReproduced(replay).type);",
             'void left;',
             '// @ts-expect-error a plain value is not an answer',
             'answers({ cmdFind: null });',

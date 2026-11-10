@@ -9,7 +9,7 @@
 - Read request values, such as the tenant, from any step with `Ask`, without passing them along
 - Built-in retry, plus parallel execution that cancels sibling branches on the first failure
 - OpenTelemetry-ready via lifecycle hooks, with a reference integration to copy
-- Zero dependencies, about 13 KB minified and gzipped
+- Zero dependencies, about 14 KB minified and gzipped
 - Works in JavaScript on Node 22 or later, and in TypeScript 5.1 or later (full generics, bundled `.d.ts`)
 
 ## Table of Contents
@@ -1264,6 +1264,39 @@ A test can also run a whole flow with no recording at all, answering each Comman
 
 Exact rules: [`replayEffect`](REFERENCE.md#replayeffecteffect-traceorresolver-options).
 
+### Checking that a replay ends the same way
+
+A replay proves the flow asks for the same Commands. To check what it decided as well, a trace records how the run ended: a Success's value or a Failure's error, passed through `redact` like every other value. `recordEffect` and the flight recorder both do, unless given `recordOutcome: false`.
+
+A replay of that trace returns `changed`: `null` when it ended as the run did, or where the two first differ. `assertReproduced`, from `pure-effect/testing`, checks it with the rest of what a replay can get wrong:
+
+```js
+import { recordEffect, replayEffect } from 'pure-effect';
+import { assertReproduced } from 'pure-effect/testing';
+
+const { trace } = await recordEffect(registerUserFlow(input));
+
+const replay = await replayEffect(registerUserFlow(trace.initialInput), trace);
+assert.equal(replay.changed, null); // it ended as the run did
+assertReproduced(replay); // the same, and it stopped at no TimeParadox and asked for every recorded step
+```
+
+A refactor that chooses a different delivery slot asks for the same Commands, so `unreached` stays empty, but `changed` names the first decision that moved, with the value on each side:
+
+```text
+{ path: '$.value.placements[0].slot', recorded: 13, replayed: 17 }
+```
+
+`timeTravel` says the same in its last line. What to know about it:
+
+- **It checks only what the flow returns.** A flow that returns a count of placed orders cannot tell which slots it chose, so return the decisions a replay should check. A value the flow reads from a Command's result comes back as recorded, whatever the code now does with it.
+- **Changing what a flow returns changes every stored outcome.** Add a field to a flow's result and each of its old traces reports `changed`, so record its fixtures again.
+- **`redact` sees the outcome as a result or an error named `'outcome'`.** A `redact` that masks by kind covers it as it is. One that masks results by Command name does not, so add `name === 'outcome'` to it, as [Keeping secrets out of a trace](#keeping-secrets-out-of-a-trace) does.
+- **A replay computes from recorded results,** which are already redacted, so its outcome comes out masked the same way. Where `redact` masks a value the flow built itself, pass the same `redact` to `replayEffect` or `timeTravel`.
+- **A value a pure step makes up,** such as the current time or a random id, differs on every replay. Read it in a Command, or from the context, so the trace records it.
+
+Exact rules: [`replayEffect`](REFERENCE.md#replayeffecteffect-traceorresolver-options) and [`assertReproduced`](REFERENCE.md#pure-effecttesting).
+
 ### Reading a trace
 
 A trace is plain JSON. This one is from a checkout whose card charge timed out once and then went through:
@@ -1295,7 +1328,7 @@ A trace is plain JSON. This one is from a checkout whose card charge timed out o
 
 A replay proves that the flow asks for the same Commands in the same order and handles the same answers. Every result comes from the recording, so it cannot check:
 
-- **What the flow computes.** Fix how a refund amount is calculated and replay the bad run: the charge step still gets the old amount from the recording. The replay reports `Success`, returns the value from before the fix, and flags nothing. Test a value change against the pure step that computes it.
+- **What the flow computes, unless the flow returns it.** Fix how a refund amount is calculated and replay the bad run: the charge step still gets the old amount from the recording. The replay reports `Success` and returns the value from before the fix. Only `changed` flags it, when the flow returns that amount; see [Checking that a replay ends the same way](#checking-that-a-replay-ends-the-same-way). Test a value change against the pure step that computes it.
 - **A fix inside a Command's function.** The function never runs, so an old trace hands the flow what it returned or threw before the fix. Catch a duplicate-key error inside the function and return it as data, and the old trace still replays the throw. Cover such a fix with an integration test.
 - **The arguments a Command was called with.** A trace records results only. Given the recorded input and results, the flow does the same thing again, so replaying up to a step rebuilds its arguments for a debugger, but a test cannot assert on them. Storing them would also double what `redact` has to cover, since arguments are usually the sensitive part of a call.
 - **A step a hook vetoed.** A veto leaves no entry in the trace, so the replay stops at that step with a `ReplayError`.
@@ -1338,7 +1371,7 @@ enableRecording({
 
 To install it beside other hooks, such as the [telemetry example](#tracing-with-opentelemetry)'s, pass `recordingHooks` to `configureEffect` instead. It takes the same options, and [Hooks](#hooks) shows how hooks installed together run.
 
-The flight recorder keeps the trace of a run that failed or in which a Command threw, passes every value through `redact`, caps a trace at `maxEntries`, reports a storage failure to `onSinkError`, and warns once per flow about a trace that has no input, was capped, is missing values, or has steps named `'anonymous'`.
+The flight recorder keeps the trace of a run that failed or in which a Command threw, passes every value through `redact`, caps a trace at `maxEntries`, reports a storage failure to `onSinkError`, and warns once per flow about a trace that has no input, was capped, is missing values, or has steps named `'anonymous'`. Each trace also holds how its run ended, unless it is given `recordOutcome: false`, so a replay can say whether it ends the same way; see [Checking that a replay ends the same way](#checking-that-a-replay-ends-the-same-way).
 
 A trace stores every value as JSON, so return plain data from Commands; [Keeping a replay faithful](#keeping-a-replay-faithful) shows how.
 
@@ -1346,7 +1379,7 @@ Exact rules: [the flight recorder](REFERENCE.md#pure-effectflight-recorder).
 
 ### Keeping secrets out of a trace
 
-`redact` sees everything a trace stores: each result, each thrown error, the flow's input and the context, told apart by `kind`.
+`redact` sees everything a trace stores: each result, each thrown error, the flow's input, the context, and how the run ended, as a result or an error named `'outcome'`, told apart by `kind`.
 
 Check a value before replacing a field in it, since `{ ...value, email: '[redacted]' }` turns a `null` into an object and the replay takes the other branch:
 
@@ -1359,7 +1392,8 @@ const redact = (value, name, kind) => {
     if (kind === 'initialInput') return mask(value, 'cardNumber');
     if (kind === 'context') return mask(value, 'authToken');
     if (kind === 'error') return mask(value, 'attempted');
-    return name === 'cmdFetchUser' ? mask(value, 'email') : value;
+    // The flow returns the user it fetched, so its outcome holds the email too.
+    return name === 'cmdFetchUser' || name === 'outcome' ? mask(value, 'email') : value;
 };
 // Pass it as the redact option of enableRecording, recordEffect or recorder.
 

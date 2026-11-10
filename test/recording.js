@@ -658,9 +658,11 @@ describe('Recording', function () {
                 (/** @type {any} */ u) => Success(u)
             );
 
+        // The flow returns the user, and the outcome reaches redact named 'outcome', so a redact that masks by name
+        // masks both.
         const { trace } = await recordEffect(flow(), {
             redact: (result, name) =>
-                name === 'cmdLoadUser'
+                name === 'cmdLoadUser' || name === 'outcome'
                     ? { .../** @type {any} */ (result), email: '[redacted]', card: '[redacted]' }
                     : result
         });
@@ -707,9 +709,11 @@ describe('Recording', function () {
                 ['initialInput', 'initialInput'],
                 ['context', 'context'],
                 ['result', 'cmdRead'],
-                ['error', 'cmdSave']
+                ['error', 'cmdSave'],
+                ['error', 'outcome']
             ],
-            'every value a trace holds passes through redact, each as it enters the trace: the input and context before the run'
+            'every value a trace holds passes through redact, each as it enters the trace: the input and context ' +
+                'before the run, and how it ended after'
         );
         const json = JSON.stringify(trace);
         assert.ok(!json.includes('hunter2'), 'no password anywhere in the trace');
@@ -929,6 +933,126 @@ describe('Recording', function () {
         assert.deepEqual(trace.trace[1].result, { total: 100 }, 'the loop back is cut');
         const { result: replayed } = await replayEffect(flow(null), trace);
         assert.equal(/** @type {any} */ (errorOf(replayed)).name, 'ReplayError');
+    });
+});
+
+describe('Recording how a run ended', function () {
+    beforeEach(() => configureEffect());
+
+    /** A flow that reads a user and returns what it decided. */
+    const flow = (/** @type {any} */ input) =>
+        effectPipe((/** @type {any} */ i) =>
+            Command(
+                function cmdLoadUser() {
+                    return { id: i.id, email: 'ada@example.com' };
+                },
+                (/** @type {any} */ user) => (user.id > 0 ? Success({ user, plan: 'pro' }) : Failure('no_user'))
+            )
+        )(input);
+
+    it('should record the outcome by default, and none under recordOutcome: false, which redact then never meets', async function () {
+        assert.deepEqual((await recordEffect(flow({ id: 1 }))).trace.outcome?.type, 'Success');
+        /** @type {string[]} */
+        const names = [];
+        const { trace } = await recordEffect(flow({ id: 1 }), {
+            recordOutcome: false,
+            redact: (value, name) => (names.push(name), value)
+        });
+        assert.equal('outcome' in trace, false);
+        assert.ok(!names.includes('outcome'));
+    });
+
+    it("should record a Success's value through redact as a result named 'outcome'", async function () {
+        /** @type {any[]} */
+        const seen = [];
+        const { result, trace } = await recordEffect(flow({ id: 1 }), {
+            redact: (/** @type {any} */ value, name, kind) => {
+                if (name !== 'outcome') return value;
+                seen.push([kind, value]);
+                return { ...value, user: { ...value.user, email: '[redacted]' } };
+            }
+        });
+        assert.deepEqual(seen, [['result', { user: { id: 1, email: 'ada@example.com' }, plan: 'pro' }]]);
+        assert.deepEqual(trace.outcome, {
+            type: 'Success',
+            value: { user: { id: 1, email: '[redacted]' }, plan: 'pro' }
+        });
+        assert.deepEqual(
+            result,
+            Success({ user: { id: 1, email: 'ada@example.com' }, plan: 'pro' }),
+            'the run is untouched'
+        );
+    });
+
+    it("should record a Failure's error as an error named 'outcome', and an Error with no stack", async function () {
+        const domain = await recordEffect(flow({ id: 0 }));
+        assert.deepEqual(domain.trace.outcome, { type: 'Failure', error: 'no_user' });
+
+        const throwing = effectPipe(() =>
+            Command(function cmdCharge() {
+                throw Object.assign(new Error('declined'), { code: 'card_declined' });
+            })
+        );
+        /** @type {any[]} */
+        const named = [];
+        const { trace } = await recordEffect(throwing(1), {
+            stack: true,
+            // A fresh object loses the mark that says it was an Error, and the trace marks it again.
+            redact: (/** @type {any} */ value, name, kind) => {
+                if (kind === 'error') named.push(name);
+                return name === 'outcome' ? { name: value.name, message: value.message } : value;
+            }
+        });
+        assert.deepEqual(named, ['cmdCharge', 'outcome']);
+        assert.deepEqual(trace.outcome, {
+            type: 'Failure',
+            error: { __error: true, name: 'Error', message: 'declined' }
+        });
+        assert.equal(typeof (/** @type {any} */ (trace.trace[0].error).stack), 'string', 'the step keeps its stack');
+    });
+
+    it('should mark an outcome it could not record, and leave it out', async function () {
+        const thrown = await recordEffect(flow({ id: 1 }), {
+            redact: (value, name) => {
+                if (name === 'outcome') throw new Error('redact bug');
+                return value;
+            }
+        });
+        assert.equal('outcome' in thrown.trace, false);
+        assert.deepEqual(thrown.trace.unrecorded, { outcome: 'redact' });
+        const dropped = await recordEffect(flow({ id: 1 }), {
+            redact: (value, name) => (name === 'outcome' ? undefined : value)
+        });
+        assert.deepEqual(dropped.trace.unrecorded, { outcome: 'redact' });
+        const big = effectPipe(() =>
+            Command(
+                function cmdCount() {
+                    return 1;
+                },
+                () => Success(10n)
+            )
+        );
+        const uncopied = await recordEffect(big(1));
+        assert.deepEqual(uncopied.trace.unrecorded, { outcome: 'copy' });
+        assert.deepEqual(uncopied.result, Success(10n), 'the run keeps its own outcome');
+    });
+
+    it("should keep what the input and context could not record beside the outcome's", async function () {
+        const { trace } = await recordEffect(flow({ id: 1 }), {
+            context: { tenant: 't' },
+            redact: (value, name, kind) => {
+                if (kind === 'context' || name === 'outcome') throw new Error('no');
+                return value;
+            }
+        });
+        assert.deepEqual(trace.unrecorded, { context: 'redact', outcome: 'redact' });
+    });
+
+    it("should record the outcome a recorder's toTrace is given", async function () {
+        const rec = recorder();
+        const result = await runEffect(flow({ id: 1 }), undefined, { onStep: rec.onStep });
+        assert.deepEqual(rec.toTrace({ outcome: result }).outcome, { type: 'Success', value: valueOf(result) });
+        assert.equal('outcome' in rec.toTrace(), false);
     });
 });
 
@@ -1306,7 +1430,7 @@ describe('Recorded values are snapshots', function () {
         const { result, trace } = await recordEffect(flow({ email: 'a@b.com' }), { context: {} });
         assert.deepEqual(trace.context, {}, 'the trace holds the context Ask saw');
         const replayed = await timeTravel(flow, trace, { log: () => {} });
-        assert.deepEqual(replayed, { result, unreached: [] });
+        assert.deepEqual(replayed, { result, unreached: [], changed: null });
     });
 });
 
@@ -2074,5 +2198,60 @@ describe('pure-effect/flight-recorder', function () {
         assert.deepEqual(replayed.result, Success([2, 3]));
         assert.deepEqual(replayed.unreached, []);
         assert.deepEqual(calls, { a: 1, b: 1 }, 'the replay executed nothing');
+    });
+
+    it('should store how each run ended unless recordOutcome is false, a run that threw as a Failure', async function () {
+        const flow = effectPipe((/** @type {number} */ n) =>
+            Command(
+                function cmdDouble() {
+                    if (n < 0) throw new Error('negative');
+                    return n * 2;
+                },
+                (/** @type {number} */ doubled) => Success({ doubled })
+            )
+        );
+        /** @type {any[]} */
+        const stored = [];
+        const off = enableRecording({ keep: () => true, sink: (t) => void stored.push(t) });
+        await runEffect(flow(2));
+        await runEffect(flow(-1));
+        off();
+        assert.deepEqual(stored[0].outcome, { type: 'Success', value: { doubled: 4 } });
+        assert.equal('unrecorded' in stored[0], false, 'nothing went unrecorded');
+        assert.equal(stored[1].outcome.type, 'Failure');
+        assert.equal(stored[1].outcome.error.message, 'negative');
+        assert.equal('stack' in stored[1].outcome.error, false);
+        const replay = await replayEffect(flow(stored[0].initialInput), stored[0]);
+        assert.equal(replay.changed, null);
+
+        const offAgain = enableRecording({ keep: () => true, recordOutcome: false, sink: (t) => void stored.push(t) });
+        await runEffect(flow(2));
+        offAgain();
+        assert.equal('outcome' in stored[2], false);
+    });
+
+    it('should warn once per flow when a kept trace could not record its outcome, and still store the trace', async function () {
+        /** @type {string[]} */
+        const warnings = [];
+        /** @type {any[]} */
+        const stored = [];
+        const flow = effectPipe((/** @type {number} */ n) =>
+            Command(function cmdRead() {
+                return n;
+            })
+        );
+        const off = enableRecording({
+            keep: () => true,
+            redact: (value, name) => (name === 'outcome' ? undefined : value),
+            sink: (t) => void stored.push(t),
+            onWarning: (message) => void warnings.push(message)
+        });
+        await runEffect(flow(1), undefined, { flowName: 'reads' });
+        await runEffect(flow(2), undefined, { flowName: 'reads' });
+        off();
+        assert.equal(stored.length, 2);
+        assert.deepEqual(stored[0].unrecorded, { outcome: 'redact' });
+        assert.equal(warnings.length, 1);
+        assert.match(warnings[0], /^Recording 'reads': a kept trace holds no outcome/);
     });
 });

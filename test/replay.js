@@ -213,7 +213,8 @@ describe('Replay', function () {
             '│  └─ fallback: cmdChargeSecondary returned {"id":"ch_1"}',
             '└─ cmdSendEmail returned {"sent":true}',
             'Replay finished with state: Success',
-            'Result: {\n  "sent": true\n}'
+            'Result: {\n  "sent": true\n}',
+            'The outcome is the one recorded.'
         ]);
     });
 
@@ -1439,7 +1440,7 @@ describe('Replay', function () {
         await assert.rejects(recordEffect(flow({ id: 'x' }), /** @type {any} */ ({ ctx: {} })), {
             name: 'TypeError',
             message:
-                /recordEffect has no option named 'ctx'; its options are context, flowName, version, redact, maxEntries and stack\./
+                /recordEffect has no option named 'ctx'; its options are context, flowName, version, recordOutcome, redact, maxEntries and stack\./
         });
         assert.deepEqual(calls, { read: 0, write: 0 }, 'refused before the flow runs');
 
@@ -1447,12 +1448,12 @@ describe('Replay', function () {
         await assert.rejects(replayEffect(flow({ id: 'x' }), trace, /** @type {any} */ ({ onMising: 'execute' })), {
             name: 'TypeError',
             message:
-                /replayEffect has no option named 'onMising'; its options are context, fastRetry, hooks, onMissing and onResolved\./
+                /replayEffect has no option named 'onMising'; its options are context, fastRetry, hooks, onMissing, onResolved and redact\./
         });
         const log = () => {};
         await assert.rejects(timeTravel(flow, trace, /** @type {any} */ ({ log, verison: 'b2' })), {
             name: 'TypeError',
-            message: /timeTravel has no option named 'verison'; its options are log, context and version\./
+            message: /timeTravel has no option named 'verison'; its options are log, context, version and redact\./
         });
     });
 
@@ -2115,6 +2116,190 @@ describe('Replay', function () {
         assert.equal(replayed.type, 'Success');
         assert.deepEqual(valueOf(replayed), valueOf(result));
         assert.equal(invocations, 0, 'no Command thunk was applied');
+    });
+});
+
+describe('Whether a replay ends as the run did', function () {
+    beforeEach(() => configureEffect());
+
+    /** Orders placed in slots by a rule, with each decision returned, as `recordOutcome` needs to check them. */
+    const placeOrders = (/** @type {(slots: number[]) => number[]} */ choose) =>
+        effectPipe((/** @type {string} */ day) =>
+            Command(
+                function cmdLoadSlots() {
+                    return { day, slots: [13, 15, 17] };
+                },
+                (/** @type {any} */ loaded) =>
+                    Success({ day, placements: [{ order: 'o-1', slot: choose(loaded.slots)[0] }], 'by-zone': { n: 1 } })
+            )
+        );
+    const earliest = (/** @type {number[]} */ slots) => slots;
+    const latest = (/** @type {number[]} */ slots) => [...slots].reverse();
+
+    it('should say null when the replay ends as recorded, from memory and from JSON', async function () {
+        const { trace } = await recordEffect(placeOrders(earliest)('mon'));
+        for (const stored of [trace, JSON.parse(JSON.stringify(trace))]) {
+            const replay = await replayEffect(placeOrders(earliest)(stored.initialInput), stored);
+            assert.equal(replay.changed, null);
+            assert.deepEqual(replay.unreached, []);
+        }
+    });
+
+    it('should name where a decision changed with the same steps, and the value each side holds there', async function () {
+        const { trace } = await recordEffect(placeOrders(earliest)('mon'));
+        const replay = await replayEffect(placeOrders(latest)(/** @type {string} */ (trace.initialInput)), trace);
+        assert.deepEqual(replay.unreached, [], 'the steps alone cannot tell');
+        assert.deepEqual(replay.changed, { path: '$.value.placements[0].slot', recorded: 13, replayed: 17 });
+    });
+
+    it('should write a key that is not an identifier in brackets, and a missing one as undefined', async function () {
+        const trace = {
+            initialInput: 'mon',
+            outcome: {
+                type: 'Success',
+                value: { day: 'mon', placements: [{ order: 'o-1', slot: 13 }], 'by-zone': { n: 2 } }
+            },
+            trace: [{ command: 'cmdLoadSlots', path: '0', result: { day: 'mon', slots: [13, 15, 17] } }]
+        };
+        const replay = await replayEffect(placeOrders(earliest)('mon'), trace);
+        assert.deepEqual(replay.changed, { path: '$.value["by-zone"].n', recorded: 2, replayed: 1 });
+        const twoPlaced = { type: 'Success', value: { day: 'mon', placements: [{ order: 'o-1', slot: 13 }, {}] } };
+        const longer = await replayEffect(placeOrders(earliest)('mon'), { ...trace, outcome: twoPlaced });
+        assert.deepEqual(longer.changed, { path: '$.value.placements[1]', recorded: {}, replayed: undefined });
+        const shorter = { ...trace, outcome: { type: 'Success', value: { day: 'mon' } } };
+        const extra = await replayEffect(placeOrders(earliest)('mon'), shorter);
+        assert.equal(extra.changed?.path, '$.value.placements');
+        assert.equal(extra.changed?.recorded, undefined);
+    });
+
+    it('should leave changed out for a trace that recorded no outcome, its bare entries and a Resolver', async function () {
+        const { trace } = await recordEffect(placeOrders(earliest)('mon'), { recordOutcome: false });
+        assert.equal('changed' in (await replayEffect(placeOrders(earliest)('mon'), trace)), false);
+        const recorded = await recordEffect(placeOrders(earliest)('mon'));
+        assert.equal('changed' in (await replayEffect(placeOrders(earliest)('mon'), recorded.trace.trace)), false);
+        const fromResolver = await replayEffect(placeOrders(earliest)('mon'), () => ({ result: { slots: [1] } }));
+        assert.equal('changed' in fromResolver, false);
+    });
+
+    it("should compare a Failure's error as recorded, with no stack, and tell a Success from a Failure", async function () {
+        const charge = effectPipe(() =>
+            Command(function cmdCharge() {
+                throw Object.assign(new Error('card declined'), { code: 'declined' });
+            })
+        );
+        const { trace } = await recordEffect(charge(1), { stack: true });
+        assert.equal((await replayEffect(charge(1), trace)).changed, null, 'a replay has no stack to compare');
+
+        const lookup = (/** @type {string} */ missing) =>
+            effectPipe(() =>
+                Command(
+                    function cmdFind() {
+                        return null;
+                    },
+                    () => Failure(missing)
+                )
+            );
+        const refused = await recordEffect(lookup('no_user')(1));
+        const reworded = await replayEffect(lookup('missing_user')(1), refused.trace);
+        assert.deepEqual(reworded.changed, { path: '$.error', recorded: 'no_user', replayed: 'missing_user' });
+
+        const asSuccess = { ...trace, outcome: { type: 'Success', value: 'charged' } };
+        const replay = await replayEffect(charge(1), asSuccess);
+        assert.equal(replay.changed?.path, '$.type');
+        assert.deepEqual([replay.changed?.recorded, replay.changed?.replayed], ['Success', 'Failure']);
+    });
+
+    it("should mask the replay's outcome with the redact it is given, for a value the flow computed", async function () {
+        const greet = effectPipe((/** @type {string} */ name) =>
+            Command(
+                function cmdLoadVisits() {
+                    return 3;
+                },
+                (/** @type {number} */ visits) => Success({ greeting: `Hello ${name}`, visits })
+            )
+        );
+        const redact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) =>
+            name === 'outcome' ? { ...value, greeting: '[redacted]' } : value;
+        const { trace } = await recordEffect(greet('Ada'), { redact });
+        const unmasked = await replayEffect(greet('Ada'), trace);
+        assert.deepEqual(unmasked.changed, { path: '$.value.greeting', recorded: '[redacted]', replayed: 'Hello Ada' });
+        assert.equal((await replayEffect(greet('Ada'), trace, { redact })).changed, null);
+        await assert.rejects(
+            replayEffect(greet('Ada'), trace, {
+                redact: () => {
+                    throw new Error('redact bug');
+                }
+            }),
+            { message: 'redact bug' }
+        );
+    });
+
+    it("should hand a replay's redact its outcome as the recorder did, a result or an error named 'outcome'", async function () {
+        /** @type {string[][]} */
+        const calls = [];
+        const redact = (/** @type {any} */ value, /** @type {string} */ name, /** @type {string} */ kind) => {
+            if (name === 'outcome') calls.push([name, kind]);
+            return value;
+        };
+        const ok = effectPipe(() =>
+            Command(function cmdRead() {
+                return 1;
+            })
+        );
+        const fails = effectPipe(() =>
+            Command(
+                function cmdRead() {
+                    return 1;
+                },
+                () => Failure('no')
+            )
+        );
+        for (const flow of [ok, fails]) {
+            const { trace } = await recordEffect(flow(1), { redact });
+            await replayEffect(flow(1), trace, { redact });
+        }
+        assert.deepEqual(calls, [
+            ['outcome', 'result'],
+            ['outcome', 'result'],
+            ['outcome', 'error'],
+            ['outcome', 'error']
+        ]);
+    });
+
+    it('should say an outcome the replay cannot copy differs at the root', async function () {
+        const counted = (/** @type {any} */ total) =>
+            effectPipe(() =>
+                Command(
+                    function cmdCount() {
+                        return 1;
+                    },
+                    () => Success(total)
+                )
+            );
+        const { trace } = await recordEffect(counted(10)(1));
+        const replay = await replayEffect(counted(10n)(1), trace);
+        assert.deepEqual(replay.changed, { path: '$', recorded: { type: 'Success', value: 10 }, replayed: undefined });
+    });
+
+    it('should narrate whether the replay ended as recorded in timeTravel, and return changed', async function () {
+        const { trace } = await recordEffect(placeOrders(earliest)('mon'));
+        /** @type {string[]} */
+        const lines = [];
+        const log = (/** @type {string} */ line) => void lines.push(line);
+        const same = await timeTravel(placeOrders(earliest), trace, { log });
+        assert.equal(same.changed, null);
+        assert.equal(lines[lines.length - 1], 'The outcome is the one recorded.');
+        const differs = await timeTravel(placeOrders(latest), trace, { log });
+        assert.equal(differs.changed?.path, '$.value.placements[0].slot');
+        assert.equal(
+            lines[lines.length - 1],
+            'The outcome differs from the one recorded at $.value.placements[0].slot: recorded 13, replayed 17.'
+        );
+        const untraced = await recordEffect(placeOrders(earliest)('mon'), { recordOutcome: false });
+        const before = lines.length;
+        const plain = await timeTravel(placeOrders(earliest), untraced.trace, { log });
+        assert.equal('changed' in plain, false);
+        assert.ok(!lines.slice(before).some((line) => line.startsWith('The outcome')));
     });
 });
 

@@ -2,11 +2,12 @@
 
 import { commandName } from './index.js';
 
-/** @import { ReplayOutcome, ReplayStep, Resolver } from "./index.js" */
+/** @import { Replay, ReplayOutcome, ReplayStep, Resolver } from "./index.js" */
 
 /**
  * Helpers for testing flows with any test runner: `assertStep` and `assertCommand` walk a flow one step at a time,
- * and `answers` builds the Resolver that runs a whole flow under `replayEffect` with no I/O.
+ * `answers` builds the Resolver that runs a whole flow under `replayEffect` with no I/O, and `assertReproduced`
+ * checks that a replay of a recorded run did what the run did.
  */
 
 /**
@@ -53,8 +54,8 @@ const describeStep = (step) => {
  * An error shaped like `node:assert`'s, built without importing it, so the helpers run anywhere and every test
  * runner shows `expected` and `actual`.
  * @param {string} message
- * @param {string} actual
- * @param {string} expected
+ * @param {unknown} actual
+ * @param {unknown} expected
  * @returns {Error}
  */
 const assertionError = (message, actual, expected) =>
@@ -90,6 +91,64 @@ export function assertCommand(step, name) {
     const actual = describeStep(step);
     if (actual !== expected) throw assertionError(`Expected ${expected}, got ${actual}.`, actual, expected);
     return /** @type {Extract<S, { type: 'Command' }>} */ (step);
+}
+
+/**
+ * Shows a value in an assertion message, on one line.
+ * @param {unknown} value
+ * @returns {string}
+ */
+const shown = (value) => {
+    try {
+        return JSON.stringify(value) ?? String(value);
+    } catch {
+        return String(value);
+    }
+};
+
+/**
+ * Checks that a replay of a trace reproduced the recorded run, and returns its result: it stopped at no
+ * `TimeParadox` or `ReplayError`, asked for every recorded step, and ended as the trace recorded. A trace recorded
+ * without `recordOutcome` fails it, since nothing says how the run ended. Otherwise throws an `AssertionError`
+ * naming the first thing that differs.
+ * @template T, E
+ * @param {Replay<T, E>} replay - What `replayEffect` or `timeTravel` returned for a trace
+ * @returns {Replay<T, E>['result']}
+ */
+export function assertReproduced(replay) {
+    const { result, unreached, changed } = replay ?? {};
+    if (!Array.isArray(unreached)) {
+        throw new TypeError(
+            `assertReproduced takes what replayEffect returns for a trace, got ${shown(replay)}. A replay from a ` +
+                'Resolver has nothing recorded to compare with.'
+        );
+    }
+    const fault = result?.type === 'Failure' && result.error instanceof Error ? result.error : undefined;
+    if (fault?.name === 'TimeParadox' || fault?.name === 'ReplayError') {
+        const message = `Expected the replay to reproduce the run, but it stopped: ${fault.name}: ${fault.message}`;
+        throw assertionError(message, fault.name, 'no replay fault');
+    }
+    if (unreached.length > 0) {
+        const names = unreached.map((entry) => entry.command).join(', ');
+        const message = `Expected the replay to reproduce the run, but it never asked for recorded steps: ${names}.`;
+        throw assertionError(message, names, 'none');
+    }
+    if (changed === undefined) {
+        throw assertionError(
+            'Expected the replay to reproduce the run, but the trace holds no outcome to compare with: it was ' +
+                'recorded with recordOutcome: false, or its outcome could not be recorded.',
+            undefined,
+            'a recorded outcome'
+        );
+    }
+    if (changed !== null) {
+        const { path, recorded, replayed } = changed;
+        const message =
+            `Expected the replay to end as the run did, but it differs at ${path}: recorded ${shown(recorded)}, ` +
+            `replayed ${shown(replayed)}.`;
+        throw assertionError(message, replayed, recorded);
+    }
+    return /** @type {Replay<T, E>['result']} */ (result);
 }
 
 /**

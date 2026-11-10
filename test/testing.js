@@ -11,9 +11,10 @@ import {
     effectGen,
     step,
     configureEffect,
+    recordEffect,
     replayEffect
 } from '../index.js';
-import { answers, assertCommand, assertStep } from '../testing.js';
+import { answers, assertCommand, assertReproduced, assertStep } from '../testing.js';
 import { registerUserFlow, valueOf, errorOf } from './helpers.js';
 
 /** @import { User } from "./helpers.js" */
@@ -201,6 +202,79 @@ describe('pure-effect/testing', function () {
             const { result } = await replayEffect(each(['a', 'b']), answer);
             assert.deepEqual(result, Success(['hi a', 'hi b']));
             assert.deepEqual(seen, [[], []]);
+        });
+    });
+
+    describe('assertReproduced', function () {
+        /** A flow that decides a discount from a recorded order, and returns the decision. */
+        const discount = (/** @type {number} */ percent) =>
+            effectPipe((/** @type {string} */ id) =>
+                Command(
+                    function cmdLoadOrder() {
+                        return { id, total: 200 };
+                    },
+                    (/** @type {any} */ order) => Success({ id: order.id, off: (order.total * percent) / 100 })
+                )
+            );
+
+        it('should return the result of a replay that did what the run did', async function () {
+            const { trace } = await recordEffect(discount(10)('o-1'));
+            const result = assertReproduced(
+                await replayEffect(discount(10)(/** @type {string} */ (trace.initialInput)), trace)
+            );
+            assert.deepEqual(result, Success({ id: 'o-1', off: 20 }));
+        });
+
+        it('should name where the outcome differs, with the values a test runner diffs', async function () {
+            const { trace } = await recordEffect(discount(10)('o-1'));
+            const replay = await replayEffect(discount(15)(/** @type {string} */ (trace.initialInput)), trace);
+            assert.throws(() => assertReproduced(replay), {
+                name: 'AssertionError',
+                message:
+                    'Expected the replay to end as the run did, but it differs at $.value.off: recorded 20, replayed 30.',
+                actual: 30,
+                expected: 20
+            });
+        });
+
+        it('should fail a trace that recorded no outcome, rather than pass it unchecked', async function () {
+            const { trace } = await recordEffect(discount(10)('o-1'), { recordOutcome: false });
+            const replay = await replayEffect(discount(10)(/** @type {string} */ (trace.initialInput)), trace);
+            assert.throws(() => assertReproduced(replay), {
+                name: 'AssertionError',
+                message: /the trace holds no outcome to compare with: it was recorded with recordOutcome: false/
+            });
+        });
+
+        it('should name a replay fault before anything it left behind', async function () {
+            const { trace } = await recordEffect(registerUserFlow(input));
+            const reshaped = effectPipe(() => Command(function cmdAudit() {}));
+            const replay = await replayEffect(reshaped(input), trace);
+            assert.throws(() => assertReproduced(replay), {
+                name: 'AssertionError',
+                message: /^Expected the replay to reproduce the run, but it stopped: TimeParadox: /
+            });
+        });
+
+        it('should name the recorded steps a replay never asked for', async function () {
+            // A new email, so the recorded run went on to save the user.
+            const signup = { email: 'early@test.com', password: 'password123' };
+            const { trace } = await recordEffect(registerUserFlow(signup));
+            const stopsEarly = effectPipe(() => Command(function cmdFindUser() {}));
+            const replay = await replayEffect(stopsEarly(signup), trace);
+            assert.throws(() => assertReproduced(replay), {
+                name: 'AssertionError',
+                message: 'Expected the replay to reproduce the run, but it never asked for recorded steps: cmdSaveUser.'
+            });
+        });
+
+        it('should refuse what a replay from a Resolver returns, which has nothing recorded to compare', async function () {
+            const fromResolver = await replayEffect(Success(1), () => undefined);
+            assert.throws(() => assertReproduced(/** @type {any} */ (10n)), { name: 'TypeError', message: /got 10\./ });
+            assert.throws(() => assertReproduced(/** @type {any} */ (fromResolver)), {
+                name: 'TypeError',
+                message: /^assertReproduced takes what replayEffect returns for a trace, got \{"result"/
+            });
         });
     });
 });

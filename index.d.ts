@@ -1437,15 +1437,24 @@ export type TraceLog<I = unknown, C = unknown> = {
     version?: string;
     initialInput?: I;
     context?: C;
-    /** Why the trace holds no `initialInput` or `context`, as an entry's `unrecorded` says it for a step. */
-    unrecorded?: { initialInput?: string; context?: string };
+    /** How the run ended, unless it was recorded with `recordOutcome: false`. */
+    outcome?: RecordedOutcome;
+    /** Why the trace holds no `initialInput`, `context` or `outcome`, as an entry's `unrecorded` says it for a step. */
+    unrecorded?: { initialInput?: string; context?: string; outcome?: string };
     dropped?: number;
     trace: TraceEntry[];
 };
 
+// `type` is a string, as a JSON import widens it, so a fixture imported as a JSON module still replays.
+/**
+ * How a run ended, as a trace holds it: `{ type: 'Success', value }` or `{ type: 'Failure', error }`, after `redact`.
+ */
+export type RecordedOutcome = { type: string; value?: unknown; error?: unknown };
+
 export interface RecorderOptions {
     /**
      * Scrubs each value before it enters a trace; `kind` says which. It gets a copy, so editing it in place is safe.
+     * How the run ended comes as a result or an error named `'outcome'`.
      */
     redact?: ((value: any, name: string, kind: 'result' | 'error' | 'initialInput' | 'context') => unknown) | undefined;
     /** Cap trace length; further steps are counted in `dropped`, not stored. */
@@ -1461,6 +1470,8 @@ export interface TraceMeta<I = unknown, C = unknown> {
     context?: C;
     /** Accepts `undefined`, so `process.env.BUILD_ID` passes under `exactOptionalPropertyTypes`. */
     version?: string | undefined;
+    /** How the run ended, given once it has, so the trace records it. */
+    outcome?: SuccessState<unknown> | FailureState<unknown> | undefined;
 }
 
 /** An `onStep` hook that records each step, and `toTrace` to package the recording as a trace. */
@@ -1476,6 +1487,8 @@ export type RecordOptions<Ctx = unknown> = RecorderOptions & {
     /** Names the run in the trace, and in spans an installed hook makes. */
     flowName?: string | undefined;
     version?: string | undefined;
+    /** Records how the run ended in the trace, through `redact`, so a replay can say whether it ends the same way. On by default. */
+    recordOutcome?: boolean | undefined;
 };
 
 /**
@@ -1503,12 +1516,25 @@ export interface ReplayOptions<Ctx = unknown> {
      */
     onMissing?: 'throw' | 'execute' | undefined;
     onResolved?: ((step: ReplayStep, outcome: ReplayOutcome | undefined) => void) | undefined;
+    /** Masks the replay's outcome before it is compared with the trace's; needed only where `redact` masks a value the flow computed. */
+    redact?: RecorderOptions['redact'];
 }
 
-/** The replay's outcome and, for a trace, the recorded steps the flow never asked for. */
+/**
+ * The replay's outcome and, for a trace, the recorded steps the flow never asked for. A trace that recorded its outcome
+ * also gets `changed`: `null` when the replay ended the same way, else where the two first differ.
+ */
 export interface Replay<T, E = unknown> {
     result: SuccessState<T> | FailureState<E | Error>;
     unreached: TraceEntry[];
+    changed?: OutcomeChange | null;
+}
+
+/** Where a replay's outcome first differs from the recorded one, such as `$.value[0].slot`, and the value each holds there. */
+export interface OutcomeChange {
+    path: string;
+    recorded: unknown;
+    replayed: unknown;
 }
 
 /**
@@ -1570,6 +1596,8 @@ export interface TimeTravelOptions<Ctx = unknown> {
     context?: Ctx | undefined;
     /** The build replaying the trace; a trace recorded at another build gets a warning. */
     version?: string | undefined;
+    /** Passed to `replayEffect`, to mask the replay's outcome before it is compared. */
+    redact?: RecorderOptions['redact'];
 }
 
 /**

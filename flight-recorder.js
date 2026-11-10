@@ -20,6 +20,8 @@ import { configureEffect, recorder, Failure } from './index.js';
  *           the trace, which marks where, as is one the recorder cannot copy.
  * @property {number | undefined} [maxEntries] - Caps trace length, 500 by default; the overflow is reported as `dropped`.
  * @property {boolean | undefined} [stack] - Records stack traces for thrown errors.
+ * @property {boolean | undefined} [recordOutcome] - Records how each run ended in its trace, through `redact`, so a
+ *           replay can say whether it ends the same way. On by default; `false` leaves it out.
  * @property {string | undefined} [version] - Commit or build id, attached to each trace, so `timeTravel` can warn
  *           when it replays a trace against another build.
  * @property {((result: SuccessState<any> | FailureState<any>, entries: TraceEntry[]) => boolean) | undefined} [keep] - Decides which
@@ -30,7 +32,8 @@ import { configureEffect, recorder, Failure } from './index.js';
  *           `sink`. Defaults to `console.error`.
  * @property {((message: string, flowName?: string) => void) | undefined} [onWarning] - Receives a warning, once per flow, about a
  *           kept trace that will not replay as recorded: it has no input, `maxEntries` cut it short, some of its values
- *           could not be recorded, or some of its steps are named 'anonymous'. Defaults to `console.warn`.
+ *           could not be recorded, its outcome could not be recorded, or some of its steps are named 'anonymous'.
+ *           Defaults to `console.warn`.
  */
 
 /**
@@ -46,6 +49,7 @@ export function recordingHooks(options = {}) {
         redact,
         maxEntries = 500,
         stack,
+        recordOutcome = true,
         version,
         keep = (result, entries) => result.type === 'Failure' || entries.some((entry) => entry.threw === true),
         onSinkError = (error, flowName) => console.error(`Recording failed for '${flowName || 'flow'}':`, error),
@@ -78,13 +82,22 @@ export function recordingHooks(options = {}) {
             const result = 'result' in outcome ? outcome.result : Failure(outcome.error);
             // Recording never decides the outcome: a keep or sink that throws is reported, not returned.
             try {
-                const { dropped = 0, trace } = rec.toTrace();
+                // The outcome is packed with the entries, once the run has ended.
+                const tail = rec.toTrace(recordOutcome ? { outcome: result } : {});
+                const { dropped = 0, trace } = tail;
                 if (keep(result, trace)) {
+                    const unrecordedFields = { ...head.unrecorded, ...tail.unrecorded };
                     const unrecorded =
                         Object.keys(head.unrecorded ?? {}).length +
                         trace.filter((e) => e.unrecorded !== undefined).length;
-                    warnAboutReplay(flowName, initialInput, dropped, trace, unrecorded);
-                    await sink({ ...head, dropped, trace });
+                    warnAboutReplay(flowName, initialInput, dropped, trace, unrecorded, 'outcome' in unrecordedFields);
+                    await sink({
+                        ...head,
+                        ...('outcome' in tail && { outcome: tail.outcome }),
+                        ...(Object.keys(unrecordedFields).length > 0 && { unrecorded: unrecordedFields }),
+                        dropped,
+                        trace
+                    });
                 }
             } catch (error) {
                 reportSinkError(error, flowName);
@@ -101,8 +114,9 @@ export function recordingHooks(options = {}) {
      * @param {number} dropped
      * @param {TraceEntry[]} trace
      * @param {number} unrecorded - How many values the trace leaves out because they could not be recorded
+     * @param {boolean} noOutcome - Whether `recordOutcome` could not record how the run ended
      */
-    const warnAboutReplay = (flowName, initialInput, dropped, trace, unrecorded) => {
+    const warnAboutReplay = (flowName, initialInput, dropped, trace, unrecorded, noOutcome) => {
         const warnOnce = (/** @type {string} */ kind, /** @type {string} */ message) => {
             if (warned.has(`${kind}:${flowName}`)) return;
             warned.add(`${kind}:${flowName}`);
@@ -130,6 +144,14 @@ export function recordingHooks(options = {}) {
                     'returned undefined, or they could not be copied, so it replays only up to the first of them. ' +
                     'Make redact handle every value it is given, null included, and return a value for each, and ' +
                     "keep Commands' results to plain data."
+            );
+        }
+        if (noOutcome) {
+            warnOnce(
+                'outcome',
+                'a kept trace holds no outcome, because redact threw on it or returned undefined, or it could not be ' +
+                    'copied, so a replay cannot say whether it ends the same way. Make redact handle the value ' +
+                    "named 'outcome', and keep what the flow returns to plain data."
             );
         }
         const anonymous = trace.filter((entry) => entry.command === 'anonymous').length;

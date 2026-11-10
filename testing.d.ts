@@ -44,6 +44,16 @@ export function assertCommand<
     }
 >;
 /**
+ * Checks that a replay of a trace reproduced the recorded run, and returns its result: it stopped at no
+ * `TimeParadox` or `ReplayError`, asked for every recorded step, and ended as the trace recorded. A trace recorded
+ * without `recordOutcome` fails it, since nothing says how the run ended. Otherwise throws an `AssertionError`
+ * naming the first thing that differs.
+ * @template T, E
+ * @param {Replay<T, E>} replay - What `replayEffect` or `timeTravel` returned for a trace
+ * @returns {Replay<T, E>['result']}
+ */
+export function assertReproduced<T, E>(replay: Replay<T, E>): Replay<T, E>['result'];
+/**
  * Builds a Resolver for `replayEffect` from a table keyed by Command name. A Command the table does not name gets
  * `undefined`, which ends the replay with a `ReplayError`. A Parallel asks about its decision under the name
  * 'Parallel', which a table leaves out, so its branches run as written. The table is copied, so a list used up in one
@@ -64,6 +74,7 @@ export type Answer = ReplayOutcome | ReplayOutcome[] | ((step: ReplayStep) => Re
 export type AnswerResolver = Resolver & {
     unused: () => string[];
 };
+import type { Replay } from './index.js';
 import type { ReplayOutcome } from './index.js';
 import type { ReplayStep } from './index.js';
 import type { Resolver } from './index.js';

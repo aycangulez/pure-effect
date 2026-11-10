@@ -38,6 +38,7 @@ const TASKS = /** @type {[string, string[]][]} */ ([
     ['Keep secrets out of a trace', ['Keeping secrets out of a trace']],
     ['Turn a production incident into a test', ['Time-Travel Debugging']],
     ['Prove a fix with a recorded trace', ["Proving a fix that changes the flow's shape"]],
+    ['Check that a replay decides what the recorded run decided', ['Checking that a replay ends the same way']],
     ['Add telemetry', ['Tracing with OpenTelemetry']],
     ["Type a flow's errors and context", ['TypeScript: Typed Errors and Context']],
     ['Handle every error a flow can end with, in TypeScript', ['Handling every error']],
