@@ -13,6 +13,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 ### Changed
 
 - Breaking: `recordEffect` and the flight recorder store how each run ended in the trace's `outcome`, which `redact` gets as a result or an error named `'outcome'`. A `redact` that masks results by Command name must mask `name === 'outcome'` too, or pass `recordOutcome: false`.
+- Recording copies each value in less time, and once rather than twice when no `redact` is given, so a large result holds up other requests for less long.
 
 ## [0.23.0] - 2026-10-27
 

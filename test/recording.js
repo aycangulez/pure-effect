@@ -1217,6 +1217,44 @@ describe('Recorded values are snapshots', function () {
         });
     });
 
+    it('should record the same trace with no redact as with one that returns what it is given', async function () {
+        // With no redact a value is copied once, and a caller's redact has its return copied again. Both leave the
+        // form JSON stores, for a value with a loop and for one without.
+        /** @type {any} */
+        const order = { id: 7, placedAt: new Date(0), seen: new Map([[1, 2]]), ratio: NaN, lines: [undefined, 1] };
+        order.self = order;
+        const flow = (/** @type {any} */ input) =>
+            effectPipe(
+                () =>
+                    Command(function cmdLoadOrder() {
+                        return order;
+                    }),
+                () =>
+                    Command(function cmdCharge() {
+                        throw Object.assign(new Error('declined'), { order: { id: 7 } });
+                    })
+            )(input);
+        const entriesOf = async (/** @type {any} */ options) => {
+            const { trace } = await recordEffect(flow({ cart: 'c1' }), options);
+            return { ...trace, trace: trace.trace.map(({ durationMs, ...entry }) => entry) };
+        };
+        const plain = await entriesOf({});
+        const returned = await entriesOf({ redact: (/** @type {any} */ value) => value });
+        assert.deepEqual(plain, returned);
+        assert.deepEqual(plain.trace[0].result, {
+            id: 7,
+            placedAt: '1970-01-01T00:00:00.000Z',
+            seen: {},
+            ratio: null,
+            lines: [null, 1]
+        });
+        assert.notEqual(plain.trace[0].result, order, 'the trace holds a copy, not the value the flow got');
+        assert.deepEqual(plain.outcome, {
+            type: 'Failure',
+            error: { __error: true, name: 'Error', message: 'declined', order: { id: 7 } }
+        });
+    });
+
     it("should let redact trim an HTTP client's error, whose request and response point at each other", async function () {
         // A plain JSON copy failed on the loop before redact ran, so a redact written to trim the error never could,
         // and the step was left out of the trace.

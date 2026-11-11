@@ -2231,11 +2231,28 @@ const recordPart = (cause, compute) => {
  * @returns {any}
  */
 const snapshot = (value) => {
-    // A reference back to an enclosing object is cut, so a request and a response that point at each other can still
-    // be recorded. An object shared without a loop is kept.
+    let json;
+    try {
+        // Tried first, since it is several times quicker and gives the same text for a value with no loop, the only
+        // kind it accepts.
+        json = JSON.stringify(value);
+    } catch {
+        json = stringifyCuttingLoops(value);
+    }
+    return json === undefined ? undefined : JSON.parse(json);
+};
+
+/**
+ * `JSON.stringify` for a value that holds a reference back to an enclosing object, which it cuts, so a request and a
+ * response that point at each other can still be recorded. An object shared without a loop is kept. Throws on what
+ * JSON cannot encode for another reason, as `JSON.stringify` does.
+ * @param {any} value
+ * @returns {string | undefined}
+ */
+const stringifyCuttingLoops = (value) => {
     /** @type {object[]} */
     const ancestors = [];
-    const json = JSON.stringify(value, function (key, item) {
+    return JSON.stringify(value, function (key, item) {
         if (!isObject(item)) return item;
         // `this` is the object holding `item`, so popping back to it leaves only `item`'s ancestors.
         while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) ancestors.pop();
@@ -2243,8 +2260,25 @@ const snapshot = (value) => {
         ancestors.push(item);
         return item;
     });
-    return json === undefined ? undefined : JSON.parse(json);
 };
+
+/**
+ * The `redact` a recorder or a replay uses when it is given none. `redactCopy` knows it by identity.
+ * @param {any} value
+ * @returns {any}
+ */
+const noRedact = (value) => value;
+
+/**
+ * A copy as `redact` leaves it, copied again, so what a caller's `redact` returns reads the same from memory as from
+ * storage. With no `redact` the copy is in that form already, and is returned as it is.
+ * @param {(value: any, name: string, kind: string) => any} redact
+ * @param {any} copy - A value `snapshot` returned
+ * @param {string} name
+ * @param {string} kind
+ * @returns {any}
+ */
+const redactCopy = (redact, copy, name, kind) => (redact === noRedact ? copy : snapshot(redact(copy, name, kind)));
 
 /**
  * Builds an `onStep` hook that records every Command's result or error and every Parallel's decision, and `toTrace`,
@@ -2256,7 +2290,7 @@ const snapshot = (value) => {
  */
 const recorder = (options = {}) => {
     checkOptions(options, 'recorder', recorderOptionRules);
-    const { redact = (/** @type {any} */ r) => r, maxEntries = Infinity, stack = false } = options ?? {};
+    const { redact = noRedact, maxEntries = Infinity, stack = false } = options ?? {};
     /** @type {RecorderSettings} */
     const settings = { redact, stack };
     /** @type {TraceEntry[]} */
@@ -2329,8 +2363,7 @@ const traceEntry = (settings, { name, type, path, durationMs }, threw, outcome) 
 const copyAndRedact = (settings, value, name, kind) => {
     const copied = recordPart('copy', () => snapshot(value));
     if ('unrecorded' in copied) return copied;
-    // What redact returns is copied too, so it reads the same from memory as from storage.
-    const redacted = recordPart('redact', () => snapshot(settings.redact(copied.value, name, kind)));
+    const redacted = recordPart('redact', () => redactCopy(settings.redact, copied.value, name, kind));
     return droppedByRedact(copied.value, redacted) ? { unrecorded: 'redact' } : redacted;
 };
 
@@ -2360,7 +2393,7 @@ const recordError = (settings, thrown, name) => {
     });
     if ('unrecorded' in copied) return copied;
     const { copy: serialized, wasError } = copied.value;
-    return recordPart('redact', () => remarked(snapshot(settings.redact(serialized, name, 'error')), wasError));
+    return recordPart('redact', () => remarked(redactCopy(settings.redact, serialized, name, 'error'), wasError));
 };
 
 /**
@@ -3025,7 +3058,7 @@ const replayEffect = async (effect, traceOrResolver, options = {}) => {
         hooks = false,
         onMissing = 'throw',
         onResolved,
-        redact = (/** @type {any} */ value) => value
+        redact = noRedact
     } = options ?? {};
     const fromResolver = typeof traceOrResolver === 'function';
     /** @type {Set<TraceEntry>} */
@@ -3101,7 +3134,7 @@ const outcomeChange = (recorded, result, redact) => {
     const failed = result.type === 'Failure';
     const copied = recordPart('copy', () => snapshot(failed ? serializeError(result.error, false) : result.value));
     if ('unrecorded' in copied) return { path: '$', recorded, replayed: undefined };
-    const redacted = snapshot(redact(copied.value, 'outcome', failed ? 'error' : 'result'));
+    const redacted = redactCopy(redact, copied.value, 'outcome', failed ? 'error' : 'result');
     const replayed = failed
         ? { type: 'Failure', error: remarked(redacted, isErrorCopy(copied.value)) }
         : { type: 'Success', value: redacted };
