@@ -8,6 +8,8 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 
 - `pure-effect/testing`, with `answers`, which builds a Resolver from a table of answers keyed by Command name, `assertStep` and `assertCommand`, which walk a flow with any test runner, and `assertReproduced`, which checks that a replay did what the recorded run did. Import them in place of a hand-written Resolver or a copy of the README's walk helpers.
 - A replay of a trace that holds how its run ended returns `changed`, which says whether the replay ended the same way and where it first differs. `timeTravel` reports it too.
+- The flight recorder takes `sample`, which stores a share of the runs that threw, failed and succeeded, with a cap on the traces a flow stores in a minute and other shares for the flows it names. Use it in place of `keep` where routine failures fill your storage.
+- The flight recorder's `keep` gets the run's `flowName` as its third argument.
 - A step handed to a Resolver carries `branches`, the branch taken at each `Parallel` on its path, so a test answers each branch without reading the path.
 
 ### Changed

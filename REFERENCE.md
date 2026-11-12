@@ -410,7 +410,8 @@ The flight recorder, a second entry point, records every run of an application w
 Options, each optional:
 
 - `sink`: receives each kept trace, to write to S3 or a database. Hand slow writes to a queue rather than awaiting them inside a request.
-- `keep`: decides which runs reach the sink, from the outcome and the trace's entries. See below.
+- `keep(result, entries, flowName)`: decides which runs reach the sink, from the outcome, the trace's entries and the run's name. See below.
+- `sample`: stores a share of each kind of run in place of `keep`, as `{ threw, failed, succeeded, perMinute, flows }`. See below.
 - `redact`: scrubs every value before it enters the trace, as `recorder`'s does.
 - `maxEntries`: caps a trace's length, 500 by default.
 - `stack`: records stack traces for thrown errors.
@@ -421,7 +422,15 @@ Options, each optional:
 
 What the flight recorder does with each run:
 
-- **Which runs it keeps.** `keep` decides, from the run's outcome and its trace's entries. By default it keeps a run that ended in a `Failure` or in which a Command threw, as one that succeeded on a retry or went to a dead-letter fallback did, and discards the rest after holding them in memory. A settled `Parallel` hands its failures to `next`, an `onBeforeCommand` veto among them, so a batch whose items failed or were vetoed ends in a `Success` with nothing thrown; keep it with a `keep` that reads the result, such as `(result, entries) => result.type === 'Failure' || result.value.failed > 0`. Return `true` to keep everything, or sample.
+- **Which runs it keeps.** `keep` decides, from the run's outcome and its trace's entries. By default it keeps a run that ended in a `Failure` or in which a Command threw, as one that succeeded on a retry or went to a dead-letter fallback did, and discards the rest after holding them in memory. A settled `Parallel` hands its failures to `next`, an `onBeforeCommand` veto among them, so a batch whose items failed or were vetoed ends in a `Success` with nothing thrown; keep it with a `keep` that reads the result, such as `(result, entries) => result.type === 'Failure' || result.value.failed > 0`. Return `true` to keep everything. `keep` also gets the run's `flowName`, `''` for a run with none, as its third argument.
+- **A share of them, with `sample`.** `sample` takes the place of `keep`, and giving both throws. See [Storing fewer traces](README.md#storing-fewer-traces).
+    - Each run is one kind: `threw` when a Command in it threw or the flow's own code did, whatever the run ended in, else `failed` when it ended in a `Failure`, else `succeeded`.
+    - `threw`, `failed` and `succeeded` are each the share of that kind to store, a number from 0 to 1. Left out, they are 1, 1 and 0, which is what the default `keep` stores.
+    - A share is counted for each flow and kind, not picked at random: the first run is stored, then each run that brings the stored share back up, so `0.1` stores the first, the eleventh, and so on.
+    - `perMinute`, a positive integer, is the most traces one flow stores in a minute, of every kind together. It applies after the shares, the minute starts at the first trace stored, and there is no cap by default.
+    - `flows` holds the same four keys for one flow, by its `flowName`, and replaces only the keys it names. A run with no name is the flow `''`.
+    - A key set to `undefined` keeps its default. Any other value a key cannot use, and a key `sample` does not have, throws a `TypeError` as the hooks are built.
+    - Each call to `recordingHooks` or `enableRecording` keeps its own counts, so each process counts for itself.
 - **When your own code throws.** A `TypeError` after an API changed the shape of its response, say, makes the run reject. `keep` is offered a `Failure` carrying the thrown error, so by default its trace is kept, and replaying it reproduces the throw. A step before the flow's first Command runs when the flow is built, outside `runEffect`, so its throw reaches no hook and is not recorded. That run did no I/O, so its input reproduces it.
 - **What a trace holds.** `redact` runs before anything enters the trace, including the stored `initialInput` and `context`. A value it throws on, or one JSON cannot hold, such as a `BigInt`, is left out and marked `unrecorded`, and a replay stops there. Everything else is already in the form JSON holds, so the sink can write it to S3 or a database column with `JSON.stringify`.
 - **How long a trace gets.** `maxEntries` caps it and reports the overflow as `dropped`, and a capped trace replays only up to the first step it lacks.

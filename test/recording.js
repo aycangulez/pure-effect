@@ -2292,4 +2292,227 @@ describe('pure-effect/flight-recorder', function () {
         assert.equal(warnings.length, 1);
         assert.match(warnings[0], /^Recording 'reads': a kept trace holds no outcome/);
     });
+
+    /**
+     * Three flows for the sampling tests: one that succeeds, one a step fails, and one whose Command throws.
+     * @param {any} input
+     */
+    const sampledOk = (input) =>
+        effectPipe(() =>
+            Command(function cmdOk() {
+                return input;
+            })
+        )(input);
+    /** @param {any} input */
+    const sampledRejected = (input) =>
+        effectPipe(() =>
+            Command(
+                function cmdCheck() {
+                    return false;
+                },
+                () => Failure('rejected')
+            )
+        )(input);
+    /** @param {any} input */
+    const sampledBroken = (input) =>
+        effectPipe(() =>
+            Command(function cmdCall() {
+                throw new Error('timeout');
+            })
+        )(input);
+
+    /**
+     * Runs a flow `times` times under one name, with the run's number as its input.
+     * @param {(input: any) => any} flow
+     * @param {number} times
+     * @param {string} flowName
+     */
+    const runTimes = async (flow, times, flowName) => {
+        for (let i = 0; i < times; i++) await runEffect(flow(i), {}, { flowName });
+    };
+
+    it('should keep a counted share of each kind of run under sample, starting with the first', async function () {
+        /** @type {any[]} */
+        const written = [];
+        enableRecording({
+            sink: (t) => void written.push(t),
+            sample: { failed: 0.1, succeeded: 0.25 }
+        });
+        await runTimes(sampledRejected, 25, 'signup');
+        await runTimes(sampledOk, 9, 'signup');
+        await runTimes(sampledBroken, 3, 'signup');
+        const inputsOf = (/** @type {string} */ command) =>
+            written.filter((t) => t.trace[0].command === command).map((t) => t.initialInput);
+        assert.deepEqual(inputsOf('cmdCheck'), [0, 10, 20], 'one returned Failure in ten');
+        assert.deepEqual(inputsOf('cmdOk'), [0, 4, 8], 'one success in four');
+        assert.deepEqual(inputsOf('cmdCall'), [0, 1, 2], 'every run in which a Command threw, by default');
+    });
+
+    it('should keep under sample what the default keep keeps when no share is given', async function () {
+        /** @type {any[]} */
+        const written = [];
+        enableRecording({ sink: (t) => void written.push(t), sample: {} });
+        await runTimes(sampledOk, 3, 'signup');
+        await runTimes(sampledRejected, 3, 'signup');
+        await runTimes(sampledBroken, 3, 'signup');
+        assert.deepEqual(
+            written.map((t) => t.trace[0].command),
+            ['cmdCheck', 'cmdCheck', 'cmdCheck', 'cmdCall', 'cmdCall', 'cmdCall']
+        );
+    });
+
+    it('should count a run as one that threw when a Retry rescued it or its own code threw', async function () {
+        /** @type {any[]} */
+        const written = [];
+        enableRecording({
+            sink: (t) => void written.push(t),
+            sample: { threw: 1, failed: 0, succeeded: 0 }
+        });
+        let calls = 0;
+        const rescued = (/** @type {any} */ input) =>
+            effectPipe(() =>
+                Retry(
+                    Command(function cmdCharge() {
+                        if (++calls % 2 === 1) throw new Error('503');
+                        return 'charged';
+                    }),
+                    { retries: 1, delay: 0 }
+                )
+            )(input);
+        const crashes = (/** @type {any} */ input) =>
+            effectPipe(() =>
+                Command(
+                    function cmdFetch() {
+                        return {};
+                    },
+                    (/** @type {any} */ r) => Success(r.items.length)
+                )
+            )(input);
+        assert.deepEqual(await runEffect(rescued('rescued')), Success('charged'));
+        await assert.rejects(runEffect(crashes('crashed')), TypeError);
+        await runEffect(sampledRejected('rejected'));
+        await runEffect(sampledOk('fine'));
+        assert.deepEqual(
+            written.map((t) => t.initialInput),
+            ['rescued', 'crashed']
+        );
+    });
+
+    it("should let a flow's entry under sample.flows replace only the keys it names", async function () {
+        /** @type {any[]} */
+        const written = [];
+        enableRecording({
+            sink: (t) => void written.push(t),
+            sample: {
+                failed: 0.5,
+                succeeded: 0,
+                // `undefined` keeps the share every flow has, as an option set to undefined keeps its default.
+                flows: { checkout: { succeeded: 1, failed: undefined }, search: { failed: 0 } }
+            }
+        });
+        for (const flowName of ['checkout', 'search', 'signup', 'constructor']) {
+            await runTimes(sampledRejected, 4, flowName);
+            await runTimes(sampledOk, 2, flowName);
+        }
+        const kept = (/** @type {string} */ flowName, /** @type {string} */ command) =>
+            written.filter((t) => t.flowName === flowName && t.trace[0].command === command).length;
+        assert.deepEqual([kept('checkout', 'cmdCheck'), kept('checkout', 'cmdOk')], [2, 2]);
+        assert.deepEqual([kept('search', 'cmdCheck'), kept('search', 'cmdOk')], [0, 0]);
+        assert.deepEqual([kept('signup', 'cmdCheck'), kept('signup', 'cmdOk')], [2, 0]);
+        assert.deepEqual(
+            [kept('constructor', 'cmdCheck'), kept('constructor', 'cmdOk')],
+            [2, 0],
+            'a flow named as a property every object has gets the shares every flow has'
+        );
+    });
+
+    it('should store at most perMinute traces of a flow in a minute, whatever their kind', async function () {
+        /** @type {any[]} */
+        const written = [];
+        const realNow = Date.now;
+        let now = 1_000_000;
+        Date.now = () => now;
+        try {
+            enableRecording({
+                sink: (t) => void written.push(t),
+                sample: { succeeded: 1, perMinute: 3, flows: { search: { perMinute: 1 } } }
+            });
+            await runTimes(sampledBroken, 2, 'checkout');
+            await runTimes(sampledRejected, 2, 'checkout');
+            await runTimes(sampledOk, 2, 'checkout');
+            await runTimes(sampledBroken, 2, 'search');
+            const inputsOf = (/** @type {string} */ flowName) =>
+                written.filter((t) => t.flowName === flowName).map((t) => `${t.trace[0].command}:${t.initialInput}`);
+            assert.deepEqual(inputsOf('checkout'), ['cmdCall:0', 'cmdCall:1', 'cmdCheck:0'], 'the first three');
+            assert.deepEqual(inputsOf('search'), ['cmdCall:0'], 'a flow has its own cap and its own count');
+            now += 59_999;
+            await runEffect(sampledBroken('late'), {}, { flowName: 'checkout' });
+            assert.equal(inputsOf('checkout').length, 3, 'still inside the minute the first trace opened');
+            now += 1;
+            await runTimes(sampledBroken, 4, 'checkout');
+            assert.deepEqual(
+                inputsOf('checkout').slice(3),
+                ['cmdCall:0', 'cmdCall:1', 'cmdCall:2'],
+                'a new minute stores three more'
+            );
+        } finally {
+            Date.now = realNow;
+        }
+    });
+
+    it('should refuse a sample it cannot use as the hooks are built, naming the key', function () {
+        const refused = (/** @type {any} */ options, /** @type {RegExp} */ message) =>
+            assert.throws(() => recordingHooks(options), { name: 'TypeError', message });
+        refused({ sample: 0.1 }, /sample must be an object, got the number 0\.1\./);
+        refused({ sample: { failed: 10 } }, /sample\.failed must be a number from 0 to 1, got the number 10\./);
+        refused({ sample: { succeeded: '0.5' } }, /sample\.succeeded must be a number from 0 to 1, got "0\.5"\./);
+        refused({ sample: { threw: NaN } }, /sample\.threw must be a number from 0 to 1/);
+        refused({ sample: { perMinute: 0 } }, /sample\.perMinute must be a positive integer, got the number 0\./);
+        refused(
+            { sample: { success: 1 } },
+            /sample has no key named 'success'; its keys are threw, failed, succeeded, perMinute, flows\./
+        );
+        refused({ sample: { flows: [] } }, /sample\.flows must be an object, got an array\./);
+        refused(
+            { sample: { flows: { checkout: 1 } } },
+            /sample\.flows\.checkout must be an object, got the number 1\./
+        );
+        refused(
+            { sample: { flows: { checkout: { failed: -1 } } } },
+            /sample\.flows\.checkout\.failed must be a number from 0 to 1/
+        );
+        refused({ sample: { flows: { checkout: { flows: {} } } } }, /sample\.flows\.checkout has no key named 'flows'/);
+        refused({ sample: null }, /sample must be an object, got null\./);
+        refused({ sample: { flows: null } }, /sample\.flows must be an object, got null\./);
+        refused({ sample: { failed: {} } }, /sample\.failed must be a number from 0 to 1, got an object\./);
+        refused({ sample: { perMinute: () => 1 } }, /sample\.perMinute must be a positive integer, got a function\./);
+        refused({ sample: {}, keep: () => true }, /takes sample or keep, not both/);
+        // `undefined` is a key left out, so a sample read from configuration can sit beside no keep.
+        assert.doesNotThrow(() => recordingHooks({ sample: undefined, keep: () => true }));
+        assert.doesNotThrow(() =>
+            recordingHooks({ sample: { failed: undefined, perMinute: undefined }, keep: undefined })
+        );
+    });
+
+    it("should hand keep the run's name, so a keep written by hand can vary by flow", async function () {
+        /** @type {any[]} */
+        const written = [];
+        /** @type {any[]} */
+        const names = [];
+        enableRecording({
+            sink: (t) => void written.push(t),
+            keep: (result, entries, flowName) => {
+                names.push(flowName);
+                return flowName === 'checkout';
+            }
+        });
+        await runEffect(sampledOk('a'), {}, { flowName: 'checkout' });
+        await runEffect(sampledOk('b'), {}, { flowName: 'search' });
+        await runEffect(sampledOk('c'));
+        assert.deepEqual(names, ['checkout', 'search', '']);
+        assert.deepEqual(
+            written.map((t) => t.initialInput),
+            ['a']
+        );
+    });
 });
