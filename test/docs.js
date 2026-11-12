@@ -21,9 +21,10 @@ import * as lib from '../index.js';
 import * as testing from '../testing.js';
 import ts from 'typescript';
 import { readFileSync } from 'node:fs';
+import { posix } from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { effectPipeOverloads, currentOverloads } from '../scripts/effect-pipe-overloads.js';
-import { rulesFile, rulesSection, githubAnchor, headingAnchors } from '../scripts/rules-file.js';
+import { rulesFile, rulesSection, githubAnchor, headingAnchors, GUIDES } from '../scripts/rules-file.js';
 import { errorOf, consumerFilesTypeErrors } from './helpers.js';
 
 describe('README examples', function () {
@@ -52,7 +53,15 @@ describe('README examples', function () {
     const sections = jsSections(markdown);
     const reference = readFileSync('REFERENCE.md', 'utf8');
     const referenceSections = jsSections(reference);
-    const blocks = [...sections.flat(), ...referenceSections.flat()];
+    // The guides the README hands a subject to, whose examples run as the README's do.
+    const guides = GUIDES.map((name) => ({ name, text: readFileSync(name, 'utf8') }));
+    const guideSections = guides.map(({ name, text }) => ({ name, sections: jsSections(text) }));
+    const everyDoc = markdown + reference + guides.map(({ text }) => text).join('');
+    const blocks = [
+        ...sections.flat(),
+        ...referenceSections.flat(),
+        ...guideSections.flatMap((guide) => guide.sections.flat())
+    ];
     const withoutImports = (/** @type {string} */ code) => code.replace(/^import[^;]*;\s*$/gm, '');
     const AsyncFunction = /** @type {any} */ (Object.getPrototypeOf(async function () {}).constructor);
 
@@ -60,7 +69,7 @@ describe('README examples', function () {
         configureEffect();
     });
 
-    // The Recording in Production and Hooks sections call `configureEffect` themselves, so this suite
+    // The recording and hooks guides call `configureEffect` themselves, so this suite
     // has to clean up after the examples as well as before them.
     afterEach(function () {
         configureEffect();
@@ -73,6 +82,10 @@ describe('README examples', function () {
         const inReference = referenceSections.flat().length;
         assert.ok(inReadme >= 20, `expected the README to hold examples, found ${inReadme}`);
         assert.ok(inReference >= 3, `expected REFERENCE.md to hold examples, found ${inReference}`);
+        // The TypeScript guide holds only ts blocks, which the suite below compiles.
+        for (const { name, text } of guides) {
+            assert.ok(/^```(js|ts)$/m.test(text), `expected ${name} to hold a js or ts example`);
+        }
     });
 
     it('should fence only real JavaScript as js', function () {
@@ -86,7 +99,7 @@ describe('README examples', function () {
 
     it('should import only names the library exports', function () {
         const shipped = Object.keys(lib);
-        const imports = [...(markdown + reference).matchAll(/import\s*\{([^}]*)\}\s*from\s*'pure-effect'/g)];
+        const imports = [...everyDoc.matchAll(/import\s*\{([^}]*)\}\s*from\s*'pure-effect'/g)];
         assert.ok(imports.length > 0, 'expected the README to import from the package');
         imports.forEach((match) => {
             match[1]
@@ -102,7 +115,7 @@ describe('README examples', function () {
     it('should import from pure-effect/testing only names it exports', function () {
         const shipped = Object.keys(testing);
         const pattern = /import\s*\{([^}]*)\}\s*from\s*'pure-effect\/testing'/g;
-        const imports = [...(markdown + reference).matchAll(pattern)];
+        const imports = [...everyDoc.matchAll(pattern)];
         assert.ok(imports.length > 0, 'expected the README to import from pure-effect/testing');
         for (const match of imports) {
             for (const name of match[1]
@@ -120,7 +133,7 @@ describe('README examples', function () {
     it('should import from pure-effect/flight-recorder only names it exports', async function () {
         const shipped = Object.keys(await import('../flight-recorder.js'));
         const pattern = /import\s*\{([^}]*)\}\s*from\s*'pure-effect\/flight-recorder'/g;
-        const imports = [...(markdown + reference).matchAll(pattern)];
+        const imports = [...everyDoc.matchAll(pattern)];
         assert.ok(imports.length > 0, 'expected the README to import from pure-effect/flight-recorder');
         for (const match of imports) {
             for (const name of match[1]
@@ -279,13 +292,20 @@ describe('README examples', function () {
     it('should run every REFERENCE.md example, with the Quick Start in scope', async function () {
         await runExamples(referenceSections);
     });
+
+    for (const { name, sections: found } of guideSections) {
+        it(`should run every ${name} example, with the Quick Start in scope`, async function () {
+            await runExamples(found);
+        });
+    }
 });
 
 describe('README TypeScript examples', function () {
     // The ts blocks once held `{ ... }` where a function's body went, and no test compiled them, so a TypeScript
     // reader got examples that did not build. Each now compiles as a file of its own in a strict project, as a
-    // reader's copy would, with every library export in scope and stubs for what the example leaves out.
-    const markdown = readFileSync('README.md', 'utf8');
+    // reader's copy would, with every library export in scope and stubs for what the example leaves out. The blocks
+    // are read from the README and every guide, since the TypeScript guide holds most of them.
+    const markdown = ['README.md', ...GUIDES].map((name) => readFileSync(name, 'utf8')).join('\n');
     const tsBlocks = [...markdown.matchAll(/^#+ (.*)$|```(\w*)\n([\s\S]*?)```/gm)].reduce(
         (found, match) => {
             if (match[1] !== undefined) found.heading = match[1];
@@ -337,7 +357,7 @@ describe('README TypeScript examples', function () {
         code.replace(/^import[^;]*from 'pure-effect';\s*$/gm, '');
 
     it('should find the examples at all', function () {
-        assert.ok(tsBlocks.length >= 7, `expected the README to hold ts examples, found ${tsBlocks.length}`);
+        assert.ok(tsBlocks.length >= 7, `expected the README and guides to hold ts examples, found ${tsBlocks.length}`);
     });
 
     it('should compile every ts block in a strict TypeScript project', function () {
@@ -743,10 +763,11 @@ describe('Rules file', function () {
     // the two cannot drift. These pin that it is current, that the README keeps the rules where the generator reads
     // them, and that every link in it lands on the heading it names.
     const readme = readFileSync('README.md', 'utf8');
+    const guides = Object.fromEntries(GUIDES.map((name) => [name, readFileSync(name, 'utf8')]));
 
     it('should hold exactly the RULES.md the generator writes', async function () {
         this.timeout(20000);
-        const generated = await rulesFile(readme);
+        const generated = await rulesFile(readme, guides);
         assert.ok(
             readFileSync('RULES.md', 'utf8') === generated,
             'RULES.md differs from the generator: run npm run generate'
@@ -777,38 +798,47 @@ describe('Rules file', function () {
         assert.deepEqual(headingAnchors('# A\n```sh\n# not a heading\n```\n## A'), ['a', 'a-1']);
     });
 
-    it('should link only to headings the README or REFERENCE.md has, each of them once', function () {
+    it('should link only to headings the README, REFERENCE.md or a guide has, each of them once', function () {
+        /** @type {Record<string, Set<string>>} */
         const headings = {
             'README.md': new Set(headingAnchors(readme)),
-            'REFERENCE.md': new Set(headingAnchors(readFileSync('REFERENCE.md', 'utf8')))
+            'REFERENCE.md': new Set(headingAnchors(readFileSync('REFERENCE.md', 'utf8'))),
+            ...Object.fromEntries(GUIDES.map((name) => [name, new Set(headingAnchors(guides[name]))]))
         };
         const links = [...readFileSync('RULES.md', 'utf8').matchAll(/\]\(([^)]*)\)/g)].map((match) => match[1]);
         assert.ok(links.length >= 20, `expected RULES.md to link to the README, found ${links.length} links`);
         links.forEach((link) => {
             const [file, anchor] = link.split('#');
-            assert.ok(file in headings && anchor, `RULES.md links to '${link}', not to a heading in either file`);
-            const anchors = headings[/** @type {keyof typeof headings} */ (file)];
+            assert.ok(file in headings && anchor, `RULES.md links to '${link}', not to a heading in a shipped file`);
+            const anchors = headings[file];
             assert.ok(anchors.has(anchor), `RULES.md links to '${link}', which no heading has`);
             // A second heading with the same text would take the anchor with -1, and the link would land on the first.
             assert.ok(!anchors.has(`${anchor}-1`), `RULES.md links to '${link}', which two headings share`);
         });
     });
 
-    it('should ship README.md, RULES.md and REFERENCE.md in the package', function () {
+    it('should link a task to the guide that teaches it, not to the README section that points there', function () {
+        const rules = readFileSync('RULES.md', 'utf8');
+        assert.ok(rules.includes('(guides/time-travel.md#time-travel-debugging)'));
+        assert.ok(rules.includes('(guides/recording.md#recording-in-production)'));
+        assert.ok(!rules.includes('(README.md#time-travel-debugging)'));
+    });
+
+    it('should ship README.md, RULES.md, REFERENCE.md and the guides in the package', function () {
         const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
-        for (const file of ['README.md', 'RULES.md', 'REFERENCE.md']) {
+        for (const file of ['README.md', 'RULES.md', 'REFERENCE.md', 'guides']) {
             assert.ok(pkg.files.includes(file), `add ${file} to package.json's files`);
         }
+        for (const guide of GUIDES) assert.ok(guide.startsWith('guides/'), `${guide} is not in guides, which ships`);
     });
 });
 
 describe('Documentation links', function () {
-    // README.md teaches and REFERENCE.md holds the exact rules, and the two link into each other, so a heading
-    // renamed or moved in either one breaks links nothing else would notice.
-    const docs = /** @type {Record<string, string>} */ ({
-        'README.md': readFileSync('README.md', 'utf8'),
-        'REFERENCE.md': readFileSync('REFERENCE.md', 'utf8')
-    });
+    // README.md and the guides teach and REFERENCE.md holds the exact rules, and they link into each other, so a
+    // heading renamed or moved in any of them breaks links nothing else would notice.
+    const docs = /** @type {Record<string, string>} */ (
+        Object.fromEntries(['README.md', 'REFERENCE.md', ...GUIDES].map((name) => [name, readFileSync(name, 'utf8')]))
+    );
 
     it('should link only to headings that exist, each of them once', function () {
         const anchors = Object.fromEntries(
@@ -817,8 +847,12 @@ describe('Documentation links', function () {
         for (const [name, text] of Object.entries(docs)) {
             // Links inside fenced code are not links.
             const prose = text.replace(/```[\s\S]*?```/g, '');
-            for (const [, target, anchor] of prose.matchAll(/\]\(((?:README|REFERENCE)\.md)?#([^)]*)\)/g)) {
-                const file = target ?? name;
+            // A link is relative to the file it is in, so a guide reaches the README as `../README.md`.
+            for (const [, target, anchor] of prose.matchAll(/\]\(([\w./-]+\.md)?(?:#([^)]*))?\)/g)) {
+                if (target === undefined && anchor === undefined) continue;
+                const file = target === undefined ? name : posix.join(posix.dirname(name), target);
+                assert.ok(file in anchors, `${name} links to '${target}', which is not a file this suite reads`);
+                if (anchor === undefined) continue;
                 assert.ok(anchors[file].has(anchor), `${name} links to '${file}#${anchor}', which no heading has`);
                 // A second heading with the same text would take the anchor with -1, and the link would land on the first.
                 assert.ok(
@@ -829,9 +863,10 @@ describe('Documentation links', function () {
         }
     });
 
-    it('should link the README to REFERENCE.md from its table of contents', function () {
+    it('should link the README to REFERENCE.md and each guide from its table of contents', function () {
         const contents = docs['README.md'].split('## Installation')[0];
         assert.match(contents, /\]\(REFERENCE\.md\)/);
+        for (const name of GUIDES) assert.ok(contents.includes(`](${name})`), `the contents do not link to ${name}`);
     });
 });
 

@@ -71,6 +71,8 @@ A Command's identity is `commandName(eff)`: a non-empty string `meta.name`, else
 - `meta` is not checked. It belongs to the user, whose hooks read whatever keys they put on it, so a `meta.name` that is not a non-empty string is ignored, and the Command falls back to `cmd.name`, rather than refused. An October 2026 DX experiment flagged the silent fallback; the maintainer kept it, and the README states it.
 - `meta` can come second when a Command has no `next`: `Command(cmd, { name })`. `next` is a function, so an object in its place can only be `meta`. It went third only, after an `undefined`, and from September 2026 an object second was refused with a message naming that form, since a Command then ran and its run rejected with `effect.next is not a function`. Seven agents across three October 2026 DX rounds called `Command(cmd, undefined, { name })` awkward, mostly for `Parallel` branches built by one function. Accepting it changes no working code, since the form threw. The types take `CommandMeta` in `next`'s place rather than adding a third overload, so a mistake in `next` still reports two overloads. A Command given `meta` both second and third throws.
 
+The README shows two shorter forms where it first teaches a Command and the context: naming a Command where it is built, and reading the context once in a generator flow with `yield* step(Ask())`. Both already worked. In the November 2026 rounds every agent wrote the two-statement wrapper instead, 20 to 40 times each, and one wrote twelve `Ask` wrappers, since those were the forms the README's examples used. A `commands(service)` helper that builds a named Command per method was weighed in the same month and left for a separate decision: it removes the wrapper in a generator flow, and in a pipeline only if `Command` also takes a built Command and a `next`.
+
 ## Composition and the flow's input
 
 ### `chain`
@@ -1167,6 +1169,19 @@ The rule it replaced, as it stood until then:
 Each entry gives the signature, what it returns, and one line per option, parameter or rule. Where a guide section already teaches something, the entry links to it rather than teaching it again. Explanations live in the guide sections, and reasons in this file.
 
 The entries had grown into prose that re-taught the guides, a quarter of the README, which a cold DX evaluation called accurate throughout but dense. Rewritten this way, they lost a sixth of their words, and a rule such as one of `onStep`'s became a line a reader can find. A new option gets one line in its entry, and whatever more it needs goes in the section that teaches it.
+
+### Five guides hold what the README moved out
+
+The maintainer's choice, made in November 2026. All four agents in that month's DX round named the README's size, 107,493 bytes by then, among what they disliked most, and two said they read about 25,000 tokens before writing any code. A person skims less patiently than they do.
+
+`guides/time-travel.md` took Time-Travel Debugging and Replay in Depth, `guides/recording.md` took Recording in Production, `guides/typescript.md` took TypeScript: Typed Errors and Context, and `guides/hooks.md` took Hooks and Tracing with OpenTelemetry, which left the README at about 68 KB. `guides/failures.md` then took Which Errors Are Data, Translating `try`/`catch` and Undoing what succeeded when a branch fails, which left it at about 56 KB. Each of the first four subjects is what a reader comes back for after the first flow works, or what only some readers need, and the Quick Start's last step already shows a record and a replay. The TypeScript section sat a thousand lines down, where both TypeScript agents had to hunt for it; as a file of its own it is one link from the Quick Start. The move changed no prose, apart from the sentence that introduced Replay in Depth, which described a split that no longer exists. The README keeps no section for either: its table of contents links straight to each guide, as the maintainer chose, so a subject is taught in one place.
+
+- A guide follows every rule the README does: its examples run, its links are checked, and it has no jargon. `GUIDES` in `scripts/rules-file.js` names them once, and the docs tests and the generator read that list.
+- `RULES.md` links a task to the guide when both a guide and the README have the heading, since the guide is where it is taught.
+- The guides ship in the package, since an agent or a reader who has only `node_modules` follows the README's links there.
+- The failure guide was moved to gather a subject, not to shrink the README. What to do when a Command may fail was spread over Rule 1, Rule 6 and two sections, with the undo pattern a third, under `Parallel`, and an agent in the first round shipped a stock leak for not connecting the undo pattern to its case. A second round, after the first four guides, left the docs score where it was in all four reports, so size was not what readers were missing. The README keeps the short form, the Quick Start's third step and the rules, each linking to the guide.
+- The other sections on building flows stay in the README, with Getting started, since every task in both rounds needed them.
+- The Quick Start stays a pipeline, and gained one sentence pointing a TypeScript reader to the section on types, since both TypeScript agents reported hunting for it. Leading with generator flows was weighed and declined.
 
 ### The README's orientation sections stay short
 
