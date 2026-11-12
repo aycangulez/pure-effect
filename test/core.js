@@ -869,7 +869,7 @@ describe('Constructor arguments', function () {
         );
         assert.match(
             messageFrom(() => Retry(Success(1), /** @type {any} */ ({ attemps: 5 }))),
-            /Retry has no option named 'attemps'; its options are retries, delay, backoff and onExhausted\./
+            /Retry has no option named 'attemps'; its options are retries, delay, backoff, retryIf and onExhausted\./
         );
         // The name before 0.20.0, which counted the retries rather than the attempts.
         assert.match(

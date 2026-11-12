@@ -52,6 +52,7 @@
  *     retries?: number,
  *     delay?: number | ((error: any, attempt: number) => number),
  *     backoff?: number,
+ *     retryIf?: (error: any, attempt: number) => boolean,
  *     onExhausted?: (error: any) => Effect
  *   }>,
  *   next: (value: any) => Effect
@@ -193,8 +194,12 @@ const Ask = (...args) => {
  *        and the number of the attempt about to run, 1 for the first retry. A replay does not wait, so does not call it.
  * @param {number} [options.backoff] - Multiplier applied to the delay on each later retry, a finite number of 0 or
  *        more. Refused beside a delay function, which grows its own wait.
+ * @param {(error: any, attempt: number) => boolean} [options.retryIf] - Returns whether to try again, from what the
+ *        last attempt threw and the number of the attempt about to run. `false` gives up at once, as running out of
+ *        attempts does. A replay calls it with the error as the trace holds it, a copy that is no longer an instance
+ *        of its class, so decide on the error's fields.
  * @param {(error: any) => Effect} [options.onExhausted] - Builds a fallback from `{ retryExhausted, lastError,
- *        retries }` once every attempt has failed. Its success feeds `next`; its failure propagates unwrapped.
+ *        retries }` once the Retry has given up. Its success feeds `next`; its failure propagates unwrapped.
  * @param {...any} extra - Refused, since nothing reads it
  * @returns {RetryState}
  */
@@ -393,18 +398,18 @@ const defaultRetryOptions = { retries: 3, delay: 100, backoff: 1 };
  * @type {Record<string, OptionRule>}
  */
 const retryOptionRules = {
-    // Not 0, which would make `onExhausted` a catch.
+    // Not 0: a Retry that never retries says so with `retryIf`, which names the errors it gives up on.
     retries: [
         isPositiveInteger,
         'a positive integer',
-        "To handle an outcome without retrying, branch on it as data in the Command's next, or isolate a failing " +
-            "branch with Parallel's settled option."
+        'To give up on an error without retrying, return false for it from retryIf, and handle it in onExhausted.'
     ],
     delay: [
         (value) => isFiniteNonNegative(value) || isFunction(value),
         'a finite number of 0 or more, or a function that returns one'
     ],
     backoff: [isFiniteNonNegative, 'a finite number of 0 or more'],
+    retryIf: [isFunction, 'a function that returns whether to try again'],
     onExhausted: [isFunction, 'a function that returns the fallback']
 };
 
@@ -1717,7 +1722,27 @@ const retryWait = ({ delay, backoff }, lastError, attempt) => {
 };
 
 /**
- * Runs a Retry's wrapped tree until it succeeds or runs out of attempts, then its fallback if it has one.
+ * Whether a Retry tries again after `lastError`: what its `retryIf` says, and yes without one. The function is the
+ * caller's code and no I/O, so a throw from it rejects the run, as an answer that is neither true nor false does: a
+ * forgotten `return` would otherwise read as giving up.
+ * @param {((error: any, attempt: number) => boolean) | undefined} retryIf
+ * @param {any} lastError
+ * @param {number} attempt - The attempt about to run
+ * @returns {boolean}
+ */
+const retriesAfter = (retryIf, lastError, attempt) => {
+    if (typeof retryIf !== 'function') return true;
+    const again = retryIf(lastError, attempt);
+    if (typeof again === 'boolean') return again;
+    throw malformed(
+        `Retry's retryIf must return true or false before attempt ${attempt}, and it returned ${describeValue(again)}.`,
+        again
+    );
+};
+
+/**
+ * Runs a Retry's wrapped tree until it succeeds, runs out of attempts or its `retryIf` gives up, then its fallback if
+ * it has one.
  * Each attempt opens its own path prefix, and so does the fallback.
  *
  * @param {Runtime} runtime
@@ -1732,8 +1757,10 @@ const runRetry = async (runtime, retry, signal, stepPath) => {
         ...defaultRetryOptions,
         ...Object.fromEntries(given)
     });
-    const { retries, onExhausted } = opts;
+    const { retries, onExhausted, retryIf } = opts;
     let lastError;
+    // How many retries were made: `retries`, unless `retryIf` gave up sooner.
+    let made = 0;
     for (let attempt = 0; attempt <= retries; attempt++) {
         // `fastRetry` waits for no time rather than skipping the wait, so branches replayed by timing still
         // interleave.
@@ -1748,8 +1775,11 @@ const runRetry = async (runtime, retry, signal, stepPath) => {
         // Only an I/O fault is retried. An abort passes through unwrapped.
         if (result.type !== 'IoFault') return result;
         lastError = result.error;
+        made = attempt;
+        // A cancelled branch makes no further attempt, so `retryIf` is not asked about one.
+        if (attempt < retries && !signal?.aborted && !retriesAfter(retryIf, lastError, attempt + 1)) break;
     }
-    const exhausted = { retryExhausted: true, lastError, retries };
+    const exhausted = { retryExhausted: true, lastError, retries: made };
     // A fault too, so an enclosing Retry retries this one.
     if (typeof onExhausted !== 'function') return IoFault(exhausted);
     if (signal?.aborted) return cancelledBranch();

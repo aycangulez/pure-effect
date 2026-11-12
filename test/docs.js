@@ -700,6 +700,32 @@ describe('Documented sharp edges', function () {
         assert.deepEqual(seen, ['after Ask']);
     });
 
+    it('should give up in a replay where the run tried again, when retryIf decides by the class of the error', async function () {
+        // Pinned deliberately: a trace keeps an error as data, so a replay hands `retryIf` a plain Error. The docs say
+        // to decide on the error's fields.
+        class Unavailable extends Error {}
+        let calls = 0;
+        const flow = (/** @type {(error: any) => boolean} */ retryIf) =>
+            Retry(
+                Command(function cmdFetch() {
+                    calls++;
+                    return calls === 1 ? Promise.reject(new Unavailable('down')) : Promise.resolve('up');
+                }),
+                { retries: 2, delay: 0, retryIf }
+            );
+        const byClass = (/** @type {any} */ error) => error instanceof Unavailable;
+        const { result, trace } = await recordEffect(flow(byClass));
+        assert.deepEqual(result, Success('up'));
+        const replay = await replayEffect(flow(byClass), trace);
+        assert.equal(replay.result.type, 'Failure', 'the replay gave up on the first error');
+        assert.equal(/** @type {any} */ (replay.result).error.retries, 0);
+        assert.equal(replay.unreached.length, 1, 'and never asked for the attempt that succeeded');
+        assert.notEqual(replay.changed, null);
+        // Deciding on a field the trace keeps makes the same decision both times.
+        const byMessage = (/** @type {any} */ error) => error.message === 'down';
+        assert.deepEqual((await replayEffect(flow(byMessage), trace)).result, Success('up'));
+    });
+
     it('should lose an error passing through a body whose finally step a cancellation skips', async function () {
         // Pinned deliberately: a step in a body's finally is unsupported. Here a nested flow's refusal is passing
         // through the outer body when its finally yields a step; the cancellation reaches the body before that step

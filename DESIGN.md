@@ -188,7 +188,7 @@ Outcomes:
 
 **Each attempt runs the entire wrapped tree again**, including Commands that already succeeded. A Command's `next` is part of that tree, so `Retry(Command(cmd, next))`, where `next` continues the flow, wraps everything downstream. A booking saga with two such nested retries charged a card nine times. The rule is that a retried Command keeps its default `next`, and the branching happens in a later pipeline step, as the README, the JSDoc and the second `Documented sharp edges` test say.
 
-Catching and retrying are alternatives. A miss caught inside the `cmd` function and returned as a value is an abort, so a `Retry` around it makes one call and never tries again. The README says to catch when the flow should handle the outcome as data, and to let it throw when `Retry` should act on it.
+Catching and retrying are alternatives. A miss caught inside the `cmd` function and returned as a value is an abort, so a `Retry` around it makes one call and never tries again. The README says to catch when the flow should handle the outcome as data, and to let it throw when `Retry` should act on it, which since November 2026 includes deciding with `retryIf` not to try it again.
 
 ### A `delay` function
 
@@ -200,6 +200,26 @@ The maintainer's choice, made in November 2026 after a DX round. Until then `del
 - A replay does not call it, since `fastRetry` replaces waiting and the function is part of the wait. Calling it would hand it the error as a trace holds it, a copy with no `Response` or headers, so a function that reads those would reject a replay of a run that went well. Under `fastRetry: false` a replay waits, and so calls it with that copy.
 - A cancelled branch does not call it either, since that branch waits for nothing and makes no further attempt.
 - The Command's function still decides what is retried, by throwing or returning. A predicate (`retryIf`) was raised in the same round and left for a separate decision, since it changes what an unretried throw becomes.
+
+### `retryIf`
+
+The maintainer's choice, made in November 2026, knowing it moves the ceiling [No catch](#no-catch) set. Until then the only way to retry some errors and handle others was to catch inside the Command's function, return the ones the flow handles, and rethrow the rest. Four DX rounds that month showed what that cost:
+
+- The classification sat in the one place a walk or a replay never runs. One agent declined to write it for that reason and left a 404 retried four times.
+- A hook saw a declined card or a refused request as a call that worked, since the function returned it. Three agents wrote hooks that read fields off results to tell.
+- The flight recorder's default `keep` missed such a run, for the same reason.
+- A retry predicate was asked for six times, three times as a must-have, and all four agents who wrote the same tasks in plain `async`/`await` put one in their own retry helper unasked.
+
+How it works:
+
+- `retryIf(error, attempt)` takes what `delay` takes: what the last attempt threw, and the number of the attempt about to run. `true` tries again and `false` gives up.
+- Giving up takes the path exhaustion takes: `onExhausted` runs if there is one, and otherwise the result is the exhaustion, an I/O fault an enclosing `Retry` decides on in turn. A second option for "the errors the flow handles" was not added, since `onExhausted` already receives `lastError` and returns any Effect.
+- `retries` in the exhaustion is the retries made, which is the option's value when the attempts ran out, so nothing that read it before changes. It is how a fallback tells giving up from running out.
+- An answer that is neither `true` nor `false` rejects the run, as a throw from it does. A forgotten `return` would otherwise read as giving up on every error, with nothing to show for it.
+- It is not asked after the last attempt, which is exhaustion whatever it would say, nor for an abort, which is never retried, nor in a cancelled branch, which makes no further attempt.
+- A replay calls it, unlike a `delay` function, since it decides how many attempts the flow asks for. It gets the error as the trace holds it, a plain `Error` with its fields, so one that decides by `instanceof` gives up in a replay where the run tried again. That is documented and pinned in `Documented sharp edges`, not guarded, since the data cannot show which a predicate does.
+
+`retries: 0` still throws, and catching inside the function still works for an outcome no `Retry` is involved in.
 
 ### Parallel
 
@@ -761,9 +781,13 @@ The exception, recovering from `Retry` exhaustion inside the flow, became `Retry
 
 The ceiling stands: no general catch, only an I/O fault is recoverable (from anywhere in the wrapped tree, deliberately), `onExhausted` is per-use, and a cancelled branch skips it. A `catch` around `yield*` in a generator flow runs, so it can log, but a `catch` that recovers is refused, which keeps this ceiling.
 
+In November 2026 the maintainer moved one part of it: recovery no longer costs a second run of the tree. `retryIf` lets a `Retry` give up on an error at once, and `onExhausted` then runs, so `retryIf: () => false` with a fallback recovers from any I/O fault in one attempt. See [`retryIf`](#retryif). The rest holds: recovery is still only from an I/O fault, only through `onExhausted`, and only where a `Retry` is written.
+
 ### `retries: 0` throws
 
 A `Retry` that does not retry is not a `Retry`, and `0` was the one spelling that made `onExhausted` a catch at no cost. `retries: 1` still recovers from any I/O fault, but at the visible cost of running the tree twice.
+
+Since November 2026 `retryIf` is a second spelling without that cost (see [`retryIf`](#retryif)), and `0` still throws. A `retryIf` names the errors a `Retry` gives up on, where `0` gives up on all of them without saying so, and the message now points there.
 
 A companion option was dropped for the same reason, since `settled` already isolates a batch branch.
 
@@ -780,6 +804,8 @@ It was dropped for what it does to the design:
 - Catching inside the Command's function is still needed to retry some errors and handle others as data, so it would be a second way to handle an I/O error, not a replacement.
 
 An I/O error the flow handles is caught inside the Command's function and returned as data, as the README's `Which Errors Are Data` shows.
+
+Since November 2026 `retryIf` covers the third reason's case, retrying some errors and handling others, without a catch in the function. The first two reasons still keep the settled Command out: `retryIf` is written on the `Retry`, where a reader looking for how a failure is handled already looks, and `next` still receives a result and nothing else.
 
 ### No global retry options
 
@@ -999,11 +1025,12 @@ Two alternatives were weighed. Dropping the input only from a settled `Parallel`
 
 ### Sharp edges are documented, not guarded
 
-Four sharp edges are pinned by the `Documented sharp edges` suite, and each has a README Limitations entry:
+Five sharp edges are pinned by the `Documented sharp edges` suite, and each has a README Limitations entry:
 
 - `Retry` repeating its whole wrapped tree.
 - A `Parallel` branch whose Command ignores its signal running to completion.
 - A function passed by name taking the signal for a plain first parameter it treats as optional.
+- A `retryIf` that decides by an error's class, which gives up in a replay where the run tried again, since a trace keeps an error as data.
 - A step before a flow's first Command that changes its input, which a trace then records as changed. Those steps run as the flow is built, before `recordEffect` or the reference wiring copies the input. An October 2026 DX experiment found it with a generator body that ran `input.count++`; `effectPipe`'s first step does the same. Copying the input as every flow is built was weighed and dropped: every `effectPipe` and `effectGen` call records an input, nested ones included, so a `Parallel` over 5,000 items would copy 5,000 inputs whether or not the run is recorded, and `onRun` would have to be handed the copy rather than the caller's object. Copying only when a recorder is installed was dropped too, since `recordEffect` is handed a flow already built and the library cannot tell a recorder from any other hook, so the two ways of recording would hold different inputs.
 
 A guard would have to ban legitimate trees, since the hazard is not visible in the data. Replay's refusal of `onMissing: 'execute'` on a capped trace is consistent with this: the trace records its own cap, so that guard bans nothing legitimate.

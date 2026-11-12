@@ -1166,6 +1166,18 @@ Retry(configured, {
 });
 // @ts-expect-error a delay function returns the wait in milliseconds
 Retry(configured, { delay: () => '1s' });
+// retryIf gets what the last attempt threw, unknown as any thrown value is, and the attempt about to run
+Retry(configured, {
+    retryIf: (error, attempt) => {
+        expectType<unknown>(error);
+        expectType<number>(attempt);
+        return attempt < 3;
+    }
+});
+// an absent config key arrives as undefined, and keeps meaning every error is tried again
+Retry(configured, { retryIf: undefined });
+// @ts-expect-error retryIf returns whether to try again, not the errors to retry
+Retry(configured, { retryIf: () => [503] });
 expectType<ParallelState<[number], [number], never>>(
     Parallel([Success(42)], { limit: fromConfig.count, settled: undefined })
 );

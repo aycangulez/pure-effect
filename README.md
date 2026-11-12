@@ -106,7 +106,7 @@ const saveUserWithRetry = (input) => Retry(saveUser(input), { retries: 2 });
 
 Either way, the caller gets a `Failure` once the flow gives up. A call that throws outside a `Retry` ends the run in a `Failure` holding the error it threw.
 
-After a `Retry` gives up, the `Failure` holds `{ retryExhausted, lastError, retries }`, with the last error thrown as `lastError`. When a call throws an error the flow should decide on, such as a declined card, catch it inside the Command's function and return it; [Which Errors Are Data](guides/failures.md#which-errors-are-data) shows how.
+After a `Retry` gives up, the `Failure` holds `{ retryExhausted, lastError, retries }`, with the last error thrown as `lastError`. When a call throws an error the flow should decide on, such as a declined card, catch it inside the Command's function and return it, or have `Retry` give up on it with `retryIf`; [Which Errors Are Data](guides/failures.md#which-errors-are-data) shows both.
 
 **4. Test it without mocks.** A flow is plain objects. Hand a step the answer you choose and check what it returns:
 
@@ -373,7 +373,7 @@ Twelve rules cover most of what goes wrong. The same rules ship in the package a
 3. **Put each decision in a step function.** A step receives one value and returns `Success`, `Failure` or the next Command. A test can call it directly, without mocks. That is why a flow has more functions than its `async` version. See [Coming from async/await](#coming-from-asyncawait).
 4. **Return an outcome the caller should see as `Failure(error)`; never throw it.** A `Failure` stops the flow and is never retried. Only the code that calls `runEffect` acts on it. See [Which Errors Are Data](guides/failures.md#which-errors-are-data).
 5. **A `catch` in a generator flow cannot recover.** It can only log and rethrow. It sees a `FlowStopped` error saying where the flow stopped, not the original error. To handle an error, catch it inside the Command's function and return it as data. See [How a generator flow stops](REFERENCE.md#how-a-generator-flow-stops).
-6. **Let a Command's function throw only when `Retry` should try again.** An error it catches and returns is data, and `Retry` never sees it. To retry only some errors, rethrow those and return the rest. A throw also skips any undo in the Command's `next`. See [Which Errors Are Data](guides/failures.md#which-errors-are-data).
+6. **Let a Command's function throw only an error `Retry` should decide on.** An error it catches and returns is data, and `Retry` never sees it. `Retry` tries a thrown error again unless its `retryIf` returns `false`, and `onExhausted` handles what it gave up on. A throw also skips any undo in the Command's `next`. See [Which Errors Are Data](guides/failures.md#which-errors-are-data).
 7. **Wrap only the failing Command in `Retry`, and continue in a later step.** `Retry` runs everything it wraps again, the Command's `next` included. `retries: 2` means up to three calls. `onExhausted` is where you give up. See [Retrying Transient Failures](#retrying-transient-failures).
 8. **Write a loop as a `for` loop with `yield*` in a generator flow.** In a pipeline, write `Parallel(list.map(f), { limit: 1 })`. In either form, use `Parallel` with a higher `limit` to run items at the same time, or with `settled: true` to keep going past a failure. See [Writing Loops](#writing-loops).
 9. **Get the time, random IDs and other values that change between runs from a Command.** A value read once per request, such as its start time, can come from the context instead, which a trace also records. A replay then gets the recorded value. A generator body can run more than once, and it sees the same value each time. See [What runs once, and what runs again](REFERENCE.md#what-runs-once-and-what-runs-again).
@@ -525,6 +525,23 @@ const fetchPrice = (sku) =>
         onExhausted: (err) => fetchCachedPrice(sku) // err = { retryExhausted, lastError, retries }
     });
 ```
+
+**Use `retryIf` to give up on an error that will not pass.** It gets what the last attempt threw, and the number of the attempt about to run, and returns whether to try again. When it returns `false` the `Retry` gives up at once, and `onExhausted` gets the error as `lastError`:
+
+```js
+// A 404 will be a 404 next time too. Only a rate limit or a server error is tried again.
+const fetchProfile = (id) => {
+    const cmdFetchProfile = () => profiles.get(id);
+    return Retry(Command(cmdFetchProfile), {
+        retries: 3,
+        retryIf: (error) => error.status === 429 || error.status >= 500,
+        // A missing profile is an answer the flow goes on with. Anything else still fails.
+        onExhausted: (gaveUp) => (gaveUp.lastError.status === 404 ? Success(null) : Failure(gaveUp))
+    });
+};
+```
+
+Decide on the error's fields, such as `status` or `code`, not on its class: a replay hands `retryIf` the error as the trace holds it, which is no longer an instance of that class.
 
 `Retry` only sees an error that the Command's function throws. A function that catches an error and returns it is never retried; see [Which Errors Are Data](guides/failures.md#which-errors-are-data).
 
@@ -833,7 +850,7 @@ Exact rules: [loops](REFERENCE.md#loops).
 - **Inside a `Parallel`, a Command's function that takes a parameter without a default value gets the `AbortSignal` in it.** So `Command(listUsers)`, where `listUsers(page)` treats `page` as optional, gets the signal as its page inside a `Parallel` and nothing outside one. Wrap such a function, as in `Command(() => listUsers())`; see [cancellation and the signal](REFERENCE.md#cancellation-and-the-signal).
 - **`redact` covers a trace, not a result.** A `Failure` holds the full error, and an error can quote what a Command sent, as a database's duplicate-key error quotes the key. Keeping it out of your logs is up to you.
 - **Replay checks the path, not the values.** Every result comes from the recording, so a replay cannot check a fix that changes what a flow computes. See [What a replay cannot check](guides/time-travel.md#what-a-replay-cannot-check).
-- **A trace keeps data, not objects.** A replayed value is what JSON stores: a class instance loses its methods, a `Date` becomes a string, and a thrown error comes back as a plain `Error`, so check `error.name` rather than `instanceof`. See [what a trace keeps](REFERENCE.md#what-a-trace-keeps).
+- **A trace keeps data, not objects.** A replayed value is what JSON stores: a class instance loses its methods, a `Date` becomes a string, and a thrown error comes back as a plain `Error`, so check `error.name` rather than `instanceof`. A `retryIf` that decides by class gives up in a replay where the run tried again. See [what a trace keeps](REFERENCE.md#what-a-trace-keeps).
 - **A trace records the input as the run starts, and a step before the first Command has already run by then.** That step runs as the flow is built, so one that changes its input, as `input.count++` does, leaves the trace holding the changed input. Return a new value rather than change the one a step receives.
 - **Replay reproduces what one flow saw, not timing.** See [timing](REFERENCE.md#timing).
 - **Configuration and recording belong to one copy of the library.** Two copies in one process, such as two versions in the dependency tree, a linked package beside an installed one, or a worker thread, do not share hooks, and a flow built with one copy and run with another records no input, so its trace cannot be replayed. `import` and `require()` load the same copy.

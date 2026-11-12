@@ -52,11 +52,12 @@ Returns `{ type: 'Ask', next }`. Passes the `context` from `runEffect` into `nex
 
 Returns `{ type: 'Retry', effect, options, next }`. See [Retrying Transient Failures](README.md#retrying-transient-failures).
 
-- `options.retries`: tries after the first, a positive integer (default `3`), so `2` makes at most three calls. Anything else throws, `0` included: to handle an outcome without retrying, branch on it in the Command's `next`, or isolate a failing branch with `Parallel`'s `settled`.
+- `options.retries`: tries after the first, a positive integer (default `3`), so `2` makes at most three calls. Anything else throws, `0` included: to give up on an error without retrying, return `false` for it from `retryIf`.
 - `options.delay`: milliseconds before the first retry, a finite number of 0 or more (default `100`). A wait past about 24.8 days, the longest `setTimeout` holds, is capped there.
 - `options.delay(error, attempt)`: or a function that returns the wait before each retry, in milliseconds. `error` is what the last attempt threw, and `attempt` is the number of the attempt about to run, `1` for the first retry. A throw from it, or an answer that is not a finite number of 0 or more, rejects the run. A replay does not wait, so it does not call the function, unless `fastRetry` is `false`, and neither does a `Parallel` branch that has been cancelled. See [Waiting as long as the server asks](README.md#waiting-as-long-as-the-server-asks).
 - `options.backoff`: the multiplier applied to the delay on each attempt, a finite number of 0 or more (default `1`, flat). It throws beside a `delay` function, which works out every wait itself.
-- `options.onExhausted(error)`: a fallback Effect to run when every attempt has failed, given `{ retryExhausted, lastError, retries }`. Its success feeds `next`; its failure is returned unwrapped. Per use only.
+- `options.retryIf(error, attempt)`: returns whether to try again. `error` is what the last attempt threw, and `attempt` is the number of the attempt about to run, `1` for the first retry. `false` gives up at once, as running out of attempts does, so `onExhausted` runs if there is one. It is not asked after the last attempt, or for a `Failure` a step returned. A throw from it, or an answer that is not `true` or `false`, rejects the run. A replay calls it with the error as the trace holds it, so decide on the error's fields, not its class.
+- `options.onExhausted(error)`: a fallback Effect to run once the `Retry` has given up, given `{ retryExhausted, lastError, retries }`. `retries` is how many retries were made: the `retries` option, or fewer when `retryIf` gave up sooner. Its success feeds `next`; its failure is returned unwrapped. Per use only.
 - An option set to `undefined` keeps its default.
 - A third argument throws, since `Retry` takes no `next`.
 

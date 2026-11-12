@@ -49,6 +49,11 @@ export type RetryOptions = {
      * out beside a `delay` function.
      */
     backoff?: number | undefined;
+    /**
+     * Whether to try again, from what the last attempt threw and the number of the attempt about to run. `false` gives up
+     * at once, as running out of attempts does. Decide on the error's fields: a replay passes a copy, not an instance.
+     */
+    retryIf?: ((error: unknown, attempt: number) => boolean) | undefined;
 };
 
 /**
@@ -63,11 +68,14 @@ export type RetryState<T, E = unknown, Ctx = unknown, R = T> = {
     next(value: R): Effect<T, E, Ctx>;
 };
 
-/** The error a `Retry` fails with once every attempt has thrown. `lastError` is what the last attempt threw. */
+/** The error a `Retry` fails with once it gives up. `lastError` is what the last attempt threw. */
 export type RetryExhaustedError<Thrown = unknown> = {
     retryExhausted: true;
     lastError: Thrown;
-    /** The `retries` option, so the retried steps ran one more time than this. */
+    /**
+     * How many retries were made, so the retried steps ran one more time than this: the `retries` option, or fewer when
+     * `retryIf` gave up sooner.
+     */
     retries: number;
 };
 

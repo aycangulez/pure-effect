@@ -77,7 +77,7 @@ Pure Effect is a zero-dependency effect system for JavaScript implementing the "
 
 ### Retry and Parallel
 
-- `Retry` merges per-use options over `retries: 3`, `delay: 100` and `backoff: 1`, and an option set to `undefined` keeps its default. A `delay` function returns each wait from the last error and the attempt's number (`retryWait`): it is refused beside a `backoff`, never called under `fastRetry` or in a cancelled branch, and a throw from it, or an answer that is no wait, rejects the run. `Retry` and `Parallel` check their options once, as they are built, and keep a frozen copy. An abort passes through unretried and unwrapped. Exhaustion is `{ retryExhausted, lastError, retries }`, itself an I/O fault, so an enclosing `Retry` retries it. `onExhausted` runs a fallback under the `f` path prefix and never in a cancelled branch. Each attempt runs the **entire** wrapped tree again, `next` included, so a retried Command keeps its default `next` and branching happens in a later step.
+- `Retry` merges per-use options over `retries: 3`, `delay: 100` and `backoff: 1`, and an option set to `undefined` keeps its default. A `delay` function returns each wait from the last error and the attempt's number (`retryWait`): it is refused beside a `backoff`, never called under `fastRetry` or in a cancelled branch, and a throw from it, or an answer that is no wait, rejects the run. `retryIf` returns whether to try again from the same two arguments (`retriesAfter`): `false` gives up at once, on the path exhaustion takes, with `retries` in the exhaustion the retries made. It runs in a replay too, on the error as the trace holds it, is not asked after the last attempt or in a cancelled branch, and a throw from it, or an answer that is no boolean, rejects the run. `Retry` and `Parallel` check their options once, as they are built, and keep a frozen copy. An abort passes through unretried and unwrapped. Exhaustion is `{ retryExhausted, lastError, retries }`, itself an I/O fault, so an enclosing `Retry` retries it. `onExhausted` runs a fallback under the `f` path prefix and never in a cancelled branch. Each attempt runs the **entire** wrapped tree again, `next` included, so a retried Command keeps its default `next` and branching happens in a later step.
 - Primitives stay generic. A hazard the data cannot show, such as a Command under `Retry` that is not safe to run twice, gets a JSDoc note, a README Limitations entry and a test in `Documented sharp edges`, never a check that refuses a shape. `Retry` repeats rather than resumes unless the maintainer asks otherwise.
 - `Parallel` runs branches through `runBounded`, so results and paths follow array order with or without `limit`, and `limit: 1` is a sequential loop. The first branch to fail or throw cancels the others: a failing branch's `Failure` is the result, and a throw rejects the run once every branch has settled. Under `settled` a failure cancels nothing and `next` gets every outcome as a `Success` or `Failure`, while a throw still cancels and rejects. The whole `Parallel` is one `onStep` step of type `'Parallel'` whose `op` runs the branches and returns the decision, so a hook must call it.
 - Cancellation is a request, through an `AbortController` per `Parallel`, linked to the enclosing one by `linkedScope`. A cancelled branch starts no further Command, attempt or fallback, and a backoff ends at once. `cmd` receives the signal only inside a `Parallel`, and only when it declares a parameter (`cmd.length > 0`, which leaves out parameters with default values). `Parallel` awaits every branch before returning.
@@ -132,9 +132,9 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 
 - Generator flows go through `step`: no iterable nodes and no proxy on a node.
 - A stop runs a generator's `catch` and `finally`; a swallowed stop, a different error, or a `yield*` during a stop rejects the run.
-- No catch: `Retry`'s `onExhausted` is the only recovery, and only from an I/O fault.
+- No catch: `Retry`'s `onExhausted` is the only recovery, and only from an I/O fault. `retryIf` can hand it one at once.
 - `retries: 0` throws.
-- No settled Command: an I/O error the flow handles is caught inside the Command's function.
+- No settled Command: an I/O error the flow handles is given up on by `retryIf` and handled in `onExhausted`, or caught inside the Command's function.
 - No global retry options, and a `retry` key throws.
 - `settled` hands `next` `Success` and `Failure` nodes, not `{ status, value }`.
 - A `Parallel`'s trigger is the first failure to finish, not the first by array order.
@@ -162,7 +162,7 @@ Each was weighed and decided. Do not propose them again as improvements or rank 
 - `meta` is unchecked: a `meta.name` that is not a non-empty string falls back to the function's name.
 - A `Failure` carries only its error; the flow's input reaches `onRun`, never an outcome.
 - A run's name is `flowName` in `runEffect`'s call configuration and `recordEffect`'s options, never the context.
-- Sharp edges are documented, not guarded: `Retry` repeating its whole wrapped tree, a branch whose Command ignores its signal running to completion, a function passed by name taking the signal for a plain first parameter it treats as optional, and a step before the first Command that changes its input.
+- Sharp edges are documented, not guarded: `Retry` repeating its whole wrapped tree, a branch whose Command ignores its signal running to completion, a function passed by name taking the signal for a plain first parameter it treats as optional, a step before the first Command that changes its input, and a `retryIf` that decides by an error's class giving up in a replay.
 
 ## Tests
 

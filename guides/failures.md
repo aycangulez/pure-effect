@@ -26,7 +26,7 @@ const fetchPrice = (sku) => {
 
 The failed attempt is recorded as that Command's result, with the error's `code` and `message`, so a replay takes the same fallback branch. Copy the fields you need rather than returning the error itself: a trace keeps data, not objects, so an error stored inside a result loses its message (see [What a trace keeps](../REFERENCE.md#what-a-trace-keeps)).
 
-A thrown error loses its class in a replay. It comes back as a plain `Error` that keeps its `name`. So wherever you check a thrown error, such as in `onExhausted` or in the run's result, check its `name` or `code`, not `instanceof`.
+A thrown error loses its class in a replay. It comes back as a plain `Error` that keeps its `name`. So wherever you check a thrown error, such as in `retryIf`, in `onExhausted` or in the run's result, check its `name` or `code`, not `instanceof`.
 
 **A `Failure` stops the flow.** It goes back to the code that called `runEffect`, which decides what it means: an HTTP status, a queue retry, an alert. Nothing inside the flow can catch a `Failure`, so a reader never has to look elsewhere for a handler.
 
@@ -44,16 +44,21 @@ Retry(
 );
 ```
 
-To retry some errors and not others, do both in one function: return the errors the flow handles, and rethrow the rest so `Retry` tries again. Here a charge the gateway refuses is handled, and anything else, such as a timeout, is retried:
+To retry some errors and not others, let the function throw them all, and tell `Retry` which to try again. `retryIf` gets what the last attempt threw and returns whether another try could help. When it returns `false` the `Retry` gives up at once, and `onExhausted` gets the error as `lastError`, as it does when the attempts run out. Here a charge the gateway refuses is handled, and anything else, such as a timeout, is retried:
 
 ```js
 const chargeAmount = (amount) => {
-    const cmdChargeAmount = () =>
-        gateway.charge(amount).catch((error) => {
-            if (error.code === 'invalid_amount') return { refused: true, code: error.code };
-            throw error; // may pass on a later try
-        });
-    return Retry(Command(cmdChargeAmount), { retries: 2 });
+    const cmdChargeAmount = () => gateway.charge(amount);
+    return Retry(Command(cmdChargeAmount), {
+        retries: 2,
+        // A refused charge will be refused again. Anything else may pass on a later try.
+        retryIf: (error) => error.code !== 'invalid_amount',
+        // The flow goes on with the refusal as data, and still fails with anything else.
+        onExhausted: (gaveUp) =>
+            gaveUp.lastError.code === 'invalid_amount'
+                ? Success({ refused: true, code: gaveUp.lastError.code })
+                : Failure(gaveUp)
+    });
 };
 
 // A later step turns the handled error into the flow's outcome.
@@ -64,12 +69,14 @@ assert.deepEqual(await runEffect(pay(0)), Failure('Charge refused: invalid_amoun
 assert.deepEqual(await runEffect(pay(25)), Success({ chargeId: 'ch_1', amount: 25 }));
 ```
 
+The Command's function stays one call, and `retryIf` and `onExhausted` are plain functions, so a test can call each with an error and check what it returns. A hook sees the refused charge as a call that threw, not as one that worked.
+
 `runEffect` tells these cases apart:
 
 | what happened | what it is | what `Retry` does | what `onExhausted` sees | what the caller's `Failure` holds |
 | --- | --- | --- | --- | --- |
 | a step returned `Failure(...)`, or an `onBeforeCommand` hook threw | a stop | nothing; it propagates at once, unwrapped | nothing | the error returned or thrown |
-| a Command's function threw | an I/O fault | retries it | the exhaustion, once the attempts are gone | the error thrown, or, once a `Retry` gives up, `{ retryExhausted, lastError, retries }` |
+| a Command's function threw | an I/O fault | retries it, unless `retryIf` returns `false` | the exhaustion, once the attempts are gone or `retryIf` gives up | the error thrown, or, once a `Retry` gives up, `{ retryExhausted, lastError, retries }` |
 | a `next` function or a pure step threw, or the flow is malformed | a bug | nothing; it is thrown, not returned | nothing | nothing; `runEffect` rejects |
 
 A throw anywhere else in the flow is a bug: `runEffect` rejects with it, or, from a step before the first Command, the call that builds the flow throws it. Nor does a Command's function return `Failure(...)`: whatever it returns is its result, so a returned `Failure` reaches `next` as a value and the flow keeps going. Return the data and let a step decide, as `requireCharge` does above.
