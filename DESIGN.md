@@ -71,6 +71,8 @@ A Command's identity is `commandName(eff)`: a non-empty string `meta.name`, else
 - `meta` is not checked. It belongs to the user, whose hooks read whatever keys they put on it, so a `meta.name` that is not a non-empty string is ignored, and the Command falls back to `cmd.name`, rather than refused. An October 2026 DX experiment flagged the silent fallback; the maintainer kept it, and the README states it.
 - `meta` can come second when a Command has no `next`: `Command(cmd, { name })`. `next` is a function, so an object in its place can only be `meta`. It went third only, after an `undefined`, and from September 2026 an object second was refused with a message naming that form, since a Command then ran and its run rejected with `effect.next is not a function`. Seven agents across three October 2026 DX rounds called `Command(cmd, undefined, { name })` awkward, mostly for `Parallel` branches built by one function. Accepting it changes no working code, since the form threw. The types take `CommandMeta` in `next`'s place rather than adding a third overload, so a mistake in `next` still reports two overloads. A Command given `meta` both second and third throws.
 
+The README shows two shorter forms where it first teaches a Command and the context: naming a Command where it is built, and reading the context once in a generator flow with `yield* step(Ask())`. Both already worked. In the November 2026 rounds every agent wrote the two-statement wrapper instead, 20 to 40 times each, and one wrote twelve `Ask` wrappers, since those were the forms the README's examples used. A `commands(service)` helper that builds a named Command per method was weighed in the same month and left for a separate decision: it removes the wrapper in a generator flow, and in a pipeline only if `Command` also takes a built Command and a `next`.
+
 ## Composition and the flow's input
 
 ### `chain`
@@ -173,6 +175,7 @@ Options:
 
 - Per-use, merged over `retries: 3`, `delay: 100` and `backoff: 1`. An option set to `undefined` keeps its default, since that is how an absent config key arrives.
 - Checked as the `Retry` is built, with the names: `retries` must be a positive integer, `delay` and `backoff` finite numbers of 0 or more, and `onExhausted` a function. An undefined `backoff` once made every wait after the first `NaN` milliseconds, which is no wait at all, and an `onExhausted` given the fallback Effect rather than a function returning it meant no fallback.
+- `delay` is a number, or a function of what the last attempt threw and the number of the attempt about to run that returns the wait (`retryWait`). See [A `delay` function](#a-delay-function).
 - A wait is capped at 2^31 - 1 ms, the longest `setTimeout` holds (`delayFor`). A longer one overflowed and fired after 1 ms, so a DX experiment's `delay: 1000, backoff: 10` retried at once by its eighth attempt. The cap is applied to each wait rather than refused as the `Retry` is built, since `backoff` grows the wait past any `delay` that passes.
 - They were checked only when the `Retry` ran, a leftover of global retry options, which merged in at run time. A bad value was then reported after the Commands ahead of it, as a `TypeError`, where a misspelt name was an `EffectTypeError` as the flow was built. A `Retry` built inside a `next` is still checked only when that `next` runs, as its names are, since that is when it exists.
 - The `Retry` keeps a frozen copy of the options it checked, so they cannot change before it runs: a changed `retries: 0` would make `onExhausted` a free catch. `Parallel` keeps its `limit` and `settled` the same way. Until October 2026 a node kept the caller's own object, and the options were checked again on every run, since the caller could change that object after building the node. A node built by hand, without its constructor, is not checked, as no other part of one is.
@@ -185,7 +188,38 @@ Outcomes:
 
 **Each attempt runs the entire wrapped tree again**, including Commands that already succeeded. A Command's `next` is part of that tree, so `Retry(Command(cmd, next))`, where `next` continues the flow, wraps everything downstream. A booking saga with two such nested retries charged a card nine times. The rule is that a retried Command keeps its default `next`, and the branching happens in a later pipeline step, as the README, the JSDoc and the second `Documented sharp edges` test say.
 
-Catching and retrying are alternatives. A miss caught inside the `cmd` function and returned as a value is an abort, so a `Retry` around it makes one call and never tries again. The README says to catch when the flow should handle the outcome as data, and to let it throw when `Retry` should act on it.
+Catching and retrying are alternatives. A miss caught inside the `cmd` function and returned as a value is an abort, so a `Retry` around it makes one call and never tries again. The README says to catch when the flow should handle the outcome as data, and to let it throw when `Retry` should act on it, which since November 2026 includes deciding with `retryIf` not to try it again.
+
+### A `delay` function
+
+The maintainer's choice, made in November 2026 after a DX round. Until then `delay` was a number only, and a function given as one threw with the advice to return the server's answer as data and wait in a Command. An agent building webhook delivery followed that advice and wrote the whole delivery as a `for` loop with a sleep Command, about 35 lines, and used `Retry` for nothing but its plain fetches. A second agent asked for the same thing. The pattern in the README was one paragraph with no code, and it moved the retry out of the one node built for it.
+
+- The function gets `(error, attempt)`: what the last attempt threw, which for a `Retry` around another is the inner one's exhaustion, and the number of the attempt about to run, numbered as in its path, so `1` is the first retry.
+- It replaces `backoff` and is refused beside one as the `Retry` is built. A `backoff` that silently did nothing would read as a wait that grows.
+- It is the caller's code and no I/O, as `onExhausted` is. A throw from it rejects the run, and so does an answer that is not a finite number of 0 or more, as an `EffectTypeError` from `malformed`. Counting either as an I/O fault would let an enclosing `Retry` retry a bug, and treating a bad answer as no wait would call a rate-limited server back at once, which is what a `NaN` wait once did.
+- A replay does not call it, since `fastRetry` replaces waiting and the function is part of the wait. Calling it would hand it the error as a trace holds it, a copy with no `Response` or headers, so a function that reads those would reject a replay of a run that went well. Under `fastRetry: false` a replay waits, and so calls it with that copy.
+- A cancelled branch does not call it either, since that branch waits for nothing and makes no further attempt.
+- The Command's function still decides what is retried, by throwing or returning. A predicate (`retryIf`) was raised in the same round and left for a separate decision, since it changes what an unretried throw becomes.
+
+### `retryIf`
+
+The maintainer's choice, made in November 2026, knowing it moves the ceiling [No catch](#no-catch) set. Until then the only way to retry some errors and handle others was to catch inside the Command's function, return the ones the flow handles, and rethrow the rest. Four DX rounds that month showed what that cost:
+
+- The classification sat in the one place a walk or a replay never runs. One agent declined to write it for that reason and left a 404 retried four times.
+- A hook saw a declined card or a refused request as a call that worked, since the function returned it. Three agents wrote hooks that read fields off results to tell.
+- The flight recorder's default `keep` missed such a run, for the same reason.
+- A retry predicate was asked for six times, three times as a must-have, and all four agents who wrote the same tasks in plain `async`/`await` put one in their own retry helper unasked.
+
+How it works:
+
+- `retryIf(error, attempt)` takes what `delay` takes: what the last attempt threw, and the number of the attempt about to run. `true` tries again and `false` gives up.
+- Giving up takes the path exhaustion takes: `onExhausted` runs if there is one, and otherwise the result is the exhaustion, an I/O fault an enclosing `Retry` decides on in turn. A second option for "the errors the flow handles" was not added, since `onExhausted` already receives `lastError` and returns any Effect.
+- `retries` in the exhaustion is the retries made, which is the option's value when the attempts ran out, so nothing that read it before changes. It is how a fallback tells giving up from running out.
+- An answer that is neither `true` nor `false` rejects the run, as a throw from it does. A forgotten `return` would otherwise read as giving up on every error, with nothing to show for it.
+- It is not asked after the last attempt, which is exhaustion whatever it would say, nor for an abort, which is never retried, nor in a cancelled branch, which makes no further attempt.
+- A replay calls it, unlike a `delay` function, since it decides how many attempts the flow asks for. It gets the error as the trace holds it, a plain `Error` with its fields, so one that decides by `instanceof` gives up in a replay where the run tried again. That is documented and pinned in `Documented sharp edges`, not guarded, since the data cannot show which a predicate does.
+
+`retries: 0` still throws, and catching inside the function still works for an outcome no `Retry` is involved in.
 
 ### Parallel
 
@@ -223,7 +257,7 @@ Undoing work: a fail-fast `Parallel` drops the values of the branches that succe
 
 ### The three hooks
 
-- `onStep(name, type, op, path)` wraps each Command's execution and each `Parallel`'s branches. It decides whether the Command runs at all, which is how replay suppresses I/O. So a hook that only watches must `await op()` and return its result; one that returns `undefined` after `op` returned a value makes the run reject.
+- `onStep(name, type, op, path, step)` wraps each Command's execution and each `Parallel`'s branches. `step` is what the hook is told about the step beyond its name; see [`onStep` gets the step's attempts, branches and `meta`](#onstep-gets-the-steps-attempts-branches-and-meta). It decides whether the Command runs at all, which is how replay suppresses I/O. So a hook that only watches must `await op()` and return its result; one that returns `undefined` after `op` returned a value makes the run reject.
 - `onRun(op, flowName, initialInput, context)` wraps a whole run, once. `flowName` is the run's `callConfig.flowName`, or `''`, `initialInput` is what the flow was called with when `effectPipe` built it, and `context` is what `Ask` reads, `{}` for a run given none. A hook that calls another passes all three on. What it returns must be a `Success` or `Failure`, or the run rejects with a `TypeError`: `runEffect` once resolved with whatever the hook returned, so in a DX experiment a hook that dropped `op`'s result handed the caller `5`, silently. A hook may still return an outcome of its own without calling `op`, as a maintenance switch does. One that returned while the run was still going is waited for first, as `onStep`'s is, so the run does not go on after `runEffect` has rejected.
 - `onBeforeCommand(command, context)` runs before each Command, and throwing from it vetoes the Command as an abort.
 
@@ -234,6 +268,17 @@ The maintainer's choice, made in October 2026, for 0.22.0. `onRun` was `onRun(ef
 `effect`, the flow's root, had no remaining use. The recording example once read the input off the root, as `effect.initialInput`, and nothing else did; once the input became its own argument, neither example nor the README read `effect`. So the context took its place rather than becoming a fifth argument. A single `run` object holding the name, input and context was weighed and dropped, since it bought little over four named positions.
 
 It breaks every `onRun` hook, since each later argument moves left. `onRun` hooks are few, mostly integrations like the two examples, and 0.22.0 already moved `flowName` out of the context, so the change lands in the release that already asks users to touch them.
+
+### `onStep` gets the step's attempts, branches and `meta`
+
+The maintainer's choice, made in November 2026. `onStep` had `(name, type, op, path)`. In that month's DX round, three of four agents wrote a regex over `path` to find the attempt number for a log line or a retry count, and two invented a name prefix such as `cmdHttp` so a hook could tell an external call from a database read, since `meta` reached only `onBeforeCommand` and the two hooks cannot be matched up under a `Parallel`. Each copied the path's format, which the library owns, the bar `branches` on a Resolver's step had already met (see [A helper ships only when users would otherwise copy a library rule](#a-helper-ships-only-when-users-would-otherwise-copy-a-library-rule)).
+
+- `step` is `{ attempts, branches, meta }`, built by `stepInfo` from the path and the Command.
+- `attempts` is a list, the attempt at each `Retry` on the path, outermost first, as `branches` is for each `Parallel`, since a `Retry` can wrap another. It counts as the path does, so `0` is a first try. A fallback's `rf` segment is not an attempt and adds nothing.
+- `meta` is the Command's own object, the one `onBeforeCommand` reads off the Command, and `undefined` for a `Parallel`.
+- It is one object rather than three more positions, so the next thing a hook needs to know does not move an argument again, as `onRun`'s change did.
+- The context stays out. A hook finds its request through `AsyncLocalStorage`, as the README shows, and `onRun` has the context.
+- The declared `StepRunner` requires `step`, as it does `path`, so a wrapper that drops it does not compile. In JavaScript a hook inside such a wrapper gets `undefined`.
 
 ### Layers
 
@@ -254,7 +299,7 @@ It breaks every `onRun` hook, since each later argument moves left. `onRun` hook
 
 ### Wrapping `onStep`
 
-- **Anything that wraps `onStep` passes `path` on as the fourth argument.** A wrapper that drops it records a trace without paths, which cannot replay a `Parallel`. In TypeScript it no longer compiles, since `StepRunner` declares `path` as present.
+- **Anything that wraps `onStep` passes `path` on as the fourth argument, and `step` as the fifth.** A wrapper that drops `path` records a trace without paths, which cannot replay a `Parallel`, and one that drops `step` leaves the hook inside it reading `attempts` off `undefined`. In TypeScript neither compiles, since `StepRunner` declares both as present. `chainHooks` passes both through every layer, so only a hook that calls another by hand can drop one.
 - Only the innermost hook can pass `op` an argument, the recorded decision, since `chainHooks` hands outer hooks a closure that takes none. Replay's hook is per-call, and so innermost.
 
 ### The recorder only watches
@@ -392,17 +437,18 @@ Loops: a `cause` or `errors` chain that loops back is cut where it returns, carr
 Without a copy, a later step that mutates a returned object rewrites what the trace says an earlier step returned.
 
 - `snapshot` copies through JSON, the form a trace is stored in, so a replay from memory hands the flow what a replay from storage does. [A trace has one form, JSON](#a-trace-has-one-form-json) gives the case against the `structuredClone` copy it replaced.
+- The copy tries `JSON.stringify` with no replacer first and turns to the one that cuts loops only when that throws. A value with no loop, the only kind the plain call accepts, gives the same text either way, and the replacer made the copy of a 1.4 MB result take about three times as long, all of it on the thread every other request waits on.
 - A reference back to an object the value is inside of is cut, as `serializeError` cuts an error chain, and an object shared without a loop is kept in full each time. A plain JSON copy refused the loop between an HTTP client's request and response before `redact` could trim them, so that step was left out of the trace whatever `redact` did.
 - A value JSON cannot encode, such as a `BigInt` or a property whose getter throws, makes the copy throw, and the value is marked `unrecorded: 'copy'`. The copy comes before `redact`, so a `redact` cannot rescue a context holding a lazy client: the whole context is left out. Reading such a getter once made `toTrace` throw, so `recordEffect` rejected before the run and the reference wiring vetoed the run's first Command; `recordPart` keeps that fixed.
 - An instance of a class with an arrow-function field, which `structuredClone` refused, was once kept as it was, so the trace held the object the run held, and `redact` was handed it: one that deleted a password in place changed what the run's `next` received, the incident below. A JSON copy rebuilds every instance as plain data.
-- `redact` is handed the copy, so a redact that deletes a field in place never reaches the run, and what it returns is copied into the same form, so a `Date` or an `undefined` field it leaves reads the same from memory as from storage. One written as `delete value.password` once saved users without a password, but only while recording was installed.
+- `redact` is handed the copy, so a redact that deletes a field in place never reaches the run, and what it returns is copied into the same form, so a `Date` or an `undefined` field it leaves reads the same from memory as from storage. With no `redact` there is nothing to copy again, since the first copy is in that form already, so `redactCopy` returns it as it is; the default is known by identity (`noRedact`), and a caller's `redact` that returns its argument is still copied, since it may have changed the value in place. One written as `delete value.password` once saved users without a password, but only while recording was installed.
 - Replay copies on the way out, in `entryToOutcome`, so a replayed step or a caller that mutates a value cannot change the next replay. A trace built by hand can hold a value JSON cannot encode, which no recorded trace does, and the replay stops there with a `ReplayError` naming the entry rather than a bare `TypeError`.
 - The trace's own `initialInput` and `context` are copied when the run starts. `toTrace` copies what it is given at the moment it is called, so `recordEffect` calls it before the run, and so does the reference wiring. Otherwise an ORM save that assigns an id to the object it is handed rewrote what the trace said production received.
 - A `recordEffect` call given no context records the `{}` the run gets without handing it to `redact`, since it holds nothing to redact. A DX experiment's `redact` threw on every value, so the context was marked unrecorded and the replay was refused for want of a context the flow never read. A context the caller passed goes through `redact` as before.
 
 ### `redact` sees everything a trace holds
 
-`redact` sees results, serialized errors, and the trace's own `initialInput` and `context`, told apart by its `kind` argument. **Keep that coverage complete if the trace format grows a field**, since a field `redact` cannot see is a field that leaks.
+`redact` sees results, serialized errors, the trace's own `initialInput` and `context`, and how the run ended, told apart by its `kind` argument and, for the outcome, its `name`. **Keep that coverage complete if the trace format grows a field**, since a field `redact` cannot see is a field that leaks.
 
 - An absent `initialInput` or `context` stays `undefined`, so a redact that spreads its argument cannot invent an empty object.
 - A thrown `Error` stays one through `redact` (`recordError`). The recorder puts the `__error` mark back on an object `redact` returns for it without one, since a redact that built a fresh `{ name, message }` once dropped it, and the replay handed the flow a plain object where production had thrown an `Error`, with nothing to say so. A value that is not an object, such as `'[redacted]'`, is stored as it is. A field such an object leaves `undefined`, as `{ status: value.status }` does for an error without one, is dropped by the copy of what `redact` returns; it once left the error replayed from memory with a field production's never had.
@@ -417,7 +463,7 @@ A result, input or context `redact` returns `undefined` for, when it was not `un
 
 A replay checks that the flow still asks for the same Commands in the same order, and still handles the same answers. It cannot check two things:
 
-- What the flow computes, since every result comes from the recording. Fix the arithmetic in a pure step, replay the run that got it wrong, and the replay reports the old outcome as the fixed flow's answer, with nothing to flag. Test a value change against the pure step that computes it.
+- What the flow computes, since every result comes from the recording. Fix the arithmetic in a pure step, replay the run that got it wrong, and the replay reports the old outcome as the fixed flow's answer, with nothing to flag. Test a value change against the pure step that computes it. `changed` flags it when the flow returns the value; see [A trace can record how the run ended](#a-trace-can-record-how-the-run-ended).
 - A fix inside a Command's function, which never runs in a replay, so the old trace hands back the throw the fix now catches.
 
 And since a trace matches a Command by name, a Command whose result changes shape is renamed, or old traces hand the new code a result in the old shape with no `TimeParadox`. The signup experiment hit both, which is why the README says them.
@@ -429,6 +475,19 @@ And since a trace matches a Command by name, a Command whose result changes shap
 - It is a return value rather than an observer option, since a value handed to a callback once, after completion, is a return value in disguise.
 - It is absent rather than empty for a `Resolver`, which cannot know what it lacks.
 - A regression test for a fix that skips a step asserts which step; every other recording asserts the list is empty.
+
+### A trace can record how the run ended
+
+A trace holds the run's outcome unless it was recorded with `recordOutcome: false`, and a replay of it returns `changed`: `null` when the replay ended the same way, else the first path where the two differ, with the value on each side. `assertReproduced` in `pure-effect/testing` checks it with the fault and `unreached`.
+
+- **Why.** A replay proved the steps and nothing the flow computed, so a refactor that chose different delivery slots with the same Commands passed. A November 2026 evaluation of two codebases built cold from one spec found exactly that, and its hand-written async rival caught it, by comparing the decisions its replay made with the ones it stored. Both Pure Effect builds had run into the gap: one kept each run's outcome itself, in a `WeakMap` filled in `keep`, and compared it in its replay script; the other had no check. The outcome is a result, not a Command argument, so it stays inside the settled rule that a trace records results.
+- **On by default.** The first spike recorded it always, and the test that keeps a card number out of a trace failed: its `redact` masked by Command name, and the outcome arrives under another. So the build made it opt-in, and the next round showed what that costs. A trace recorded without its outcome can never be checked, so last month's incident replays with nothing to compare; the flight recorder's default traces failed the library's own `assertReproduced`; a retrofit's opt-in wrapper passed every old fixture unchecked; and both agents that built from scratch turned it on unprompted. Recording it by default makes the defaults agree, at the cost of one marked upgrade step, the changelog's `Breaking:` entry, for a `redact` that masks results by name. Checking `redact` in one DX retrofit found two leaks that were already there, error messages quoting customers and an imported CSV held whole in a result.
+- **A result or an error, named `'outcome'`.** With the default on, the README's own `redact` leaked through a kind of its own: it masks errors by kind and results by Command name, and three of the library's redaction tests failed. Handing a Success's value to `redact` as a `'result'` and a Failure's error as an `'error'`, both named `'outcome'`, keeps every `redact` that masks by kind covering it unchanged, and leaves one condition to add for one that masks results by name. It also keeps `kind`'s type as it was, so no TypeScript project breaks. A separate `'outcome'` kind, which the spike after the first tried, was clearer to read and safe only for a `redact` written after it.
+- **No stack.** An outcome that ended in a thrown `Error` recorded its stack under `stack: true`, and every replay reported `changed` at `$.error.stack`, since a replay records none. The stack also carried the recording machine's paths. The step's entry keeps its stack; the outcome never does.
+- **The values at the path, not the whole outcomes.** The spike returned both outcomes in full, hundreds of characters for a summary with a list of decisions, so a reader hunted for the difference the path already named.
+- **Compared as JSON, through the same `redact`.** The replay's outcome is recorded as the trace's was (`outcomeChange`), so a value `redact` masked compares as masked. A replay computes from recorded results that are already redacted, so it usually needs no `redact`; one retrofit needed it for a field a pure step built from a name, and the option exists for that. A throw from it rejects the replay, as one from `onResolved` does. An outcome the replay cannot copy differs at the root rather than rejecting.
+- **Absent, not `null`, with nothing to compare.** A trace without an outcome, its bare entries and a `Resolver` get no `changed`, so "nothing to check" stays apart from "the same". A retrofit's first wrapper wrote `changed ?? null` and passed every old fixture unchecked, which is why `assertReproduced` fails a trace with no outcome.
+- **What it still cannot see.** What a flow writes, unless it returns it; a value the flow takes from a Command's result, which the replay hands back as recorded; and a flow whose return shape changed, whose old outcomes all differ. The README says to return the decisions worth checking and to record fixtures again after changing what a flow returns. In the retrofits it caught nothing the unit tests missed, since both tested their decisions directly, and no replay of unchanged code reported a change in over a hundred runs.
 
 ### Observing a replay
 
@@ -635,11 +694,11 @@ Under `settled`:
 
 ## Reference integrations
 
-`examples/opentelemetry-example.js` is reference code, not part of the library, and `flight-recorder.js` is the second entry point, `pure-effect/flight-recorder` (see [Recording ships as its own entry point](#recording-ships-as-its-own-entry-point)). The rule for both is that observing a run never decides it.
+`examples/opentelemetry-example.js` is reference code, not part of the library, `flight-recorder.js` is the second entry point, `pure-effect/flight-recorder` (see [Recording ships as its own entry point](#recording-ships-as-its-own-entry-point)), and `testing.js` is the third, `pure-effect/testing` (see [The testing helpers](#the-testing-helpers)). The rule for the first two is that observing a run never decides it.
 
-- The example ships in the package under `examples/`, through the `files` list, so an application can copy it from `node_modules`. `exports` offers only `index.js` and `flight-recorder.js`, so the example cannot be imported as part of the library.
-- Both have suites, so edit them only with `npm test`.
-- Each ships a declaration file beside it, which `scripts/js-declarations.js` writes from its JSDoc, and a test fails when one differs from what it writes. They shipped as JavaScript alone until 0.22.0, so a TypeScript project that copied one needed `allowJs`, which also type-checked the copy under its own settings: the telemetry example's SDK imports then failed a project without the SDK installed. A TypeScript reader raised it in every October 2026 DX round. Generating the declarations keeps them in step with the code. `startTelemetrySdk`'s JSDoc declares its result as what a caller uses, `{ shutdown() }`, since the SDK's own type would put the SDK back in every declaration that imports it, and each optional field is declared `T | undefined`, as `index.d.ts`'s are.
+- The example ships in the package under `examples/`, through the `files` list, so an application can copy it from `node_modules`. `exports` offers only `index.js`, `flight-recorder.js` and `testing.js`, so the example cannot be imported as part of the library.
+- All three have suites, so edit them only with `npm test`.
+- Each ships a declaration file beside it, the testing helpers too, which `scripts/js-declarations.js` writes from its JSDoc, and a test fails when one differs from what it writes. They shipped as JavaScript alone until 0.22.0, so a TypeScript project that copied one needed `allowJs`, which also type-checked the copy under its own settings: the telemetry example's SDK imports then failed a project without the SDK installed. A TypeScript reader raised it in every October 2026 DX round. Generating the declarations keeps them in step with the code. `startTelemetrySdk`'s JSDoc declares its result as what a caller uses, `{ shutdown() }`, since the SDK's own type would put the SDK back in every declaration that imports it, and each optional field is declared `T | undefined`, as `index.d.ts`'s are.
 - Each exports a function that returns a configuration (`telemetryHooks`, `recordingHooks`), which is the form that composes, and one that installs it (`enableTelemetry`, `enableRecording`). Nothing happens on import.
 - The example imports the library as `'pure-effect'`, which resolves to this repository through `package.json`'s `exports`, so a copy runs as it is in a project that installs the library. The examples imported `'../index.js'`, so every evaluator's copy failed with `Cannot find module`. A test imports the example from such a project.
 - The flight recorder imports `'./index.js'`. Nobody copies it, and in an installed package both that path and `'pure-effect'` resolve to the same file, so it shares the `configureEffect` state of the application that imports the core. A test imports it as `pure-effect/flight-recorder` from a project that installs the library, through `import` and through `require`, and checks a run it records went through that shared state.
@@ -658,6 +717,7 @@ It opens a span per run in `onRun`, a child span per Command in `onStep`, and on
 - It keeps one recorder per run in an `AsyncLocalStorage` scope. `onRun` packages the input and the context it is handed before the run, and `onStep` passes `path` on.
 - An error from `keep` or the sink goes to `onSinkError`, by default `console.error`, rather than replacing the run's outcome. The wiring copies the input and the context in `onRun` ahead of the run, where a throw would stop the run before it started, so it relies on `toTrace` never throwing. A field it cannot copy is marked `unrecorded` on the trace and warned about, rather than left out and reported to `onSinkError` with nothing on the trace to say so.
 - `keep` is handed the run's outcome and its trace's entries, and by default keeps a run that ended in a `Failure` or in which a Command threw. It kept only Failures until October 2026, and DX experiments kept losing the run they most wanted to replay, one that ended in a `Success` after trouble: a dead-lettered delivery, a charge that went through on a retry, a batch whose items failed. A thrown step is already marked `threw: true`, so the wider default costs one pass over the entries and catches the first two. A settled batch's failures are returned, not thrown, so only a `keep` that reads the result can see them, which the README shows. Keeping every run was weighed and left, since it puts every production run in storage.
+- `sample` stores a share of each kind of run in place of `keep`, for an application whose routine failures fill its storage: the default keeps every returned `Failure`, and a rejected email is one. There are three kinds rather than two, since a `Failure` a step returned is often routine while a throw is the run most worth replaying, and a run in which a Command threw is `threw` whatever it ended in, as the default `keep` treats it; so is one whose own code threw. A share is counted for each flow and kind rather than picked at random, so the first failure of a kind is always stored, the share is exact, and a test needs no stand-in for `Math.random`. The cap comes after the shares and counts every kind together, since the flood it exists for is a fault that makes every run throw. Giving `sample` and `keep` together throws, since two things deciding the same run would need an order nobody could guess; `keep` gets the `flowName` so one written by hand can vary by flow as `sample` does. The choice is made after the run, which saves storage and none of the copying: choosing before the run was weighed, and a failure is not known by then.
 - A run that rejects because its own code threw is offered to `keep` as a `Failure`, and sent to the sink before the rejection is rethrown, since those are the runs most worth replaying. `recordEffect` rejects without its trace, since in a test or a script the error is already in front of the caller.
 
 Four kinds of kept trace produce a warning through `onWarning`, by default `console.warn`, once per flow:
@@ -666,6 +726,23 @@ Four kinds of kept trace produce a warning through `onWarning`, by default `cons
 - A trace with steps named `'anonymous'`, since a replay tells steps apart by name. In the experiments, a refactor that swapped two inline arrow Commands replayed as a `Success`, with each handed the other's recorded result.
 - A trace that `maxEntries` cut short, since it replays only up to the first step it lacks, and the default cap of 500 cuts a long batch run short without anyone having chosen to.
 - A trace holding values the recorder could not record, since it replays only up to the first of them, and nothing else says so until someone replays an incident.
+
+### The testing helpers
+
+`pure-effect/testing` holds `assertStep`, `assertCommand`, `answers` and `assertReproduced`, for tests only. It imports `'./index.js'`, as the flight recorder does, and its declarations are generated from its JSDoc.
+
+Why it exists. In the November 2026 DX experiments, four agents each built a project with the library from the package alone. All four wrote their own Resolvers, answering by Command name and handing out lists with `shift()`. Both TypeScript agents copied the README's `assertStep` and `assertCommand` into a helpers file. Three told `Parallel` branches apart with a regex over `step.path` or a label built into `meta.name`. Each copied a rule or a format the library owns, which is the bar for a helper (see [A helper ships only when users would otherwise copy a library rule](#a-helper-ships-only-when-users-would-otherwise-copy-a-library-rule)). With the helpers shipped, a second round of four agents wrote no Resolver from scratch, copied no helper and parsed no path.
+
+- **Any test runner.** The assertions throw an `Error` shaped like `node:assert`'s, with `name: 'AssertionError'`, `actual`, `expected` and `operator`, built without importing `node:assert`, so they run where the core runs. Mocha, Vitest and Jest each showed it as a diff and node:test printed both fields, checked in November 2026. They return the step they checked, typed as that kind of step, since Jest's and Vitest's `expect` does not narrow a type and a walk in TypeScript needs that narrowing at every step. A runner-specific matcher would lose it.
+- **The message says why a walk stopped.** A `Failure` where a step was expected is named with its error, as in `got Failure("Email already in use.")`, since the reason the flow stopped is usually the answer to the failing test.
+- **`answers` keeps the outcome wrappers.** An entry is `{ result }` or `{ error }`, a list of them, or a function, never a plain value. That is the Resolver contract, and a domain value with an `error` field cannot be read as a throw. A plain value is refused as the table is built, with the fix in the message.
+- **The table is copied,** because the README's hand-written Resolver used up the caller's lists with `shift()` and had to warn every reader to build a fresh table per test.
+- **Three kinds of entry, and nothing for per-item answers.** A `keys` option that answered a Command per item was built and dropped as too much to learn. `byBranch(list)`, which three agents asked for, was weighed and dropped: it answers by position, so it is wrong when the flow reorders its list and useless for a generator flow's `for` loop, which has no `Parallel`. A function entry over `step.branches` covers what `byBranch` would, in plain code. A key the flow attaches to a Command, so a test answers by item, is the open alternative.
+- **`unused()` is opt-in.** It reports an entry the replay never asked for and a list it did not use up, the table's counterpart of a trace's `unreached`. It was dropped from the first spike to keep `answers` small, and three of four agents in the next round asked for it unprompted. In the round after, four agents asserted it in about 30 tests, by their own count, and it caught nothing, since a table drifts from its flow when the flow changes later, and each agent wrote both in one sitting; every message they provoked on purpose named the mistake. A test that spreads a shared table into its own sees the shared entries its scenario never reached, so the README says to check it where a test owns its whole table.
+
+- **`assertReproduced` checks the four things a replay of a trace can get wrong at once:** a `TimeParadox` or `ReplayError` in its result, an `unreached` step, an outcome that changed, and no outcome to compare. Every incident test the outcome experiments wrote repeated those checks by hand, and forgetting one passes silently, as `changed ?? null` did (see [A trace can record how the run ended](#a-trace-can-record-how-the-run-ended)). It tells a fault by `name`, as the README tells a test to, since the marks are internal.
+
+`branches` is on every step a Resolver gets, not only in `answers`, since the path's format belongs to the core. `branchesOf` reads it, beside `stepInfo`, which hands the same list to `onStep`, and `runParallel`, which writes the `p` segments, names it and `nodesAlong`.
 
 ## Settled decisions
 
@@ -704,9 +781,13 @@ The exception, recovering from `Retry` exhaustion inside the flow, became `Retry
 
 The ceiling stands: no general catch, only an I/O fault is recoverable (from anywhere in the wrapped tree, deliberately), `onExhausted` is per-use, and a cancelled branch skips it. A `catch` around `yield*` in a generator flow runs, so it can log, but a `catch` that recovers is refused, which keeps this ceiling.
 
+In November 2026 the maintainer moved one part of it: recovery no longer costs a second run of the tree. `retryIf` lets a `Retry` give up on an error at once, and `onExhausted` then runs, so `retryIf: () => false` with a fallback recovers from any I/O fault in one attempt. See [`retryIf`](#retryif). The rest holds: recovery is still only from an I/O fault, only through `onExhausted`, and only where a `Retry` is written.
+
 ### `retries: 0` throws
 
 A `Retry` that does not retry is not a `Retry`, and `0` was the one spelling that made `onExhausted` a catch at no cost. `retries: 1` still recovers from any I/O fault, but at the visible cost of running the tree twice.
+
+Since November 2026 `retryIf` is a second spelling without that cost (see [`retryIf`](#retryif)), and `0` still throws. A `retryIf` names the errors a `Retry` gives up on, where `0` gives up on all of them without saying so, and the message now points there.
 
 A companion option was dropped for the same reason, since `settled` already isolates a batch branch.
 
@@ -723,6 +804,8 @@ It was dropped for what it does to the design:
 - Catching inside the Command's function is still needed to retry some errors and handle others as data, so it would be a second way to handle an I/O error, not a replacement.
 
 An I/O error the flow handles is caught inside the Command's function and returned as data, as the README's `Which Errors Are Data` shows.
+
+Since November 2026 `retryIf` covers the third reason's case, retrying some errors and handling others, without a catch in the function. The first two reasons still keep the settled Command out: `retryIf` is written on the `Retry`, where a reader looking for how a failure is handled already looks, and `next` still receives a result and nothing else.
 
 ### No global retry options
 
@@ -813,7 +896,7 @@ A trace belongs to the version of the flow that recorded it, and nothing resumes
 Given `initialInput` and the recorded results, the flow runs the same way again, so replaying to a step rebuilds its arguments.
 
 - A guardrail vetoes on the context or on `meta`, which `onBeforeCommand` receives.
-- A cache hook would need `meta` handed to `onStep`, not recorded arguments, and nothing has needed one.
+- A cache hook reads `meta`, which `onStep` gets in `step`, not recorded arguments.
 - Recording arguments would double a trace's PII surface for no replay benefit, since arguments are usually the sensitive half of a call.
 
 ### A trace keeps data, not objects
@@ -942,11 +1025,12 @@ Two alternatives were weighed. Dropping the input only from a settled `Parallel`
 
 ### Sharp edges are documented, not guarded
 
-Four sharp edges are pinned by the `Documented sharp edges` suite, and each has a README Limitations entry:
+Five sharp edges are pinned by the `Documented sharp edges` suite, and each has a README Limitations entry:
 
 - `Retry` repeating its whole wrapped tree.
 - A `Parallel` branch whose Command ignores its signal running to completion.
 - A function passed by name taking the signal for a plain first parameter it treats as optional.
+- A `retryIf` that decides by an error's class, which gives up in a replay where the run tried again, since a trace keeps an error as data.
 - A step before a flow's first Command that changes its input, which a trace then records as changed. Those steps run as the flow is built, before `recordEffect` or the reference wiring copies the input. An October 2026 DX experiment found it with a generator body that ran `input.count++`; `effectPipe`'s first step does the same. Copying the input as every flow is built was weighed and dropped: every `effectPipe` and `effectGen` call records an input, nested ones included, so a `Parallel` over 5,000 items would copy 5,000 inputs whether or not the run is recorded, and `onRun` would have to be handed the copy rather than the caller's object. Copying only when a recorder is installed was dropped too, since `recordEffect` is handed a flow already built and the library cannot tell a recorder from any other hook, so the two ways of recording would hold different inputs.
 
 A guard would have to ban legitimate trees, since the hazard is not visible in the data. Replay's refusal of `onMissing: 'execute'` on a capped trace is consistent with this: the trace records its own cap, so that guard bans nothing legitimate.
@@ -1112,6 +1196,19 @@ The rule it replaced, as it stood until then:
 Each entry gives the signature, what it returns, and one line per option, parameter or rule. Where a guide section already teaches something, the entry links to it rather than teaching it again. Explanations live in the guide sections, and reasons in this file.
 
 The entries had grown into prose that re-taught the guides, a quarter of the README, which a cold DX evaluation called accurate throughout but dense. Rewritten this way, they lost a sixth of their words, and a rule such as one of `onStep`'s became a line a reader can find. A new option gets one line in its entry, and whatever more it needs goes in the section that teaches it.
+
+### Five guides hold what the README moved out
+
+The maintainer's choice, made in November 2026. All four agents in that month's DX round named the README's size, 107,493 bytes by then, among what they disliked most, and two said they read about 25,000 tokens before writing any code. A person skims less patiently than they do.
+
+`guides/time-travel.md` took Time-Travel Debugging and Replay in Depth, `guides/recording.md` took Recording in Production, `guides/typescript.md` took TypeScript: Typed Errors and Context, and `guides/hooks.md` took Hooks and Tracing with OpenTelemetry, which left the README at about 68 KB. `guides/failures.md` then took Which Errors Are Data, Translating `try`/`catch` and Undoing what succeeded when a branch fails, which left it at about 56 KB. Each of the first four subjects is what a reader comes back for after the first flow works, or what only some readers need, and the Quick Start's last step already shows a record and a replay. The TypeScript section sat a thousand lines down, where both TypeScript agents had to hunt for it; as a file of its own it is one link from the Quick Start. The move changed no prose, apart from the sentence that introduced Replay in Depth, which described a split that no longer exists. The README keeps no section for either: its table of contents links straight to each guide, as the maintainer chose, so a subject is taught in one place.
+
+- A guide follows every rule the README does: its examples run, its links are checked, and it has no jargon. `GUIDES` in `scripts/rules-file.js` names them once, and the docs tests and the generator read that list.
+- `RULES.md` links a task to the guide when both a guide and the README have the heading, since the guide is where it is taught.
+- The guides ship in the package, since an agent or a reader who has only `node_modules` follows the README's links there.
+- The failure guide was moved to gather a subject, not to shrink the README. What to do when a Command may fail was spread over Rule 1, Rule 6 and two sections, with the undo pattern a third, under `Parallel`, and an agent in the first round shipped a stock leak for not connecting the undo pattern to its case. A second round, after the first four guides, left the docs score where it was in all four reports, so size was not what readers were missing. The README keeps the short form, the Quick Start's third step and the rules, each linking to the guide.
+- The other sections on building flows stay in the README, with Getting started, since every task in both rounds needed them.
+- The Quick Start stays a pipeline, and gained one sentence pointing a TypeScript reader to the section on types, since both TypeScript agents reported hunting for it. Leading with generator flows was weighed and declined.
 
 ### The README's orientation sections stay short
 

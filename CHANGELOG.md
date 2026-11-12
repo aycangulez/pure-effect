@@ -2,6 +2,25 @@
 
 All notable changes to Pure Effect are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and from 1.0.0 the project follows [Semantic Versioning](https://semver.org/). Before 1.0.0 a minor version could change behaviour; each such change is marked below.
 
+## [0.24.0] - 2026-11-12
+
+### Added
+
+- `pure-effect/testing`, with `answers`, which builds a Resolver from a table of answers keyed by Command name, `assertStep` and `assertCommand`, which walk a flow with any test runner, and `assertReproduced`, which checks that a replay did what the recorded run did. Import them in place of a hand-written Resolver or a copy of the README's walk helpers.
+- `Retry` takes `retryIf`, a function of the last error and the attempt's number that returns whether to try again. When it returns `false` the `Retry` gives up at once and `onExhausted` runs, so a Command's function no longer has to catch the errors a retry cannot fix.
+- `Retry`'s `delay` takes a function of the last error and the attempt's number that returns each wait, so a flow can wait as long as a server's `Retry-After` asks. Leave `backoff` out beside it.
+- `onStep` gets a fifth argument, `step`, with the attempt at each `Retry` and the branch at each `Parallel` around the step, and a Command's `meta`, so a hook no longer reads them out of the path or the name.
+- A replay of a trace that holds how its run ended returns `changed`, which says whether the replay ended the same way and where it first differs. `timeTravel` reports it too.
+- A step handed to a Resolver carries `branches`, the branch taken at each `Parallel` on its path, so a test answers each branch without reading the path.
+- The flight recorder takes `sample`, which stores a share of the runs that threw, failed and succeeded, with a cap on the traces a flow stores in a minute and other shares for the flows it names. Use it in place of `keep` where routine failures fill your storage.
+- The flight recorder's `keep` gets the run's `flowName` as its third argument.
+
+### Changed
+
+- Breaking: `recordEffect` and the flight recorder store how each run ended in the trace's `outcome`, which `redact` gets as a result or an error named `'outcome'`. A `redact` that masks results by Command name must mask `name === 'outcome'` too, or pass `recordOutcome: false`.
+- Breaking: in TypeScript, code that calls an `onStep` hook itself, as a hook wrapping a recorder's does, must pass `step` on as the fifth argument.
+- Recording copies each value in less time, and once rather than twice when no `redact` is given, so a large result holds up other requests for less long.
+
 ## [0.23.0] - 2026-10-27
 
 ### Added
@@ -362,6 +381,7 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 
 - Initial release: `Success`, `Failure`, `Command`, `effectPipe`, and `runEffect`.
 
+[0.24.0]: https://github.com/aycangulez/pure-effect/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/aycangulez/pure-effect/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/aycangulez/pure-effect/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/aycangulez/pure-effect/compare/v0.20.1...v0.21.0

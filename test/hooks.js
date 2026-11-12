@@ -311,6 +311,94 @@ describe('configureEffect merging', function () {
     });
 });
 
+describe('What onStep is told about a step', function () {
+    beforeEach(() => configureEffect());
+
+    /** Collects each step's name, path and the fifth argument a hook gets. */
+    const watch = () => {
+        /** @type {Record<string, any>} */
+        const steps = {};
+        /** @type {import('../index.js').StepRunner} */
+        const onStep = async (name, type, op, path, step) => {
+            steps[`${name}@${path}`] = step;
+            return await op();
+        };
+        return { steps, onStep };
+    };
+
+    it('should hand a Command its attempts, its branches and its meta', async function () {
+        let calls = 0;
+        const flaky = Command(
+            function cmdFlaky() {
+                calls++;
+                return calls < 3 ? Promise.reject(new Error('down')) : Promise.resolve('up');
+            },
+            { name: 'cmdFlaky', external: true }
+        );
+        const plain = Command(function cmdPlain() {
+            return Promise.resolve(1);
+        });
+        const { steps, onStep } = watch();
+        const result = await runEffect(Parallel([plain, Retry(flaky, { retries: 2, delay: 0 })]), {}, { onStep });
+        assert.deepEqual(result, Success([1, 'up']));
+        assert.deepEqual(steps, {
+            'Parallel@0p': { attempts: [], branches: [], meta: undefined },
+            'cmdPlain@0p0/0': { attempts: [], branches: [0], meta: undefined },
+            'cmdFlaky@0p1/0r0/0': { attempts: [0], branches: [1], meta: { name: 'cmdFlaky', external: true } },
+            'cmdFlaky@0p1/0r1/0': { attempts: [1], branches: [1], meta: { name: 'cmdFlaky', external: true } },
+            'cmdFlaky@0p1/0r2/0': { attempts: [2], branches: [1], meta: { name: 'cmdFlaky', external: true } }
+        });
+    });
+
+    it('should list the attempt at each Retry outermost first, and none for a fallback', async function () {
+        let calls = 0;
+        const down = Command(function cmdDown() {
+            calls++;
+            return Promise.reject(new Error('down'));
+        });
+        const cached = Command(function cmdCached() {
+            return Promise.resolve('cached');
+        });
+        const inner = Retry(down, { retries: 1, delay: 0 });
+        const flow = Retry(inner, { retries: 1, delay: 0, onExhausted: () => cached });
+        const { steps, onStep } = watch();
+        const result = await runEffect(flow, {}, { onStep });
+        assert.deepEqual(result, Success('cached'));
+        assert.equal(calls, 4);
+        assert.deepEqual(
+            Object.entries(steps).map(([key, step]) => [key, step.attempts]),
+            [
+                ['cmdDown@0r0/0r0/0', [0, 0]],
+                ['cmdDown@0r0/0r1/0', [0, 1]],
+                ['cmdDown@0r1/0r0/0', [1, 0]],
+                ['cmdDown@0r1/0r1/0', [1, 1]],
+                ['cmdCached@0rf/0', []]
+            ]
+        );
+    });
+
+    it('should hand every layer and a per-call hook the same step', async function () {
+        /** @type {any[]} */
+        const seen = [];
+        /** @type {import('../index.js').StepRunner} */
+        const onStep = async (name, type, op, path, step) => {
+            seen.push(step);
+            return await op();
+        };
+        configureEffect({ onStep });
+        configureEffect({ onStep });
+        const tagged = Command(
+            function cmdTagged() {
+                return Promise.resolve('ok');
+            },
+            { tenant: 't1' }
+        );
+        await runEffect(tagged, {}, { onStep });
+        assert.equal(seen.length, 3);
+        for (const step of seen) assert.deepEqual(step, { attempts: [], branches: [], meta: { tenant: 't1' } });
+    });
+});
+
 describe('Per-call inherit', function () {
     beforeEach(() => configureEffect());
     afterEach(() => configureEffect());

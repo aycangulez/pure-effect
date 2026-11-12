@@ -34,6 +34,40 @@ describe('The generated declaration files', function () {
         }
     });
 
+    it('should type the testing helpers for a project without allowJs, narrowing each step they check', function () {
+        this.timeout(20000);
+        const source = [
+            "import { Command, Failure, Retry, Success, effectPipe, replayEffect } from 'pure-effect';",
+            "import { answers, assertCommand, assertReproduced, assertStep } from 'pure-effect/testing';",
+            "import type { Answer, AnswerResolver } from 'pure-effect/testing';",
+            'type User = { id: number };',
+            'declare const db: { find(email: string): Promise<User | null>; save(email: string): Promise<User> };',
+            'const guard = (email: string) => {',
+            '    const cmdFind = () => db.find(email);',
+            "    return Command(cmdFind, (found) => (found ? Failure('taken' as const) : Success(email)));",
+            '};',
+            'const save = (email: string) => {',
+            '    const cmdSave = () => db.save(email);',
+            '    return Retry(Command(cmdSave));',
+            '};',
+            'const flow = effectPipe(guard, save);',
+            "const found = assertCommand(flow('a@b.c'), 'cmdFind');",
+            'const next: Answer = (step) => (step.branches[0] === 0 ? { result: 1 } : undefined);',
+            "const answer: AnswerResolver = answers({ cmdFind: { result: null }, cmdSave: [{ error: new Error('x') }, { result: { id: 1 } }], next });",
+            "void replayEffect(flow('a@b.c'), answer).then(({ result }) => assertStep(result, 'Success').value.id);",
+            "assertStep(found.next(null), 'Retry').effect;",
+            'const left: string[] = answer.unused();',
+            "declare const recorded: import('pure-effect').TraceLog;",
+            "void replayEffect(flow('a@b.c'), recorded).then((replay) => assertReproduced(replay).type);",
+            'void left;',
+            '// @ts-expect-error a plain value is not an answer',
+            'answers({ cmdFind: null });',
+            '// @ts-expect-error a Command has no effect to read until assertStep says it is a Retry',
+            'found.next(null).effect;'
+        ].join('\n');
+        assert.deepEqual(consumerFilesTypeErrors({ 'consumer.ts': source }, { allowJs: false, checkJs: false }), []);
+    });
+
     it('should type the flight recorder and the telemetry example for a project without allowJs, naming no package beyond the API', function () {
         this.timeout(20000);
         const source = [

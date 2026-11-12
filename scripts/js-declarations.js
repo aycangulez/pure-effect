@@ -16,7 +16,7 @@ import ts from 'typescript';
 const root = fileURLToPath(new URL('..', import.meta.url));
 
 /** The JavaScript files that ship with generated declarations, by path from the repository root. */
-export const GENERATED = ['flight-recorder.js', 'examples/opentelemetry-example.js'];
+export const GENERATED = ['flight-recorder.js', 'testing.js', 'examples/opentelemetry-example.js'];
 
 /**
  * The declaration file for each of `GENERATED`, keyed by its path from the repository root.

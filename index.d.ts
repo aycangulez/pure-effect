@@ -39,10 +39,21 @@ export type AskState<T, E = unknown, Ctx = unknown> = {
 export type RetryOptions = {
     /** Tries after the first, so `2` makes at most 3 calls. A positive integer, 3 by default. */
     retries?: number | undefined;
-    /** Milliseconds before the first retry, 100 by default. */
-    delay?: number | undefined;
-    /** Multiplies the wait before each later retry, so `2` doubles it. 1 by default, the same wait each time. */
+    /**
+     * Milliseconds before the first retry, 100 by default. Or a function that returns the wait before each retry, from
+     * what the last attempt threw and the number of the attempt about to run, 1 for the first retry.
+     */
+    delay?: number | ((error: unknown, attempt: number) => number) | undefined;
+    /**
+     * Multiplies the wait before each later retry, so `2` doubles it. 1 by default, the same wait each time. Leave it
+     * out beside a `delay` function.
+     */
     backoff?: number | undefined;
+    /**
+     * Whether to try again, from what the last attempt threw and the number of the attempt about to run. `false` gives up
+     * at once, as running out of attempts does. Decide on the error's fields: a replay passes a copy, not an instance.
+     */
+    retryIf?: ((error: unknown, attempt: number) => boolean) | undefined;
 };
 
 /**
@@ -57,11 +68,14 @@ export type RetryState<T, E = unknown, Ctx = unknown, R = T> = {
     next(value: R): Effect<T, E, Ctx>;
 };
 
-/** The error a `Retry` fails with once every attempt has thrown. `lastError` is what the last attempt threw. */
+/** The error a `Retry` fails with once it gives up. `lastError` is what the last attempt threw. */
 export type RetryExhaustedError<Thrown = unknown> = {
     retryExhausted: true;
     lastError: Thrown;
-    /** The `retries` option, so the retried steps ran one more time than this. */
+    /**
+     * How many retries were made, so the retried steps ran one more time than this: the `retries` option, or fewer when
+     * `retryIf` gave up sooner.
+     */
     retries: number;
 };
 
@@ -1318,14 +1332,26 @@ export declare function effectGen<I, Y, R>(
     body: (input: I) => Generator<Y extends Step<any, any> ? Y : YieldStarStep, R, unknown>
 ): (input: I) => Effect<GenValue<R>, EffectError<StepEffectOf<Y>> | EffectError<ReturnedEffect<R>>, GenContext<Y, R>>;
 
+/** What an `onStep` hook is told about its step, beyond its name and path. */
+export type StepInfo = {
+    /** The attempt at each `Retry` on the path, outermost first: 0 is a first try, and `[]` is a step under no `Retry`. */
+    attempts: readonly number[];
+    /** The branch taken at each `Parallel` on the path, outermost first: `[2]` is the third effect given to one `Parallel`. */
+    branches: readonly number[];
+    /** The Command's `meta`, and `undefined` for one that has none and for a `Parallel`. */
+    meta: CommandMeta | undefined;
+};
+
 /**
- * Wraps each Command, and each `Parallel`. Call `op` and return its result; a hook that calls another passes `path` on.
+ * Wraps each Command, and each `Parallel`. Call `op` and return its result; a hook that calls another passes `path`
+ * and `step` on.
  */
 export type StepRunner = (
     name: string,
     type: 'Command' | 'Parallel',
     op: (decision?: ParallelDecision) => Promise<unknown>,
-    path: string
+    path: string,
+    step: StepInfo
 ) => Promise<unknown>;
 
 /**
@@ -1403,6 +1429,8 @@ export type ReplayStep = {
     type: 'Command' | 'Parallel';
     /** The step's position in the flow, the same in every run; a Resolver should key off it. */
     path: string;
+    /** The branch taken at each `Parallel` on the path, outermost first: `[2]` is the third effect given to one `Parallel`. */
+    branches: readonly number[];
 };
 
 /**
@@ -1435,15 +1463,24 @@ export type TraceLog<I = unknown, C = unknown> = {
     version?: string;
     initialInput?: I;
     context?: C;
-    /** Why the trace holds no `initialInput` or `context`, as an entry's `unrecorded` says it for a step. */
-    unrecorded?: { initialInput?: string; context?: string };
+    /** How the run ended, unless it was recorded with `recordOutcome: false`. */
+    outcome?: RecordedOutcome;
+    /** Why the trace holds no `initialInput`, `context` or `outcome`, as an entry's `unrecorded` says it for a step. */
+    unrecorded?: { initialInput?: string; context?: string; outcome?: string };
     dropped?: number;
     trace: TraceEntry[];
 };
 
+// `type` is a string, as a JSON import widens it, so a fixture imported as a JSON module still replays.
+/**
+ * How a run ended, as a trace holds it: `{ type: 'Success', value }` or `{ type: 'Failure', error }`, after `redact`.
+ */
+export type RecordedOutcome = { type: string; value?: unknown; error?: unknown };
+
 export interface RecorderOptions {
     /**
      * Scrubs each value before it enters a trace; `kind` says which. It gets a copy, so editing it in place is safe.
+     * How the run ended comes as a result or an error named `'outcome'`.
      */
     redact?: ((value: any, name: string, kind: 'result' | 'error' | 'initialInput' | 'context') => unknown) | undefined;
     /** Cap trace length; further steps are counted in `dropped`, not stored. */
@@ -1459,6 +1496,8 @@ export interface TraceMeta<I = unknown, C = unknown> {
     context?: C;
     /** Accepts `undefined`, so `process.env.BUILD_ID` passes under `exactOptionalPropertyTypes`. */
     version?: string | undefined;
+    /** How the run ended, given once it has, so the trace records it. */
+    outcome?: SuccessState<unknown> | FailureState<unknown> | undefined;
 }
 
 /** An `onStep` hook that records each step, and `toTrace` to package the recording as a trace. */
@@ -1474,6 +1513,8 @@ export type RecordOptions<Ctx = unknown> = RecorderOptions & {
     /** Names the run in the trace, and in spans an installed hook makes. */
     flowName?: string | undefined;
     version?: string | undefined;
+    /** Records how the run ended in the trace, through `redact`, so a replay can say whether it ends the same way. On by default. */
+    recordOutcome?: boolean | undefined;
 };
 
 /**
@@ -1501,12 +1542,25 @@ export interface ReplayOptions<Ctx = unknown> {
      */
     onMissing?: 'throw' | 'execute' | undefined;
     onResolved?: ((step: ReplayStep, outcome: ReplayOutcome | undefined) => void) | undefined;
+    /** Masks the replay's outcome before it is compared with the trace's; needed only where `redact` masks a value the flow computed. */
+    redact?: RecorderOptions['redact'];
 }
 
-/** The replay's outcome and, for a trace, the recorded steps the flow never asked for. */
+/**
+ * The replay's outcome and, for a trace, the recorded steps the flow never asked for. A trace that recorded its outcome
+ * also gets `changed`: `null` when the replay ended the same way, else where the two first differ.
+ */
 export interface Replay<T, E = unknown> {
     result: SuccessState<T> | FailureState<E | Error>;
     unreached: TraceEntry[];
+    changed?: OutcomeChange | null;
+}
+
+/** Where a replay's outcome first differs from the recorded one, such as `$.value[0].slot`, and the value each holds there. */
+export interface OutcomeChange {
+    path: string;
+    recorded: unknown;
+    replayed: unknown;
 }
 
 /**
@@ -1568,6 +1622,8 @@ export interface TimeTravelOptions<Ctx = unknown> {
     context?: Ctx | undefined;
     /** The build replaying the trace; a trace recorded at another build gets a warning. */
     version?: string | undefined;
+    /** Passed to `replayEffect`, to mask the replay's outcome before it is compared. */
+    redact?: RecorderOptions['redact'];
 }
 
 /**
