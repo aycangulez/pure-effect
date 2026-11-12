@@ -11,10 +11,13 @@ All notable changes to Pure Effect are recorded here. The format follows [Keep a
 - The flight recorder takes `sample`, which stores a share of the runs that threw, failed and succeeded, with a cap on the traces a flow stores in a minute and other shares for the flows it names. Use it in place of `keep` where routine failures fill your storage.
 - The flight recorder's `keep` gets the run's `flowName` as its third argument.
 - A step handed to a Resolver carries `branches`, the branch taken at each `Parallel` on its path, so a test answers each branch without reading the path.
+- `onStep` gets a fifth argument, `step`, with the attempt at each `Retry` and the branch at each `Parallel` around the step, and a Command's `meta`, so a hook no longer reads them out of the path or the name.
+- `Retry`'s `delay` takes a function of the last error and the attempt's number that returns each wait, so a flow can wait as long as a server's `Retry-After` asks. Leave `backoff` out beside it.
 
 ### Changed
 
 - Breaking: `recordEffect` and the flight recorder store how each run ended in the trace's `outcome`, which `redact` gets as a result or an error named `'outcome'`. A `redact` that masks results by Command name must mask `name === 'outcome'` too, or pass `recordOutcome: false`.
+- Breaking: in TypeScript, code that calls an `onStep` hook itself, as a hook wrapping a recorder's does, must pass `step` on as the fifth argument.
 - Recording copies each value in less time, and once rather than twice when no `redact` is given, so a large result holds up other requests for less long.
 
 ## [0.23.0] - 2026-10-27

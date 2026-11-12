@@ -318,21 +318,149 @@ describe('Retry options and the removed global retry', function () {
         assert.throws(() => Retry(failing(), { delay: NaN }), /Retry 'delay' .*the number NaN/);
     });
 
-    it('should name a function given as a delay plainly, and say how to wait as long as a server asks', function () {
-        // It once guessed that a flow had been passed without its input, which a delay never is.
-        const wait = /** @type {any} */ (() => 1000);
+    it('should name a function given as a backoff plainly', function () {
+        // It once guessed that a flow had been passed without its input, which an option never is.
+        const grow = /** @type {any} */ (() => 2);
         assert.throws(
-            () => Retry(failing(), { delay: wait }),
+            () => Retry(failing(), { backoff: grow }),
             (/** @type {Error} */ error) => {
-                assert.match(
+                assert.equal(
                     error.message,
-                    /^Retry 'delay' must be a finite number of 0 or more, received a function\. /
+                    "Retry 'backoff' must be a finite number of 0 or more, received a function."
                 );
-                assert.doesNotMatch(error.message, /without being called/);
-                assert.match(error.message, /as data/);
                 return true;
             }
         );
+    });
+
+    it('should wait what a delay function returns for the error thrown and the attempt about to run', async function () {
+        /** @type {number[]} */
+        const stamps = [];
+        /** @type {[any, number][]} */
+        const asked = [];
+        const limited = Command(function cmdLimited() {
+            stamps.push(performance.now());
+            return Promise.reject(Object.assign(new Error('rate limited'), { retryAfterMs: 30 * stamps.length }));
+        });
+        const delay = (/** @type {any} */ error, /** @type {number} */ attempt) => {
+            asked.push([error.retryAfterMs, attempt]);
+            return error.retryAfterMs;
+        };
+        const result = await runEffect(Retry(limited, { retries: 2, delay }));
+        assert.equal(result.type, 'Failure');
+        assert.deepEqual(asked, [
+            [30, 1],
+            [60, 2]
+        ]);
+        const waits = stamps.slice(1).map((stamp, i) => stamp - stamps[i]);
+        assert.ok(waits[0] >= 25 && waits[0] < 55, `the first wait is the 30 ms asked for, was ${waits[0]}`);
+        assert.ok(waits[1] >= 55, `the second wait is the 60 ms asked for, was ${waits[1]}`);
+    });
+
+    it('should hand a delay function the exhaustion of a Retry it wraps', async function () {
+        /** @type {any[]} */
+        const seen = [];
+        const delay = (/** @type {any} */ error) => {
+            seen.push(error);
+            return 0;
+        };
+        await runEffect(Retry(Retry(failing(), { retries: 1, delay: 0 }), { retries: 1, delay }));
+        assert.equal(seen.length, 1);
+        assert.equal(seen[0].retryExhausted, true);
+        assert.equal(seen[0].lastError.message, 'down');
+    });
+
+    it('should refuse a backoff beside a delay function, which grows its own wait', function () {
+        assert.throws(() => Retry(failing(), { delay: () => 10, backoff: 2 }), {
+            name: 'EffectTypeError',
+            message: /^Retry 'backoff' multiplies a delay given as a number/
+        });
+        // An absent config key arrives as undefined, and keeps meaning no backoff.
+        assert.doesNotThrow(() => Retry(failing(), { delay: () => 10, backoff: undefined }));
+    });
+
+    it('should reject the run when a delay function returns no wait, rather than retry at once', async function () {
+        let calls = 0;
+        const counted = Command(function cmdCounted() {
+            calls++;
+            return Promise.reject(new Error('down'));
+        });
+        for (const bad of [undefined, NaN, -1, '250', Infinity]) {
+            calls = 0;
+            const delay = /** @type {any} */ (() => bad);
+            await assert.rejects(runEffect(Retry(counted, { retries: 2, delay })), {
+                name: 'EffectTypeError',
+                message:
+                    /^Retry's delay function must return a finite number of 0 or more, and it returned .* before attempt 1\.$/
+            });
+            assert.equal(calls, 1, 'no attempt follows a wait that could not be read');
+        }
+    });
+
+    it('should reject the run with what a delay function throws, and not retry it', async function () {
+        let calls = 0;
+        const counted = Command(function cmdCounted() {
+            calls++;
+            return Promise.reject(new Error('down'));
+        });
+        const delay = () => {
+            throw new RangeError('bug in the delay function');
+        };
+        // An enclosing Retry must not take the bug for an outage.
+        const flow = Retry(Retry(counted, { retries: 2, delay }), { retries: 3, delay: 0 });
+        await assert.rejects(runEffect(flow), { name: 'RangeError', message: 'bug in the delay function' });
+        assert.equal(calls, 1);
+    });
+
+    it('should not ask a delay function for a wait in a branch already cancelled', async function () {
+        let asked = 0;
+        const slowToFail = Command(function cmdSlowToFail() {
+            return new Promise((resolve, reject) => setTimeout(() => reject(new Error('down')), 20));
+        });
+        const stops = Command(
+            function cmdStops() {
+                return Promise.resolve('no');
+            },
+            (/** @type {string} */ reason) => Failure(reason)
+        );
+        const delay = () => {
+            asked++;
+            return 0;
+        };
+        const result = await runEffect(Parallel([stops, Retry(slowToFail, { retries: 2, delay })]));
+        assert.deepEqual(result, Failure('no'));
+        assert.equal(asked, 0);
+    });
+
+    it('should not call a delay function in a replay, which does not wait', async function () {
+        let asked = 0;
+        let calls = 0;
+        const flaky = () =>
+            Retry(
+                Command(function cmdFlaky() {
+                    calls++;
+                    if (calls < 3) return Promise.reject(new Error('down'));
+                    return Promise.resolve('up');
+                }),
+                {
+                    retries: 2,
+                    delay: () => {
+                        asked++;
+                        return 1;
+                    }
+                }
+            );
+        const { result, trace } = await recordEffect(flaky());
+        assert.deepEqual(result, Success('up'));
+        assert.equal(asked, 2);
+        calls = 0;
+        const replayed = await replayEffect(flaky(), trace);
+        assert.deepEqual(replayed.result, Success('up'));
+        assert.equal(calls, 0, 'the replay ran no Command');
+        assert.equal(asked, 2, 'the replay asked for no wait');
+        // With the waits kept, the function gets the error as the trace holds it.
+        await replayEffect(flaky(), trace, { fastRetry: false });
+        assert.equal(asked, 4);
     });
 
     it('should refuse a retry key in configureEffect, as any key no hook has', function () {

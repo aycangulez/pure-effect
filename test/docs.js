@@ -172,6 +172,8 @@ describe('README examples', function () {
         subscriptions: [{ id: 'sub_1' }, { id: 'sub_2' }],
         billOne: stubCommand,
         fetchPrice: stubCommand,
+        // The delay function example's webhook, which its flow never sends.
+        sendWebhook: async () => ({ status: 200 }),
         cmdHoldSeat: () => Promise.resolve({ holdId: 'seat_1' }),
         trip: { id: 'trip_1' },
         work: [Success(1)],

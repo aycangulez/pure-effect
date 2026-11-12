@@ -48,7 +48,12 @@
  * @typedef {{
  *   type: 'Retry',
  *   effect: Effect,
- *   options: Readonly<{ retries?: number, delay?: number, backoff?: number, onExhausted?: (error: any) => Effect }>,
+ *   options: Readonly<{
+ *     retries?: number,
+ *     delay?: number | ((error: any, attempt: number) => number),
+ *     backoff?: number,
+ *     onExhausted?: (error: any) => Effect
+ *   }>,
  *   next: (value: any) => Effect
  * }} RetryState
  */
@@ -183,9 +188,11 @@ const Ask = (...args) => {
  * @param {Effect} effect - The inner Effect tree to retry
  * @param {Object} [options] - Merged over the defaults when it runs; an option set to `undefined` keeps its default.
  * @param {number} [options.retries] - Tries after the first, a positive integer
- * @param {number} [options.delay] - Ms before the first retry, a finite number of 0 or more
+ * @param {number | ((error: any, attempt: number) => number)} [options.delay] - Ms before the first retry, a finite
+ *        number of 0 or more; or a function that returns the wait before each retry, from what the last attempt threw
+ *        and the number of the attempt about to run, 1 for the first retry. A replay does not wait, so does not call it.
  * @param {number} [options.backoff] - Multiplier applied to the delay on each later retry, a finite number of 0 or
- *        more
+ *        more. Refused beside a delay function, which grows its own wait.
  * @param {(error: any) => Effect} [options.onExhausted] - Builds a fallback from `{ retryExhausted, lastError,
  *        retries }` once every attempt has failed. Its success feeds `next`; its failure propagates unwrapped.
  * @param {...any} extra - Refused, since nothing reads it
@@ -211,6 +218,13 @@ const Retry = (effect, options, ...extra) => {
         );
     }
     checkOptions(options, 'Retry', retryOptionRules, malformed);
+    if (typeof options?.delay === 'function' && options.backoff !== undefined) {
+        throw malformed(
+            "Retry 'backoff' multiplies a delay given as a number, so it would do nothing beside a delay function. " +
+                "Leave it out and grow the wait in the function, which gets the attempt's number.",
+            options.backoff
+        );
+    }
     return { type: 'Retry', effect, options: Object.freeze({ ...options }), next: (value) => Success(value) };
 };
 
@@ -387,9 +401,8 @@ const retryOptionRules = {
             "branch with Parallel's settled option."
     ],
     delay: [
-        isFiniteNonNegative,
-        'a finite number of 0 or more',
-        'To wait as long as a server asks, return its answer as data and wait in a Command.'
+        (value) => isFiniteNonNegative(value) || isFunction(value),
+        'a finite number of 0 or more, or a function that returns one'
     ],
     backoff: [isFiniteNonNegative, 'a finite number of 0 or more'],
     onExhausted: [isFunction, 'a function that returns the fallback']
@@ -1135,9 +1148,21 @@ const effectGen = (body) => {
 // #region Configuration
 
 /**
+ * What a step hook is told about its step beyond the name: the attempt at each Retry and the branch at each Parallel
+ * on its path, outermost first, and a Command's `meta`.
+ * @typedef {{ attempts: number[], branches: number[], meta: any }} StepInfo
+ */
+/**
  * Wraps one Command, or one Parallel, whose `op` runs the branches and returns the decision, so a hook must call it.
- * Only a replay passes `op` an argument, the recorded decision. `path` is the step's position in the Effect tree.
- * @typedef {(name: string, type: 'Command' | 'Parallel', op: function, path?: string) => Promise<any>} StepRunner
+ * Only a replay passes `op` an argument, the recorded decision. `path` is the step's position in the Effect tree,
+ * and `step` is what `stepInfo` reads from it.
+ * @typedef {(
+ *   name: string,
+ *   type: 'Command' | 'Parallel',
+ *   op: function,
+ *   path?: string,
+ *   step?: StepInfo
+ * ) => Promise<any>} StepRunner
  */
 /** @type StepRunner */
 const defaultStepRunner = async (name, type, op) => await op();
@@ -1278,7 +1303,8 @@ const chainHooks = (...configs) => {
 
     if (steps.length) {
         merged.onStep = steps.reduceRight(
-            (inner, outer) => (name, type, op, path) => outer(name, type, () => inner(name, type, op, path), path)
+            (inner, outer) => (name, type, op, path, step) =>
+                outer(name, type, () => inner(name, type, op, path, step), path, step)
         );
     }
     if (runs.length) {
@@ -1421,6 +1447,38 @@ const runBounded = async (tasks, limit) => {
     };
     await Promise.all(Array.from({ length: limit }, worker));
 };
+
+/**
+ * The number after `mark` in each segment of a path that has one, in order: the branches along it for `p`, and the
+ * attempts for `r`. A fallback's `rf` has no number, so it gives none.
+ * @param {string | undefined} path
+ * @param {'p' | 'r'} mark
+ * @returns {number[]}
+ */
+const numbersAlong = (path, mark) =>
+    typeof path === 'string'
+        ? path
+              .split('/')
+              .flatMap((segment) => new RegExp(`^\\d+${mark}(\\d+)$`).exec(segment)?.slice(1) ?? [])
+              .map(Number)
+        : [];
+
+/**
+ * The branch taken at each Parallel along a path, outermost first: `2p16/1r0/0` gives `[16]`, and `0p1/3p0/0` gives
+ * `[1, 0]`. `runParallel` opens the `p` segments these are read from, as it does for `nodesAlong`.
+ * @param {string | undefined} path
+ * @returns {number[]}
+ */
+const branchesOf = (path) => numbersAlong(path, 'p');
+
+/**
+ * What a step hook is told about the step at `path`: the attempt at each Retry along it, outermost first and 0 for a
+ * first try, from the `r` segments `runRetry` opens, the branches, and the Command's `meta`.
+ * @param {string} path
+ * @param {any} [meta]
+ * @returns {StepInfo}
+ */
+const stepInfo = (path, meta) => ({ attempts: numbersAlong(path, 'r'), branches: branchesOf(path), meta });
 
 /** The longest wait `setTimeout` can hold, about 24.8 days; a longer one fires at once. */
 const longestWait = 2 ** 31 - 1;
@@ -1639,6 +1697,26 @@ const execute = async (runtime, eff, signal, path = '') => {
 };
 
 /**
+ * How long a Retry waits before `attempt`: its `delay` grown by `backoff`, or what a `delay` function returns for
+ * what the last attempt threw. The function is the caller's code and no I/O, so a throw from it rejects the run, as
+ * an answer that is no wait does.
+ * @param {{ delay: number | ((error: any, attempt: number) => number), backoff: number }} opts
+ * @param {any} lastError
+ * @param {number} attempt
+ * @returns {number}
+ */
+const retryWait = ({ delay, backoff }, lastError, attempt) => {
+    if (typeof delay !== 'function') return delay * Math.pow(backoff, attempt - 1);
+    const wait = delay(lastError, attempt);
+    if (isFiniteNonNegative(wait)) return wait;
+    throw malformed(
+        `Retry's delay function must return a finite number of 0 or more, and it returned ${describeValue(wait)} ` +
+            `before attempt ${attempt}.`,
+        wait
+    );
+};
+
+/**
  * Runs a Retry's wrapped tree until it succeeds or runs out of attempts, then its fallback if it has one.
  * Each attempt opens its own path prefix, and so does the fallback.
  *
@@ -1659,11 +1737,13 @@ const runRetry = async (runtime, retry, signal, stepPath) => {
     for (let attempt = 0; attempt <= retries; attempt++) {
         // `fastRetry` waits for no time rather than skipping the wait, so branches replayed by timing still
         // interleave.
-        if (attempt > 0) {
-            await delayFor(runtime.fastRetry ? 0 : opts.delay * Math.pow(opts.backoff, attempt - 1), signal);
+        // A cancelled branch waits for nothing, so its delay function is not asked.
+        if (attempt > 0 && !signal?.aborted) {
+            await delayFor(runtime.fastRetry ? 0 : retryWait(opts, lastError, attempt), signal);
         }
         // After the wait, so a branch cancelled mid-backoff makes no further attempt.
         if (signal?.aborted) return cancelledBranch();
+        // The attempt's number in the path is what `stepInfo` hands a step hook.
         const result = await execute(runtime, retry.effect, signal, `${stepPath}r${attempt}/`);
         // Only an I/O fault is retried. An abort passes through unwrapped.
         if (result.type !== 'IoFault') return result;
@@ -1700,7 +1780,7 @@ const runParallel = async (runtime, parallel, signal, stepPath) => {
         return branchRun.decision;
     };
     try {
-        await runtime.onStep('Parallel', 'Parallel', op, branchPath);
+        await runtime.onStep('Parallel', 'Parallel', op, branchPath, stepInfo(branchPath));
     } catch (e) {
         // A cut from `fromTrace`: production had already stopped the branch this Parallel is in, so it skipped this
         // Parallel, and `stopSkipped` tells the flows built in its branches, as production's cancellation did.
@@ -1956,7 +2036,7 @@ const runCommand = async (runtime, command, signal, cmdPath) => {
     // Again, since an interceptor can wait (a rate limiter, say) while a sibling fails.
     if (signal?.aborted) return cancelledBranch();
     try {
-        const returned = await runtime.onStep(cmdName, 'Command', calls.op, cmdPath);
+        const returned = await runtime.onStep(cmdName, 'Command', calls.op, cmdPath, stepInfo(cmdPath, command.meta));
         // A hook that returned without awaiting `op` is judged as though it had awaited it.
         const unwaited = returned === undefined && calls.running;
         if (unwaited) await calls.latest;
@@ -2539,20 +2619,6 @@ const hasPath = (step) => typeof step.path === 'string';
  * @returns {boolean}
  */
 const isInsideParallel = (path) => typeof path === 'string' && /p\d+\//.test(path);
-
-/**
- * The branch taken at each Parallel along a path, outermost first: `2p16/1r0/0` gives `[16]`, and `0p1/3p0/0` gives
- * `[1, 0]`. `runParallel` opens the `p` segments these are read from, as it does for `nodesAlong`.
- * @param {string | undefined} path
- * @returns {number[]}
- */
-const branchesOf = (path) =>
-    typeof path === 'string'
-        ? path
-              .split('/')
-              .flatMap((segment) => /^\d+p(\d+)$/.exec(segment)?.slice(1) ?? [])
-              .map(Number)
-        : [];
 
 /** @typedef {'Command' | 'Retry' | 'Parallel'} NodeKind */
 

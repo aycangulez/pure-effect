@@ -297,12 +297,12 @@ export function recordingHooks(options = {}) {
 
     /**
      * Outside a recorded run there is no store, so the Command runs untouched. `path` must be passed on: a replay
-     * matches steps on it.
+     * matches steps on it. `step` is passed on as any wrapper's is.
      * @type {StepRunner}
      */
-    const onStep = async (name, type, op, path) => {
+    const onStep = async (name, type, op, path, step) => {
         const store = scope.getStore();
-        return store ? await store.rec.onStep(name, type, op, path) : await op();
+        return store ? await store.rec.onStep(name, type, op, path, step) : await op();
     };
 
     return { onRun, onStep };

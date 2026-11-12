@@ -516,7 +516,21 @@ Exact rules: [`Retry`](REFERENCE.md#retryeffect-options).
 
 ### Waiting as long as the server asks
 
-`Retry` waits a fixed `delay`, so it cannot wait as long as a server names, as a rate limit's `Retry-After` does. Catch that answer inside the Command's function and return it as data, as [Which Errors Are Data](#which-errors-are-data) shows, then have `next` return a Command that waits that long, followed by the same request again. A replay answers the wait from the trace like any other Command, so it does not wait.
+A server that limits requests often says how long to wait, as a `Retry-After` header does. Give `delay` a function in place of a number. It gets what the last attempt threw and the number of the attempt about to run, `1` for the first retry, and returns the wait in milliseconds. So have the Command's function throw an error that carries the wait:
+
+```js
+// sendWebhook throws on a 429 or a 5xx. On a 429 the error carries the wait the server asked for, as retryAfterMs.
+const deliverWebhook = (event) => {
+    const cmdSendWebhook = () => sendWebhook(event);
+    return Retry(Command(cmdSendWebhook), {
+        retries: 4,
+        // Waits as long as the server asked, or else 200ms, 400ms, 800ms, then 1600ms.
+        delay: (error, attempt) => error.retryAfterMs ?? 200 * 2 ** (attempt - 1)
+    });
+};
+```
+
+The function works out every wait, so `backoff` beside it throws. It is ordinary code, not I/O: if it throws, or returns anything but a number of 0 or more, the run rejects instead of retrying. A replay does not wait, so it does not call the function; test it on its own, as you would a step.
 
 ## Running Effects in Parallel
 
@@ -1489,13 +1503,15 @@ const stepLog = [];
 
 // Logs each step with its request and duration, and returns what the step returned.
 const removeStepLog = configureEffect({
-    onStep: async (name, type, op, path) => {
+    onStep: async (name, type, op, path, step) => {
         const started = performance.now();
         try {
             return await op();
         } finally {
             const { requestId } = requestScope.getStore() ?? {};
-            stepLog.push({ requestId, name, path, ms: performance.now() - started });
+            // The attempt at the nearest Retry: 0 for a first try, and for a step no Retry wraps.
+            const attempt = step.attempts.at(-1) ?? 0;
+            stepLog.push({ requestId, name, path, attempt, ms: performance.now() - started });
         }
     }
 });
@@ -1510,6 +1526,14 @@ assert.deepEqual(
 );
 removeStepLog();
 ```
+
+**Knowing which try a step is, and what it calls.** The fifth argument, `step`, holds what the name does not say, so a hook never has to read it out of `path`:
+
+- `step.attempts` is the attempt at each `Retry` around the step, outermost first. `0` is a first try, so `step.attempts.at(-1) > 0` means a retry. A step no `Retry` wraps has `[]`, and so does a step in an `onExhausted` fallback.
+- `step.branches` is the branch at each `Parallel` around the step, outermost first.
+- `step.meta` is the Command's `meta`. A Command built as `Command(cmdCharge, { external: true })` can be picked out by `step.meta?.external`, without matching its name.
+
+A hook that calls another hook itself passes `path` and `step` on.
 
 A Command that `onBeforeCommand` vetoes never reaches `onStep`, so log a veto where you make it. The run's `Failure` holds what the hook threw. Throw an error with a `code`, as in `Object.assign(new Error('Missing permission.'), { code: 'FORBIDDEN' })`, so the code that calls `runEffect` can answer it, with a 403 say, without matching the message.
 

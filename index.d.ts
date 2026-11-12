@@ -39,9 +39,15 @@ export type AskState<T, E = unknown, Ctx = unknown> = {
 export type RetryOptions = {
     /** Tries after the first, so `2` makes at most 3 calls. A positive integer, 3 by default. */
     retries?: number | undefined;
-    /** Milliseconds before the first retry, 100 by default. */
-    delay?: number | undefined;
-    /** Multiplies the wait before each later retry, so `2` doubles it. 1 by default, the same wait each time. */
+    /**
+     * Milliseconds before the first retry, 100 by default. Or a function that returns the wait before each retry, from
+     * what the last attempt threw and the number of the attempt about to run, 1 for the first retry.
+     */
+    delay?: number | ((error: unknown, attempt: number) => number) | undefined;
+    /**
+     * Multiplies the wait before each later retry, so `2` doubles it. 1 by default, the same wait each time. Leave it
+     * out beside a `delay` function.
+     */
     backoff?: number | undefined;
 };
 
@@ -1318,14 +1324,26 @@ export declare function effectGen<I, Y, R>(
     body: (input: I) => Generator<Y extends Step<any, any> ? Y : YieldStarStep, R, unknown>
 ): (input: I) => Effect<GenValue<R>, EffectError<StepEffectOf<Y>> | EffectError<ReturnedEffect<R>>, GenContext<Y, R>>;
 
+/** What an `onStep` hook is told about its step, beyond its name and path. */
+export type StepInfo = {
+    /** The attempt at each `Retry` on the path, outermost first: 0 is a first try, and `[]` is a step under no `Retry`. */
+    attempts: readonly number[];
+    /** The branch taken at each `Parallel` on the path, outermost first: `[2]` is the third effect given to one `Parallel`. */
+    branches: readonly number[];
+    /** The Command's `meta`, and `undefined` for one that has none and for a `Parallel`. */
+    meta: CommandMeta | undefined;
+};
+
 /**
- * Wraps each Command, and each `Parallel`. Call `op` and return its result; a hook that calls another passes `path` on.
+ * Wraps each Command, and each `Parallel`. Call `op` and return its result; a hook that calls another passes `path`
+ * and `step` on.
  */
 export type StepRunner = (
     name: string,
     type: 'Command' | 'Parallel',
     op: (decision?: ParallelDecision) => Promise<unknown>,
-    path: string
+    path: string,
+    step: StepInfo
 ) => Promise<unknown>;
 
 /**

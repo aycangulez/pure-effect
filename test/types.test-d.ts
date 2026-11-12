@@ -33,6 +33,8 @@ import type {
     EffectContext,
     EffectConfiguration,
     StepRunner,
+    StepInfo,
+    CommandMeta,
     RunWrapper,
     CommandInterceptor,
     TraceEntry,
@@ -941,6 +943,16 @@ const syncGuard: CommandInterceptor = (cmd, ctx) => {
 };
 // @ts-expect-error a wrapper has to pass path on, or its trace cannot replay a Parallel
 const forgetsPath: StepRunner = async (name, type, op) => myStep(name, type, op);
+// the runtime always passes what it knows of the step, so a hook reads it without a check
+const infoStep: StepRunner = async (name, type, op, path, step) => {
+    expectType<StepInfo>(step);
+    expectType<readonly number[]>(step.attempts);
+    expectType<readonly number[]>(step.branches);
+    expectType<CommandMeta | undefined>(step.meta);
+    return myStep(name, type, op, path, step);
+};
+// @ts-expect-error a wrapper has to pass step on, or the hook inside it reads attempts off undefined
+const forgetsStep: StepRunner = async (name, type, op, path) => myStep(name, type, op, path);
 // @ts-expect-error a wrapper has to pass the input on, or a recorder inside it stores none
 const forgetsInput: RunWrapper = async (op, flowName, initialInput, context) => myRun(op, flowName);
 // @ts-expect-error a wrapper has to pass the context on, or a recorder inside it stores none
@@ -1144,6 +1156,16 @@ timeTravel(typedFlow, traceLog.trace);
 declare const fromConfig: { count?: number; flag?: boolean; name?: string; hook?: StepRunner };
 const configured = Command(() => 1);
 Retry(configured, { retries: fromConfig.count, delay: fromConfig.count, backoff: fromConfig.count });
+// a delay function gets what the last attempt threw, unknown as any thrown value is, and the attempt about to run
+Retry(configured, {
+    delay: (error, attempt) => {
+        expectType<unknown>(error);
+        expectType<number>(attempt);
+        return attempt * 100;
+    }
+});
+// @ts-expect-error a delay function returns the wait in milliseconds
+Retry(configured, { delay: () => '1s' });
 expectType<ParallelState<[number], [number], never>>(
     Parallel([Success(42)], { limit: fromConfig.count, settled: undefined })
 );

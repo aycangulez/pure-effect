@@ -173,6 +173,7 @@ Options:
 
 - Per-use, merged over `retries: 3`, `delay: 100` and `backoff: 1`. An option set to `undefined` keeps its default, since that is how an absent config key arrives.
 - Checked as the `Retry` is built, with the names: `retries` must be a positive integer, `delay` and `backoff` finite numbers of 0 or more, and `onExhausted` a function. An undefined `backoff` once made every wait after the first `NaN` milliseconds, which is no wait at all, and an `onExhausted` given the fallback Effect rather than a function returning it meant no fallback.
+- `delay` is a number, or a function of what the last attempt threw and the number of the attempt about to run that returns the wait (`retryWait`). See [A `delay` function](#a-delay-function).
 - A wait is capped at 2^31 - 1 ms, the longest `setTimeout` holds (`delayFor`). A longer one overflowed and fired after 1 ms, so a DX experiment's `delay: 1000, backoff: 10` retried at once by its eighth attempt. The cap is applied to each wait rather than refused as the `Retry` is built, since `backoff` grows the wait past any `delay` that passes.
 - They were checked only when the `Retry` ran, a leftover of global retry options, which merged in at run time. A bad value was then reported after the Commands ahead of it, as a `TypeError`, where a misspelt name was an `EffectTypeError` as the flow was built. A `Retry` built inside a `next` is still checked only when that `next` runs, as its names are, since that is when it exists.
 - The `Retry` keeps a frozen copy of the options it checked, so they cannot change before it runs: a changed `retries: 0` would make `onExhausted` a free catch. `Parallel` keeps its `limit` and `settled` the same way. Until October 2026 a node kept the caller's own object, and the options were checked again on every run, since the caller could change that object after building the node. A node built by hand, without its constructor, is not checked, as no other part of one is.
@@ -186,6 +187,17 @@ Outcomes:
 **Each attempt runs the entire wrapped tree again**, including Commands that already succeeded. A Command's `next` is part of that tree, so `Retry(Command(cmd, next))`, where `next` continues the flow, wraps everything downstream. A booking saga with two such nested retries charged a card nine times. The rule is that a retried Command keeps its default `next`, and the branching happens in a later pipeline step, as the README, the JSDoc and the second `Documented sharp edges` test say.
 
 Catching and retrying are alternatives. A miss caught inside the `cmd` function and returned as a value is an abort, so a `Retry` around it makes one call and never tries again. The README says to catch when the flow should handle the outcome as data, and to let it throw when `Retry` should act on it.
+
+### A `delay` function
+
+The maintainer's choice, made in November 2026 after a DX round. Until then `delay` was a number only, and a function given as one threw with the advice to return the server's answer as data and wait in a Command. An agent building webhook delivery followed that advice and wrote the whole delivery as a `for` loop with a sleep Command, about 35 lines, and used `Retry` for nothing but its plain fetches. A second agent asked for the same thing. The pattern in the README was one paragraph with no code, and it moved the retry out of the one node built for it.
+
+- The function gets `(error, attempt)`: what the last attempt threw, which for a `Retry` around another is the inner one's exhaustion, and the number of the attempt about to run, numbered as in its path, so `1` is the first retry.
+- It replaces `backoff` and is refused beside one as the `Retry` is built. A `backoff` that silently did nothing would read as a wait that grows.
+- It is the caller's code and no I/O, as `onExhausted` is. A throw from it rejects the run, and so does an answer that is not a finite number of 0 or more, as an `EffectTypeError` from `malformed`. Counting either as an I/O fault would let an enclosing `Retry` retry a bug, and treating a bad answer as no wait would call a rate-limited server back at once, which is what a `NaN` wait once did.
+- A replay does not call it, since `fastRetry` replaces waiting and the function is part of the wait. Calling it would hand it the error as a trace holds it, a copy with no `Response` or headers, so a function that reads those would reject a replay of a run that went well. Under `fastRetry: false` a replay waits, and so calls it with that copy.
+- A cancelled branch does not call it either, since that branch waits for nothing and makes no further attempt.
+- The Command's function still decides what is retried, by throwing or returning. A predicate (`retryIf`) was raised in the same round and left for a separate decision, since it changes what an unretried throw becomes.
 
 ### Parallel
 
@@ -223,7 +235,7 @@ Undoing work: a fail-fast `Parallel` drops the values of the branches that succe
 
 ### The three hooks
 
-- `onStep(name, type, op, path)` wraps each Command's execution and each `Parallel`'s branches. It decides whether the Command runs at all, which is how replay suppresses I/O. So a hook that only watches must `await op()` and return its result; one that returns `undefined` after `op` returned a value makes the run reject.
+- `onStep(name, type, op, path, step)` wraps each Command's execution and each `Parallel`'s branches. `step` is what the hook is told about the step beyond its name; see [`onStep` gets the step's attempts, branches and `meta`](#onstep-gets-the-steps-attempts-branches-and-meta). It decides whether the Command runs at all, which is how replay suppresses I/O. So a hook that only watches must `await op()` and return its result; one that returns `undefined` after `op` returned a value makes the run reject.
 - `onRun(op, flowName, initialInput, context)` wraps a whole run, once. `flowName` is the run's `callConfig.flowName`, or `''`, `initialInput` is what the flow was called with when `effectPipe` built it, and `context` is what `Ask` reads, `{}` for a run given none. A hook that calls another passes all three on. What it returns must be a `Success` or `Failure`, or the run rejects with a `TypeError`: `runEffect` once resolved with whatever the hook returned, so in a DX experiment a hook that dropped `op`'s result handed the caller `5`, silently. A hook may still return an outcome of its own without calling `op`, as a maintenance switch does. One that returned while the run was still going is waited for first, as `onStep`'s is, so the run does not go on after `runEffect` has rejected.
 - `onBeforeCommand(command, context)` runs before each Command, and throwing from it vetoes the Command as an abort.
 
@@ -234,6 +246,17 @@ The maintainer's choice, made in October 2026, for 0.22.0. `onRun` was `onRun(ef
 `effect`, the flow's root, had no remaining use. The recording example once read the input off the root, as `effect.initialInput`, and nothing else did; once the input became its own argument, neither example nor the README read `effect`. So the context took its place rather than becoming a fifth argument. A single `run` object holding the name, input and context was weighed and dropped, since it bought little over four named positions.
 
 It breaks every `onRun` hook, since each later argument moves left. `onRun` hooks are few, mostly integrations like the two examples, and 0.22.0 already moved `flowName` out of the context, so the change lands in the release that already asks users to touch them.
+
+### `onStep` gets the step's attempts, branches and `meta`
+
+The maintainer's choice, made in November 2026. `onStep` had `(name, type, op, path)`. In that month's DX round, three of four agents wrote a regex over `path` to find the attempt number for a log line or a retry count, and two invented a name prefix such as `cmdHttp` so a hook could tell an external call from a database read, since `meta` reached only `onBeforeCommand` and the two hooks cannot be matched up under a `Parallel`. Each copied the path's format, which the library owns, the bar `branches` on a Resolver's step had already met (see [A helper ships only when users would otherwise copy a library rule](#a-helper-ships-only-when-users-would-otherwise-copy-a-library-rule)).
+
+- `step` is `{ attempts, branches, meta }`, built by `stepInfo` from the path and the Command.
+- `attempts` is a list, the attempt at each `Retry` on the path, outermost first, as `branches` is for each `Parallel`, since a `Retry` can wrap another. It counts as the path does, so `0` is a first try. A fallback's `rf` segment is not an attempt and adds nothing.
+- `meta` is the Command's own object, the one `onBeforeCommand` reads off the Command, and `undefined` for a `Parallel`.
+- It is one object rather than three more positions, so the next thing a hook needs to know does not move an argument again, as `onRun`'s change did.
+- The context stays out. A hook finds its request through `AsyncLocalStorage`, as the README shows, and `onRun` has the context.
+- The declared `StepRunner` requires `step`, as it does `path`, so a wrapper that drops it does not compile. In JavaScript a hook inside such a wrapper gets `undefined`.
 
 ### Layers
 
@@ -254,7 +277,7 @@ It breaks every `onRun` hook, since each later argument moves left. `onRun` hook
 
 ### Wrapping `onStep`
 
-- **Anything that wraps `onStep` passes `path` on as the fourth argument.** A wrapper that drops it records a trace without paths, which cannot replay a `Parallel`. In TypeScript it no longer compiles, since `StepRunner` declares `path` as present.
+- **Anything that wraps `onStep` passes `path` on as the fourth argument, and `step` as the fifth.** A wrapper that drops `path` records a trace without paths, which cannot replay a `Parallel`, and one that drops `step` leaves the hook inside it reading `attempts` off `undefined`. In TypeScript neither compiles, since `StepRunner` declares both as present. `chainHooks` passes both through every layer, so only a hook that calls another by hand can drop one.
 - Only the innermost hook can pass `op` an argument, the recorded decision, since `chainHooks` hands outer hooks a closure that takes none. Replay's hook is per-call, and so innermost.
 
 ### The recorder only watches
@@ -697,7 +720,7 @@ Why it exists. In the November 2026 DX experiments, four agents each built a pro
 
 - **`assertReproduced` checks the four things a replay of a trace can get wrong at once:** a `TimeParadox` or `ReplayError` in its result, an `unreached` step, an outcome that changed, and no outcome to compare. Every incident test the outcome experiments wrote repeated those checks by hand, and forgetting one passes silently, as `changed ?? null` did (see [A trace can record how the run ended](#a-trace-can-record-how-the-run-ended)). It tells a fault by `name`, as the README tells a test to, since the marks are internal.
 
-`branches` is on every step a Resolver gets, not only in `answers`, since the path's format belongs to the core. `branchesOf` reads it beside `nodesAlong`, and `runParallel`, which writes the `p` segments, names both.
+`branches` is on every step a Resolver gets, not only in `answers`, since the path's format belongs to the core. `branchesOf` reads it, beside `stepInfo`, which hands the same list to `onStep`, and `runParallel`, which writes the `p` segments, names it and `nodesAlong`.
 
 ## Settled decisions
 
@@ -845,7 +868,7 @@ A trace belongs to the version of the flow that recorded it, and nothing resumes
 Given `initialInput` and the recorded results, the flow runs the same way again, so replaying to a step rebuilds its arguments.
 
 - A guardrail vetoes on the context or on `meta`, which `onBeforeCommand` receives.
-- A cache hook would need `meta` handed to `onStep`, not recorded arguments, and nothing has needed one.
+- A cache hook reads `meta`, which `onStep` gets in `step`, not recorded arguments.
 - Recording arguments would double a trace's PII surface for no replay benefit, since arguments are usually the sensitive half of a call.
 
 ### A trace keeps data, not objects
